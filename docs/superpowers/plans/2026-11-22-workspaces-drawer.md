@@ -6,13 +6,13 @@
 
 **Architecture:** `canvas-types` ganha os tipos puros de workspace e a persistência; `canvas-ui` ganha um módulo `workspaces` com o drawer, o formulário e o config, e `Canvas` passa a guardar um `CanvasState` por espaço. Cada espaço mantém seus cartões vivos em memória; apagar um espaço dropar as entidades dele, disparando o `PtySession::Drop` existente. A raiz é escolhida com `cx.prompt_for_paths` do GPUI 0.2.2 (já reexportado pelo auro), com fallback de campo de texto em `Err`.
 
-**Tech Stack:** Rust 2024, auro `=0.1.0-alpha.11` (com `App::assets`), GPUI `=0.2.2` via `auro::gpui`, `gpui-component = "=0.5.1"` (Input/InputState), `gpui-terminal 0.1.0`, `portable-pty 0.9`, `serde`/`serde_json`, `tempfile` (dev).
+**Tech Stack:** Rust 2024, auro `=0.1.0-alpha.12` (com `App::assets`), GPUI `=0.2.2` via `auro::gpui`, `gpui-component = "=0.5.1"` (Input/InputState), `gpui-terminal 0.1.0`, `portable-pty 0.9`, `serde`/`serde_json`, `tempfile` (dev).
 
 **Spec:** `docs/superpowers/specs/2026-11-22-workspaces-drawer-design.md`
 
 ## Global Constraints
 
-- Manter `auro = "=0.1.0-alpha.11"` e não declarar `gpui` diretamente. `gpui-component = "=0.5.1"` é declarado diretamente no manifesto do app, sem wrapper `auro-*`. `App::assets(EmbeddedAssets::new(...))` instala os SVGs embutidos.
+- Manter `auro = "=0.1.0-alpha.12"` e não declarar `gpui` diretamente. `gpui-component = "=0.5.1"` é declarado diretamente no manifesto do app, sem wrapper `auro-*`. `App::assets(EmbeddedAssets::new(...))` instala os SVGs embutidos.
 - Nenhum crate novo de diálogo: o seletor é `cx.prompt_for_paths` com `PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some(...) }`; retorno `oneshot::Receiver<Result<Option<Vec<PathBuf>>>>`; `None` = cancelar, `Err` = fallback de texto.
 - `PathPromptOptions` não aceita diretório inicial; não fingir que aceita.
 - Runtime sem webview, HTML, CSS ou JavaScript.
@@ -138,7 +138,7 @@ No botão de raiz, chamar `cx.prompt_for_paths(PathPromptOptions { files: false,
 
 - [ ] **Step 2: RED → integrar → GREEN**
 
-Cartões agrupados por `WorkspaceId`; `Render` desenha o drawer à esquerda e, à direita, só os cartões do espaço ativo; trocar de espaço apenas esconde; toolbar "Adicionar terminal" desabilitada sem espaço ativo; contagem por espaço vem do `CanvasState` dele. **Atualização alpha.11:** o app passa a fixar `auro = "=0.1.0-alpha.11"`, e `run()` instala `App::assets(EmbeddedAssets::new(&[("star.svg", include_bytes!("../../icons/star.svg")), ...]))`; o drawer volta a usar `svg().path("star.svg")` em vez dos PNGs incorporados. Após cada mutação do store, chamar `drawer.set_store(...)`; o `LoadOutcome` recebido é autoritativo para o banner.
+Cartões agrupados por `WorkspaceId`; `Render` desenha o drawer à esquerda e, à direita, só os cartões do espaço ativo; trocar de espaço apenas esconde; toolbar "Adicionar terminal" desabilitada sem espaço ativo; contagem por espaço vem do `CanvasState` dele. **Atualização alpha.12:** o app fixa `auro = "=0.1.0-alpha.12"`, e `run()` instala `App::assets(EmbeddedAssets::new(&[("star.svg", include_bytes!("../../icons/star.svg")), ...]))`; o drawer usa `svg().path("star.svg")` sem I/O de filesystem em runtime. Após cada mutação do store, chamar `drawer.set_store(...)`; o `LoadOutcome` recebido é autoritativo para o banner.
 
 - [ ] **Step 3: Apagar espaço**
 

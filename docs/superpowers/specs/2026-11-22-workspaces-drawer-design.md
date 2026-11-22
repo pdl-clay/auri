@@ -48,7 +48,7 @@ A referência visual é a imagem enviada pelo usuário: coluna escura de ~200 px
 
 ## Restrições e evidências
 
-- O app roda sobre auro `0.1.0-alpha.10`, com `gpui = "=0.2.2"` fixado pelo framework. Manter o pin exato no manifesto.
+- O app roda sobre auro `0.1.0-alpha.12`, com `gpui = "=0.2.2"` fixado pelo framework. Manter o pin exato no manifesto.
 - O seletor de pasta **já existe** no release atual: `prompt_for_paths` do GPUI 0.2.2, reexportado como `auro::gpui::PathPromptOptions` + `cx.prompt_for_paths(...)`. Confirmado pelo líder da framework no [issue pdl-clay/auro#107](https://github.com/pdl-clay/auro/issues/107) e verificado no código local (`gpui-0.2.2/src/app.rs:1116`, `platform.rs:1330`, com backends Linux/macOS/Windows).
 - Uso: `PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some(...) }`. Retorno: `oneshot::Receiver<Result<Option<Vec<PathBuf>>>>`; `None` é cancelamento, `Err` é falha ao abrir o diálogo.
 - Limitação real da API: não aceita diretório inicial. Cancelamento não deve gerar espaço nem erro.
