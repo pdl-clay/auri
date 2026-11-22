@@ -1,4 +1,5 @@
 //! A draggable, resizable frame around one PTY-backed terminal.
+use std::path::PathBuf;
 
 use auro::gpui::{
     App, Bounds, Context, CursorStyle, Div, DragMoveEvent, Edges, Entity, EntityId, MouseButton,
@@ -16,6 +17,7 @@ use crate::pty::PtySession;
 const FONT_PX: f32 = 13.0;
 const LINE_HEIGHT: f32 = 1.2;
 const TITLE_HEIGHT: f32 = 32.0;
+const PATH_HEIGHT: f32 = 22.0;
 const HANDLE: f32 = 12.0;
 const MIN_WIDTH: f32 = 320.0;
 const MIN_HEIGHT: f32 = 200.0;
@@ -30,7 +32,7 @@ pub fn grid_size(width_px: f32, height_px: f32, font_px: f32, line_height: f32) 
 }
 
 pub(crate) fn terminal_grid(bounds: &Bounds<Pixels>) -> (u16, u16) {
-    let content_height = (f32::from(bounds.size.height) - TITLE_HEIGHT).max(1.0);
+    let content_height = (f32::from(bounds.size.height) - TITLE_HEIGHT - PATH_HEIGHT).max(1.0);
     grid_size(f32::from(bounds.size.width), content_height, FONT_PX, LINE_HEIGHT)
 }
 
@@ -104,6 +106,7 @@ pub struct TerminalCard {
     pub selected: bool,
     pub terminal: Entity<TerminalView>,
     canvas: WeakEntity<Canvas>,
+    root: PathBuf,
     pty: PtySession,
     drag: Option<DragStart>,
     view_zoom: f32,
@@ -117,6 +120,7 @@ impl TerminalCard {
         workspace_id: WorkspaceId,
         bounds: Bounds<Pixels>,
         canvas: WeakEntity<Canvas>,
+        root: PathBuf,
         mut pty: PtySession,
         grid: (u16, u16),
         cx: &mut Context<Self>,
@@ -169,6 +173,7 @@ impl TerminalCard {
             canvas,
             pty,
             drag: None,
+            root,
             view_zoom: 1.0,
             view_offset_x: 0.0,
             view_offset_y: 0.0,
@@ -311,24 +316,6 @@ impl TerminalCard {
             DragMode::ResizeBottomLeft => handle.left_0().bottom_0().w(px(18.0)).h(px(18.0)),
             DragMode::ResizeBottomRight => handle.right_0().bottom_0().w(px(18.0)).h(px(18.0)),
         };
-        if matches!(
-            mode,
-            DragMode::ResizeTopLeft
-                | DragMode::ResizeTopRight
-                | DragMode::ResizeBottomLeft
-                | DragMode::ResizeBottomRight
-        ) {
-            handle = handle.child(
-                div()
-                    .absolute()
-                    .left(px(5.0))
-                    .top(px(5.0))
-                    .w(px(7.0))
-                    .h(px(7.0))
-                    .rounded_full()
-                    .bg(rgb(0x7d90b0)),
-            );
-        }
         handle
             .on_mouse_down(
                 MouseButton::Left,
@@ -461,6 +448,18 @@ impl Render for TerminalCard {
                             this.apply_drag(event, entity_id, cx);
                         }),
                     ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .h(px(PATH_HEIGHT))
+                    .px_2()
+                    .overflow_hidden()
+                    .bg(rgb(0x171c27))
+                    .text_xs()
+                    .text_color(rgb(0x93a0b5))
+                    .child(self.root.to_string_lossy().into_owned()),
             )
             .child(div().flex_1().min_h_0().child(self.terminal.clone()))
             .child(Self::resize_handle(id, DragMode::ResizeLeft, entity_id, cx))

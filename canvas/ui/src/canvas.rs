@@ -345,7 +345,7 @@ impl Canvas {
         self.error = None;
         let canvas = cx.entity().downgrade();
         let card = cx.new(|cx| {
-            TerminalCard::new(id, workspace_id, bounds, canvas.clone(), pty, (cols, rows), cx)
+            TerminalCard::new(id, workspace_id, bounds, canvas.clone(), root.clone(), pty, (cols, rows), cx)
         });
         card.read(cx).terminal.read(cx).focus_handle().focus(window);
         let (zoom, offset_x, offset_y) = (self.zoom, self.offset_x, self.offset_y);
