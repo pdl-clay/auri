@@ -20,12 +20,22 @@ pub fn run() {
             ("star.svg", include_bytes!("../../icons/star.svg")),
             ("folder.svg", include_bytes!("../../icons/folder.svg")),
             ("bolt.svg", include_bytes!("../../icons/bolt.svg")),
-            ("code.svg", include_bytes!("../../icons/code.svg")),
+            ("globe.svg", include_bytes!("../../icons/globe.svg")),
             ("plus.svg", include_bytes!("../../icons/plus.svg")),
             ("search.svg", include_bytes!("../../icons/search.svg")),
             ("x.svg", include_bytes!("../../icons/x.svg")),
         ]))
-        .setup(|cx, _| gpui_component::init(cx))
+        .setup(|cx, _| {
+            gpui_component::init(cx);
+            gpui_component::theme::Theme::change(
+                gpui_component::theme::ThemeMode::Dark,
+                None,
+                cx,
+            );
+            let theme = gpui_component::theme::Theme::global_mut(cx);
+            theme.radius = auro::gpui::px(8.);
+            theme.radius_lg = auro::gpui::px(14.);
+        })
         .root_with("main", move |window, cx| {
             let view = cx.new(|cx| canvas::Canvas::new(store.clone(), load.clone(), cx));
             view.update(cx, |canvas, cx| canvas.bind_actions(cx));

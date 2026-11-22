@@ -423,7 +423,7 @@ fn monitor(count: usize) -> impl IntoElement {
 /// caching form state here. The input states are reused, never recreated.
 fn workspace_dialog(
     dialog: Dialog,
-    _window: &mut Window,
+    window: &mut Window,
     cx: &mut App,
     drawer: &WeakEntity<WorkspaceDrawer>,
 ) -> Dialog {
@@ -453,6 +453,7 @@ fn workspace_dialog(
                 .child("Novo espaço de trabalho"),
         )
         .w(px(440.))
+        .margin_top((window.viewport_size().height - px(320.0)) / 2.0)
         .overlay(true)
         .rounded(px(RADIUS_DIALOG))
         .border_1()

@@ -324,7 +324,7 @@ impl Canvas {
 }
 
 impl Render for Canvas {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let active = self.store.active();
         let selected = active
             .and_then(|id| self.store.workspaces().iter().find(|item| item.id == id))
@@ -447,6 +447,7 @@ impl Render for Canvas {
                             .children(cards),
                     ),
             )
+            .children(gpui_component::Root::render_dialog_layer(window, cx))
     }
 }
 
