@@ -355,6 +355,7 @@ impl Canvas {
         }
     }
 
+
     pub fn select(&mut self, workspace_id: WorkspaceId, id: TerminalId, cx: &mut Context<Self>) {
         let Some(workspace) = self.store.workspace_mut(workspace_id) else {
             return;
@@ -364,7 +365,21 @@ impl Canvas {
             cx.notify();
         }
         let _ = workspace;
-        self.sync_card_selection(workspace_id, cx);
+        // The click handler is invoked while the clicked TerminalCard is already
+        // being updated by GPUI; updating it again here would panic. Apply the
+        // painted flags once the current dispatch has finished.
+        let store = self.store.clone();
+        let cards = self.cards.get(&workspace_id).cloned().unwrap_or_default();
+        cx.defer(move |cx| {
+            let selected = store
+                .workspaces()
+                .iter()
+                .find(|workspace| workspace.id == workspace_id)
+                .and_then(|workspace| workspace.canvas.selected());
+            for (card_id, card) in cards {
+                card.update(cx, |card, cx| card.set_selected(Some(card_id) == selected, cx));
+            }
+        });
     }
 
     pub fn mark_exited(&mut self, workspace_id: WorkspaceId, id: TerminalId, cx: &mut Context<Self>) {
