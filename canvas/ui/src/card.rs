@@ -380,7 +380,7 @@ impl Render for TerminalCard {
             .on_scroll_wheel(cx.listener(move |_, event: &ScrollWheelEvent, _, cx| {
                 let (dx, dy) = scroll_delta(event);
                 let _ = scroll_canvas.update(cx, |canvas, cx| {
-                    canvas.apply_scroll(dx, dy, event.modifiers.control, event.modifiers.shift, cx)
+                    canvas.apply_scroll(event.position, dx, dy, event.modifiers.control, event.modifiers.shift, cx)
                 });
                 cx.stop_propagation();
             }))

@@ -238,6 +238,7 @@ impl Canvas {
 
     pub fn apply_scroll(
         &mut self,
+        position: Point<Pixels>,
         dx: f32,
         dy: f32,
         control: bool,
@@ -245,8 +246,19 @@ impl Canvas {
         cx: &mut Context<Self>,
     ) {
         if control {
-            let factor = zoom_factor(dy);
-            self.zoom = (self.zoom * factor).clamp(0.25, 3.0);
+            let local_x = f32::from(position.x) - DRAWER_WIDTH;
+            let local_y = f32::from(position.y);
+            let (zoom, offset_x, offset_y) = zoom_at(
+                self.zoom,
+                self.offset_x,
+                self.offset_y,
+                local_x,
+                local_y,
+                zoom_factor(dy),
+            );
+            self.zoom = zoom;
+            self.offset_x = offset_x;
+            self.offset_y = offset_y;
         } else if shift {
             self.offset_x -= dx + dy;
         } else {
@@ -450,6 +462,21 @@ fn zoom_factor(dy: f32) -> f32 {
     (1.0 + dy * 0.0015).clamp(0.8, 1.25)
 }
 
+/// Zoom around a canvas-local point so the world position under the cursor stays put.
+fn zoom_at(
+    zoom: f32,
+    offset_x: f32,
+    offset_y: f32,
+    local_x: f32,
+    local_y: f32,
+    factor: f32,
+) -> (f32, f32, f32) {
+    let next = (zoom * factor).clamp(0.25, 3.0);
+    let world_x = (local_x - offset_x) / zoom;
+    let world_y = (local_y - offset_y) / zoom;
+    (next, local_x - world_x * next, local_y - world_y * next)
+}
+
 impl Render for Canvas {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let active = self.store.active();
@@ -512,7 +539,7 @@ impl Render for Canvas {
                             .min_h_0()
                             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
                                 let (dx, dy) = scroll_delta(event);
-                                this.apply_scroll(dx, dy, event.modifiers.control, event.modifiers.shift, cx);
+                                this.apply_scroll(event.position, dx, dy, event.modifiers.control, event.modifiers.shift, cx);
                                 cx.stop_propagation();
                             }))
                             .child(
@@ -692,6 +719,14 @@ mod tests {
     fn zoom_scroll_direction_is_inverted() {
         assert!(zoom_factor(-110.0) < 1.0);
         assert!(zoom_factor(110.0) > 1.0);
+    }
+
+    #[test]
+    fn zoom_keeps_world_point_under_cursor() {
+        let (zoom, offset_x, offset_y) = zoom_at(1.0, 0.0, 0.0, 400.0, 300.0, 1.25);
+        assert_eq!(zoom, 1.25);
+        assert_eq!((400.0 - offset_x) / zoom, 400.0);
+        assert_eq!((300.0 - offset_y) / zoom, 300.0);
     }
 
     fn groups_for(store: &WorkspaceStore) -> CardGroups {
