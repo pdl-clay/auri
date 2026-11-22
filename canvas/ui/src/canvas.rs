@@ -5,9 +5,13 @@ use std::path::PathBuf;
 
 use auro::gpui::{
     Bounds, Context, Entity, MouseButton, MouseDownEvent, Point, Render, Size, Window, canvas,
-    fill, px, rgb,
+    fill, px, rgb, svg,
 };
 use auro::prelude::*;
+use gpui_component::{
+    Disableable,
+    button::{Button as ComponentButton, ButtonVariant, ButtonVariants as _},
+};
 use canvas_types::{CanvasState, TerminalId, WorkspaceIcon, WorkspaceId, WorkspaceState, WorkspaceStore};
 
 use crate::card::{TerminalCard, terminal_grid};
@@ -323,18 +327,43 @@ impl Canvas {
     }
 }
 
+fn canvas_icon(path: &'static str) -> impl IntoElement {
+    svg()
+        .path(path)
+        .w(px(16.0))
+        .h(px(16.0))
+        .text_color(rgb(0x93a0b5))
+}
+
 impl Render for Canvas {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let active = self.store.active();
         let selected = active
             .and_then(|id| self.store.workspaces().iter().find(|item| item.id == id))
             .and_then(|workspace| workspace.canvas.selected());
-        let add = Button::new("add-terminal", "Adicionar terminal");
+        let add = ComponentButton::new("add-terminal")
+            .tooltip("Adicionar terminal")
+            .child(canvas_icon("terminal.svg"))
+            .w(px(28.0))
+            .h(px(28.0))
+            .p_0()
+            .rounded(px(8.0))
+            .with_variant(ButtonVariant::Ghost);
         let add = if active.is_some() {
             add.on_click(cx.listener(|this, _, window, cx| this.add_terminal(window, cx)))
         } else {
-            add
+            add.disabled(true)
         };
+        let remove = ComponentButton::new("remove-selected")
+            .tooltip("Apagar selecionado")
+            .child(canvas_icon("trash.svg"))
+            .w(px(28.0))
+            .h(px(28.0))
+            .p_0()
+            .rounded(px(8.0))
+            .with_variant(ButtonVariant::Ghost)
+            .disabled(selected.is_none())
+            .on_click(cx.listener(|this, _, _, cx| this.remove_selected(cx)));
         let cards: Vec<_> = active
             .and_then(|id| self.cards.get(&id))
             .map(|group| {
@@ -370,33 +399,6 @@ impl Render for Canvas {
                     .flex()
                     .flex_col()
                     .min_h_0()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .p_2()
-                            .bg(rgb(0x1a1d26))
-                            .child(add)
-                            .child(Button::new("remove-selected", "Apagar selecionado").on_click(
-                                cx.listener(|this, _, _, cx| {
-                                    this.remove_selected(cx);
-                                }),
-                            ))
-                            .when_some(selected, |bar, id| {
-                                bar.child(format!("Selecionado: Terminal {id}"))
-                            })
-                            .when(active.is_none(), |bar| {
-                                bar.child(
-                                    div()
-                                        .text_xs()
-                                        .child("Crie um espaço de trabalho para adicionar terminais."),
-                                )
-                            })
-                            .children(self.error.iter().map(|message| {
-                                div().text_color(rgb(0xff8888)).child(message.clone())
-                            })),
-                    )
                     .child(
                         div()
                             .relative()
@@ -447,6 +449,56 @@ impl Render for Canvas {
                             .children(cards),
                     ),
             )
+            .child(
+                div()
+                    .absolute()
+                    .top(px(12.0))
+                    .right(px(12.0))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .p_1()
+                    .rounded(px(20.0))
+                    .bg(rgb(0x1b2130))
+                    .border_1()
+                    .border_color(rgb(0x2b3547))
+                    .when_some(selected, |island, id| {
+                        island.child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(0x93a0b5))
+                                .child(format!("Terminal {id}")),
+                        )
+                    })
+                    .child(add)
+                    .child(remove),
+            )
+            .when(active.is_none(), |pane| {
+                pane.child(
+                    div()
+                        .absolute()
+                        .top(px(52.0))
+                        .right(px(12.0))
+                        .text_xs()
+                        .text_color(rgb(0x93a0b5))
+                        .child("Crie um espaço de trabalho para adicionar terminais."),
+                )
+            })
+            .children(self.error.iter().map(|message| {
+                div()
+                    .absolute()
+                    .top(px(52.0))
+                    .right(px(12.0))
+                    .rounded(px(8.0))
+                    .bg(rgb(0x1b2130))
+                    .border_1()
+                    .border_color(rgb(0x2b3547))
+                    .p_2()
+                    .text_xs()
+                    .text_color(rgb(0xf08a8a))
+                    .child(message.clone())
+            }))
             .children(gpui_component::Root::render_dialog_layer(window, cx))
     }
 }

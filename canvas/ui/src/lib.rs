@@ -24,6 +24,8 @@ pub fn run() {
             ("plus.svg", include_bytes!("../../icons/plus.svg")),
             ("search.svg", include_bytes!("../../icons/search.svg")),
             ("x.svg", include_bytes!("../../icons/x.svg")),
+            ("terminal.svg", include_bytes!("../../icons/terminal.svg")),
+            ("trash.svg", include_bytes!("../../icons/trash.svg")),
         ]))
         .setup(|cx, _| {
             gpui_component::init(cx);
