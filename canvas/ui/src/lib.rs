@@ -6,6 +6,7 @@
 //! edit under the save-to-visible target.
 
 mod services;
+pub mod pty;
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
