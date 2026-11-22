@@ -102,12 +102,23 @@ fn active_spawn_target(
     Ok((workspace.id, id, workspace.root.clone()))
 }
 
-fn terminal_owner(store: &WorkspaceStore, id: TerminalId) -> Option<WorkspaceId> {
-    store
-        .workspaces()
-        .iter()
-        .find(|workspace| workspace.canvas.terminals().iter().any(|item| item.id == id))
-        .map(|workspace| workspace.id)
+/// Remove a terminal from exactly one workspace; ids are only unique within a workspace.
+fn remove_terminal_state(
+    store: &mut WorkspaceStore,
+    groups: &mut CardGroups,
+    workspace_id: WorkspaceId,
+    id: TerminalId,
+) -> bool {
+    let Some(workspace) = store.workspace_mut(workspace_id) else {
+        return false;
+    };
+    if workspace.canvas.remove(id).is_none() {
+        return false;
+    }
+    if let Some(cards) = groups.get_mut(&workspace_id) {
+        cards.retain(|(card_id, _)| *card_id != id);
+    }
+    true
 }
 
 /// Owns the workspace store, its drawer and every workspace' terminal cards.
@@ -243,7 +254,7 @@ impl Canvas {
         self.error = None;
         let canvas = cx.entity().downgrade();
         let card = cx.new(|cx| {
-            TerminalCard::new(id, bounds, canvas.clone(), pty, (cols, rows), cx)
+            TerminalCard::new(id, workspace_id, bounds, canvas.clone(), pty, (cols, rows), cx)
         });
         card.read(cx).terminal.read(cx).focus_handle().focus(window);
         self.cards.entry(workspace_id).or_default().push((id, card));
@@ -266,19 +277,8 @@ impl Canvas {
         });
     }
 
-    pub fn remove(&mut self, id: TerminalId) {
-        let Some(workspace_id) = terminal_owner(&self.store, id) else {
-            return;
-        };
-        let Some(workspace) = self.store.workspace_mut(workspace_id) else {
-            return;
-        };
-        if workspace.canvas.remove(id).is_none() {
-            return;
-        }
-        if let Some(cards) = self.cards.get_mut(&workspace_id) {
-            cards.retain(|(card_id, _)| *card_id != id);
-        }
+    pub fn remove(&mut self, workspace_id: WorkspaceId, id: TerminalId) {
+        remove_terminal_state(&mut self.store, &mut self.cards, workspace_id, id);
     }
 
     pub fn remove_selected(&mut self, cx: &mut Context<Self>) {
@@ -292,15 +292,12 @@ impl Canvas {
         else {
             return;
         };
-        self.remove(id);
+        self.remove(workspace_id, id);
         self.sync_drawer(cx);
         cx.notify();
     }
 
-    pub fn select(&mut self, id: TerminalId, cx: &mut Context<Self>) {
-        let Some(workspace_id) = terminal_owner(&self.store, id) else {
-            return;
-        };
+    pub fn select(&mut self, workspace_id: WorkspaceId, id: TerminalId, cx: &mut Context<Self>) {
         let Some(workspace) = self.store.workspace_mut(workspace_id) else {
             return;
         };
@@ -310,10 +307,7 @@ impl Canvas {
         }
     }
 
-    pub fn mark_exited(&mut self, id: TerminalId, cx: &mut Context<Self>) {
-        let Some(workspace_id) = terminal_owner(&self.store, id) else {
-            return;
-        };
+    pub fn mark_exited(&mut self, workspace_id: WorkspaceId, id: TerminalId, cx: &mut Context<Self>) {
         if let Some(workspace) = self.store.workspace_mut(workspace_id) {
             workspace.canvas.mark_exited(id);
         }
@@ -347,12 +341,13 @@ impl Render for Canvas {
                     .iter()
                     .map(|(id, card)| {
                         let id = *id;
+                        let workspace_id = active.unwrap();
                         div()
                             .id(("card-wrapper", id))
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                                    this.select(id, cx);
+                                    this.select(workspace_id, id, cx);
                                 }),
                             )
                             .child(card.clone())
@@ -566,5 +561,21 @@ mod tests {
         assert!(snapshot.workspaces()[0].canvas.terminals().is_empty());
         assert_eq!(snapshot.active(), Some(workspace.id));
         assert_eq!(store.workspaces()[0].canvas.terminals().len(), 1);
+    }
+
+    #[test]
+    fn removing_colliding_terminal_id_affects_only_its_workspace() {
+        let mut store = WorkspaceStore::new();
+        let first = store.add("A".into(), WorkspaceIcon::Star, PathBuf::from("/a"));
+        let second = store.add("B".into(), WorkspaceIcon::Folder, PathBuf::from("/b"));
+        let first_id = store.workspace_mut(first.id).unwrap().canvas.add().id;
+        let second_id = store.workspace_mut(second.id).unwrap().canvas.add().id;
+        assert_eq!((first_id, second_id), (1, 1));
+        let mut groups = groups_for(&store);
+
+        assert!(remove_terminal_state(&mut store, &mut groups, second.id, second_id));
+
+        assert_eq!(store.workspace_mut(first.id).unwrap().canvas.terminals().len(), 1);
+        assert!(store.workspace_mut(second.id).unwrap().canvas.terminals().is_empty());
     }
 }

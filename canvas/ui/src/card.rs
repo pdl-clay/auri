@@ -5,7 +5,7 @@ use auro::gpui::{
     Point, Render, Stateful, WeakEntity, Window, div, px, rgb,
 };
 use auro::prelude::*;
-use canvas_types::TerminalId;
+use canvas_types::{TerminalId, WorkspaceId};
 use gpui_terminal::{TerminalConfig, TerminalView};
 use portable_pty::PtySize;
 
@@ -59,6 +59,7 @@ struct DragStart {
 /// Visual card for a single terminal, owning the PTY and its emulator view.
 pub struct TerminalCard {
     pub id: TerminalId,
+    pub workspace_id: WorkspaceId,
     pub bounds: Bounds<Pixels>,
     pub exited: bool,
     pub terminal: Entity<TerminalView>,
@@ -70,6 +71,7 @@ pub struct TerminalCard {
 impl TerminalCard {
     pub fn new(
         id: TerminalId,
+        workspace_id: WorkspaceId,
         bounds: Bounds<Pixels>,
         canvas: WeakEntity<Canvas>,
         mut pty: PtySession,
@@ -83,6 +85,7 @@ impl TerminalCard {
         let reader = std::mem::replace(&mut pty.reader, Box::new(std::io::empty()));
         let this = cx.weak_entity();
         let exit_canvas = canvas.clone();
+        let exit_workspace = workspace_id;
 
         let terminal = cx.new(move |cx| {
             let config = TerminalConfig {
@@ -105,13 +108,16 @@ impl TerminalCard {
                     }
                 })
                 .with_exit_callback(move |_window, cx| {
-                    let _ = exit_canvas.update(cx, |canvas, cx| canvas.mark_exited(id, cx));
+                    let _ = exit_canvas.update(cx, |canvas, cx| {
+                        canvas.mark_exited(exit_workspace, id, cx)
+                    });
                     let _ = this.update(cx, |card, cx| card.set_exited(cx));
                 })
         });
 
         Self {
             id,
+            workspace_id,
             bounds,
             exited: false,
             terminal,
@@ -215,6 +221,7 @@ impl TerminalCard {
 impl Render for TerminalCard {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let id = self.id;
+        let workspace_id = self.workspace_id;
         let exited = self.exited;
         let canvas = self.canvas.clone();
         let entity_id = cx.entity_id();
@@ -257,7 +264,7 @@ impl Render for TerminalCard {
                             .px_1()
                             .on_click(cx.listener(move |_, _, _, cx| {
                                 let _ = canvas.update(cx, |canvas, cx| {
-                                    canvas.remove(id);
+                                    canvas.remove(workspace_id, id);
                                     cx.notify();
                                 });
                             }))

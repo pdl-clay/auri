@@ -294,19 +294,37 @@ impl WorkspaceDrawer {
         cx.notify();
     }
 
+
     /// "Recomeçar": back up the damaged config and install a fresh initial store.
     fn restart(&mut self, cx: &mut Context<Self>) {
-        self.load = match config::restart(&mut self.store) {
-            Ok(()) => {
-                self.set_store(self.store.clone());
-                LoadOutcome::Loaded
+        let previous = self.store.clone();
+        let result = config::restart(&mut self.store).map_err(|error| error.to_string());
+        let (load, replaced) = apply_restart_result(&mut self.store, previous, result);
+        self.load = load;
+        if replaced {
+            self.set_store(self.store.clone());
+            if let Some(handler) = &self.restart_handler {
+                handler(&self.store, cx);
             }
-            Err(error) => LoadOutcome::Corrupt(format!("Recomeçar falhou: {error}")),
-        };
-        if let Some(handler) = &self.restart_handler {
-            handler(&self.store, cx);
         }
         cx.notify();
+    }
+}
+/// Apply a restart attempt: only a successful write may replace the store in memory.
+fn apply_restart_result(
+    store: &mut WorkspaceStore,
+    previous: WorkspaceStore,
+    result: Result<(), String>,
+) -> (LoadOutcome, bool) {
+    match result {
+        Ok(()) => (LoadOutcome::Loaded, true),
+        Err(error) => {
+            *store = previous;
+            (
+                LoadOutcome::Corrupt(format!("Recomeçar falhou: {error}")),
+                false,
+            )
+        }
     }
 }
 
@@ -522,7 +540,10 @@ impl Render for WorkspaceDrawer {
 
 #[cfg(test)]
 mod tests {
-    use super::filter_matches;
+    use canvas_types::{WorkspaceIcon, WorkspaceStore};
+    use std::path::PathBuf;
+
+    use super::{LoadOutcome, apply_restart_result, filter_matches};
 
     #[test]
     fn empty_query_matches_every_name() {
@@ -542,5 +563,30 @@ mod tests {
     fn filter_does_not_normalize_accents() {
         assert!(filter_matches("São Paulo", "são"));
         assert!(!filter_matches("Sao Paulo", "são"));
+    }
+
+    #[test]
+    fn failed_restart_preserves_previous_store_and_cards() {
+        let mut store = WorkspaceStore::new();
+        let workspace = store.add(
+            "A".into(),
+            WorkspaceIcon::Star,
+            PathBuf::from("/var/tmp/auro-e2e/rootA"),
+        );
+        store.workspace_mut(workspace.id).unwrap().canvas.add();
+        let previous = store.clone();
+
+        // config::restart replaces the store in memory before a failing write.
+        store = WorkspaceStore::new();
+        let (outcome, replaced) =
+            apply_restart_result(&mut store, previous.clone(), Err("write failed".into()));
+
+        assert_eq!(
+            outcome,
+            LoadOutcome::Corrupt("Recomeçar falhou: write failed".into())
+        );
+        assert!(!replaced);
+        assert_eq!(store, previous);
+        assert_eq!(store.workspaces()[0].canvas.terminals().len(), 1);
     }
 }
