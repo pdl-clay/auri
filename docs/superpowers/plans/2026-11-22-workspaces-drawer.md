@@ -6,19 +6,19 @@
 
 **Architecture:** `canvas-types` ganha os tipos puros de workspace e a persistência; `canvas-ui` ganha um módulo `workspaces` com o drawer, o formulário e o config, e `Canvas` passa a guardar um `CanvasState` por espaço. Cada espaço mantém seus cartões vivos em memória; apagar um espaço dropar as entidades dele, disparando o `PtySession::Drop` existente. A raiz é escolhida com `cx.prompt_for_paths` do GPUI 0.2.2 (já reexportado pelo auro), com fallback de campo de texto em `Err`.
 
-**Tech Stack:** Rust 2024, auro `=0.1.0-alpha.10`, GPUI `=0.2.2` via `auro::gpui`, `gpui-terminal 0.1.0`, `portable-pty 0.9`, `serde`/`serde_json` (novos, sem versão solta), `tempfile` (dev).
+**Tech Stack:** Rust 2024, auro `=0.1.0-alpha.10`, GPUI `=0.2.2` via `auro::gpui`, `gpui-component = "=0.5.1"` (Input/InputState), `gpui-terminal 0.1.0`, `portable-pty 0.9`, `serde`/`serde_json`, `tempfile` (dev).
 
 **Spec:** `docs/superpowers/specs/2026-11-22-workspaces-drawer-design.md`
 
 ## Global Constraints
 
-- Manter `auro = "=0.1.0-alpha.10"` e não declarar `gpui` diretamente.
+- Manter `auro = "=0.1.0-alpha.10"` e não declarar `gpui` diretamente. `gpui-component = "=0.5.1"` é declarado diretamente no manifesto do app, sem wrapper `auro-*`.
 - Nenhum crate novo de diálogo: o seletor é `cx.prompt_for_paths` com `PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some(...) }`; retorno `oneshot::Receiver<Result<Option<Vec<PathBuf>>>>`; `None` = cancelar, `Err` = fallback de texto.
 - `PathPromptOptions` não aceita diretório inicial; não fingir que aceita.
 - Runtime sem webview, HTML, CSS ou JavaScript.
 - Sem renomear/editar espaço, sem reordenar, sem diálogo de confirmação para apagar.
 - Config em `XDG_CONFIG_HOME` (ou `~/.config`)/`auro-canvas/workspaces.json`; arquivo corrompido é preservado, nunca apagado em silêncio.
-- Paleta de ícones fixa: estrela, pasta, raio, código, globo. Sem dependência de emoji ou SVG.
+- Paleta de ícones fixa: estrela, pasta, raio, código, globo. Usar `auro::gpui::svg()` com cinco arquivos `.svg` empacotados em `canvas/icons/`; sem crate de ícones e sem emoji.
 - Tipos de workspace ficam em `canvas-types`, sem GPUI nem auro.
 
 ## Review Focus
@@ -94,28 +94,28 @@ Expected: novo teste falha antes, passa depois; testes de group-kill continuam v
 ### Task 3: Drawer, filtro e formulário com seletor nativo
 
 **Files:**
-- Create: `canvas/ui/src/workspaces.rs`, `canvas/ui/src/text_field.rs`
-- Modify: `canvas/ui/src/lib.rs`
+- Create: `canvas/ui/src/workspaces.rs`, `canvas/icons/star.svg`, `canvas/icons/folder.svg`, `canvas/icons/bolt.svg`, `canvas/icons/code.svg`, `canvas/icons/globe.svg`
+- Modify: `canvas/ui/Cargo.toml`, `canvas/ui/src/lib.rs`
 
 **Interfaces:**
 - Consumes: `WorkspaceStore`/`WorkspaceState`/`WorkspaceIcon` (Task 1), `config::LoadOutcome` (Task 1).
-- Produces: `pub struct WorkspaceDrawer` com `pub fn new(load: LoadOutcome) -> Self`, `pub fn filter(&self) -> &str`, `pub fn set_filter(&mut self, value: String)`, `pub fn open_form(&mut self)`, `pub fn close_form(&mut self)`, `pub fn set_form_name(&mut self, value: String)`, `pub fn set_form_icon(&mut self, icon: WorkspaceIcon)`, `pub fn set_form_root(&mut self, root: Option<PathBuf>)`, `pub fn set_form_error(&mut self, error: Option<String>)`, `pub fn is_form_open(&self) -> bool`; `impl Render for WorkspaceDrawer`. O drawer emite ações para o `Canvas` via callbacks ou eventos GPUI — o builder escolhe, mas deve permitir `create`, `delete` e `select` sem referência circular.
+- Produces: `pub enum DrawerAction { Create { name: String, icon: WorkspaceIcon, root: PathBuf }, Delete(WorkspaceId), Select(WorkspaceId) }` e `pub struct WorkspaceDrawer` com `pub fn new(load: LoadOutcome) -> Self`, `pub fn on_action(&mut self, handler: impl Fn(DrawerAction) + 'static)`, `pub fn filter(&self) -> &str`, `pub fn set_filter(&mut self, value: String)`, `pub fn open_form(&mut self)`, `pub fn close_form(&mut self)`, `pub fn set_form_name(&mut self, value: String)`, `pub fn set_form_icon(&mut self, icon: WorkspaceIcon)`, `pub fn set_form_root(&mut self, root: Option<PathBuf>)`, `pub fn set_form_error(&mut self, error: Option<String>)`, `pub fn is_form_open(&self) -> bool`; `impl Render for WorkspaceDrawer`. O `Canvas` consome `DrawerAction` por esse callback — sem referência circular.
 
 - [ ] **Step 1: TDD — teste de filtro puro em `workspaces.rs`**
 
 `filter_matches(name, query)` com query vazia → `true`; case-insensitive; substring; acentos não precisam ser normalizados.
 
-- [ ] **Step 2: RED → implementar filtro e `TextField` → GREEN**
+- [ ] **Step 2: RED → integrar `gpui-component` → GREEN**
 
-`TextField`: struct com `text: String`, `focus_handle`, handler de `KeyDownEvent` para caracteres e backspace. **Escolha minha:** implementar campo mínimo em GPUI bruto, sem dependência nova, até o líder da framework responder se existe input pronto; se existir, trocar nesta mesma task.
+Adicionar `gpui-component = "=0.5.1"` a `canvas/ui/Cargo.toml`, chamar `gpui_component::init(cx)` no setup do `run()` em `ui/src/lib.rs` e usar `gpui_component::input::{Input, InputState}` para o campo de filtro e o nome do formulário (com o tema/Root do componente, conforme o testbed `native-gui`). Líder da framework confirmou: não existe input pronto no GPUI 0.2.2 nem no `auro-ui`. Filtro e nome não usam key handling artesanal.
 
 - [ ] **Step 3: Implementar desenho do drawer**
 
-Coluna fixa de ~200 px; campo "Filtrar"; botão "+"; rótulo "ESPAÇOS DE TRABALHO"; lista com ícone, nome, monitor e contagem de terminais; linha ativa realçada. Ícones desenhados com glifos de texto fixos (★, ▸, ⚡, ⟨/⟩, ◉) — sem crate novo. Formulário inline com nome, cinco ícones, botão de escolher raiz e texto de erro.
+Coluna fixa de ~200 px; campo "Filtrar" com `Input`; botão "+"; rótulo "ESPAÇOS DE TRABALHO"; lista com ícone SVG, nome, monitor e contagem de terminais; linha ativa realçada. Ícones: `svg().path("icons/<nome>.svg").w(px(16.)).h(px(16.))` a partir de `auro::gpui::svg`. Formulário inline com nome (`Input`), cinco ícones SVG selecionáveis, botão de escolher raiz e texto de erro.
 
 - [ ] **Step 4: Ligar `cx.prompt_for_paths`**
 
-No botão de raiz, chamar `cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some("Escolha a raiz".into()) })`; `None` fecha sem efeito; `Some(paths)` preenche o formulário; `Err` mostra o campo de texto de raiz como fallback. Não inventar diretório inicial.
+No botão de raiz, chamar `cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some("Escolha a raiz".into()) })`; `None` fecha sem efeito; `Some(paths)` preenche o formulário; `Err` mantém o campo de raiz do formulário editável como fallback. Não inventar diretório inicial.
 
 - [ ] **Step 5: Commit**
 
