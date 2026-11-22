@@ -145,7 +145,11 @@ impl WorkspaceDrawer {
     fn ensure_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.filter_input.is_none() {
             let value = self.filter.clone();
-            let state = cx.new(|cx| InputState::new(window, cx).default_value(value));
+            let state = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .default_value(value)
+                    .placeholder("Filtrar")
+            });
             self.filter_subscription = Some(cx.subscribe_in(
                 &state,
                 window,
@@ -410,12 +414,20 @@ impl Render for WorkspaceDrawer {
                     )
                     .child(monitor(workspace.canvas.terminals().len()))
                     .child(
-                        Button::new(format!("workspace-delete-{id}"), "×").on_click(
-                            cx.listener(move |this, _, _, cx| {
-                                this.emit(DrawerAction::Delete(id));
-                                cx.notify();
-                            }),
-                        ),
+                        div()
+                            .id(("workspace-delete-guard", id))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|_, _, _, cx| cx.stop_propagation()),
+                            )
+                            .child(
+                                Button::new(format!("workspace-delete-{id}"), "×").on_click(
+                                    cx.listener(move |this, _, _, cx| {
+                                        this.emit(DrawerAction::Delete(id));
+                                        cx.notify();
+                                    }),
+                                ),
+                            ),
                     )
             }))
             .when(self.form_open, |this| {
