@@ -277,8 +277,10 @@ impl Canvas {
         });
     }
 
-    pub fn remove(&mut self, workspace_id: WorkspaceId, id: TerminalId) {
+    pub fn remove(&mut self, workspace_id: WorkspaceId, id: TerminalId, cx: &mut Context<Self>) {
         remove_terminal_state(&mut self.store, &mut self.cards, workspace_id, id);
+        self.sync_drawer(cx);
+        cx.notify();
     }
 
     pub fn remove_selected(&mut self, cx: &mut Context<Self>) {
@@ -292,8 +294,7 @@ impl Canvas {
         else {
             return;
         };
-        self.remove(workspace_id, id);
-        self.sync_drawer(cx);
+        self.remove(workspace_id, id, cx);
         cx.notify();
     }
 

@@ -6,7 +6,7 @@ pub mod config;
 pub mod pty;
 pub mod workspaces;
 
-use auro::{App, gpui::AppContext};
+use auro::{App, assets::EmbeddedAssets, gpui::AppContext};
 use canvas_types::WorkspaceStore;
 
 use crate::config::LoadOutcome;
@@ -16,6 +16,13 @@ pub fn run() {
     let mut store = WorkspaceStore::new();
     let load: LoadOutcome = config::load(&mut store);
     App::new()
+        .assets(EmbeddedAssets::new(&[
+            ("star.svg", include_bytes!("../../icons/star.svg")),
+            ("folder.svg", include_bytes!("../../icons/folder.svg")),
+            ("bolt.svg", include_bytes!("../../icons/bolt.svg")),
+            ("code.svg", include_bytes!("../../icons/code.svg")),
+            ("globe.svg", include_bytes!("../../icons/globe.svg")),
+        ]))
         .setup(|cx, _| gpui_component::init(cx))
         .root_with("main", move |window, cx| {
             let view = cx.new(|cx| canvas::Canvas::new(store.clone(), load.clone(), cx));

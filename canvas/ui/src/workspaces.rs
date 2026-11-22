@@ -1,14 +1,13 @@
 //! Workspace drawer: filter, creation form and native directory picker.
 
 use auro::gpui::{
-    App, Context, Entity, Image, ImageFormat, ImageSource, MouseButton, PathPromptOptions, Render,
-    Subscription, Window, div, img, px, rgb,
+    App, Context, Entity, MouseButton, PathPromptOptions, Render, Subscription, Window, div, px,
+    rgb, svg,
 };
 use auro::prelude::*;
 use canvas_types::{WorkspaceIcon, WorkspaceId, WorkspaceState, WorkspaceStore};
 use gpui_component::input::{Input, InputEvent, InputState};
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use crate::config::{self, LoadOutcome};
 
@@ -64,8 +63,7 @@ pub struct WorkspaceDrawer {
 
 impl WorkspaceDrawer {
     pub fn new(load: LoadOutcome) -> Self {
-        let mut store = WorkspaceStore::new();
-        let _ = config::load(&mut store);
+        let store = WorkspaceStore::new();
         Self {
             store,
             load,
@@ -118,9 +116,13 @@ impl WorkspaceDrawer {
         self.form_error = None;
     }
 
-    pub fn close_form(&mut self) {
+    /// Closing clears every form field; `sync_inputs` keeps the visible inputs in step.
+    pub fn close_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.form_open = false;
         self.form_error = None;
+        self.form_name.clear();
+        self.form_root = None;
+        self.sync_inputs(window, cx);
     }
 
     pub fn set_form_name(&mut self, value: String) {
@@ -265,7 +267,7 @@ impl WorkspaceDrawer {
         .detach();
     }
 
-    fn submit_form(&mut self, cx: &mut Context<Self>) {
+    fn submit_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let name = self.form_name.trim().to_owned();
         if name.is_empty() {
             self.form_error = Some("Informe um nome para o espaço.".into());
@@ -290,7 +292,7 @@ impl WorkspaceDrawer {
             },
             cx,
         );
-        self.close_form();
+        self.close_form(window, cx);
         cx.notify();
     }
 
@@ -328,20 +330,19 @@ fn apply_restart_result(
     }
 }
 
-fn icon_png(icon: WorkspaceIcon) -> impl IntoElement {
-    let bytes: &[u8] = match icon {
-        WorkspaceIcon::Star => include_bytes!("../../icons/star.png"),
-        WorkspaceIcon::Folder => include_bytes!("../../icons/folder.png"),
-        WorkspaceIcon::Bolt => include_bytes!("../../icons/bolt.png"),
-        WorkspaceIcon::Code => include_bytes!("../../icons/code.png"),
-        WorkspaceIcon::Globe => include_bytes!("../../icons/globe.png"),
+fn icon_svg(icon: WorkspaceIcon) -> impl IntoElement {
+    let path = match icon {
+        WorkspaceIcon::Star => "star.svg",
+        WorkspaceIcon::Folder => "folder.svg",
+        WorkspaceIcon::Bolt => "bolt.svg",
+        WorkspaceIcon::Code => "code.svg",
+        WorkspaceIcon::Globe => "globe.svg",
     };
-    img(ImageSource::Image(Arc::new(Image::from_bytes(
-        ImageFormat::Png,
-        bytes.to_vec(),
-    ))))
-    .w(px(ICON_SIZE))
-    .h(px(ICON_SIZE))
+    svg()
+        .path(path)
+        .w(px(ICON_SIZE))
+        .h(px(ICON_SIZE))
+        .text_color(rgb(0xc9d1d9))
 }
 
 fn monitor(count: usize) -> impl IntoElement {
@@ -439,7 +440,7 @@ impl Render for WorkspaceDrawer {
                             cx.notify();
                         }),
                     )
-                    .child(icon_png(workspace.icon))
+                    .child(icon_svg(workspace.icon))
                     .child(
                         div()
                             .flex_1()
@@ -502,7 +503,7 @@ impl Render for WorkspaceDrawer {
                                             cx.notify();
                                         }),
                                     )
-                                    .child(icon_png(choice))
+                                    .child(icon_svg(choice))
                             })),
                         )
                         .child("Raiz")
@@ -522,12 +523,12 @@ impl Render for WorkspaceDrawer {
                         .child(
                             div().flex().gap_2().child(
                                 Button::new("workspace-create", "Criar").on_click(
-                                    cx.listener(|this, _, _, cx| this.submit_form(cx)),
+                                    cx.listener(|this, _, window, cx| this.submit_form(window, cx)),
                                 ),
                             ).child(
                                 Button::new("workspace-cancel", "Cancelar").on_click(
-                                    cx.listener(|this, _, _, cx| {
-                                        this.close_form();
+                                    cx.listener(|this, _, window, cx| {
+                                        this.close_form(window, cx);
                                         cx.notify();
                                     }),
                                 ),

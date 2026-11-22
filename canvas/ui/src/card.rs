@@ -264,7 +264,7 @@ impl Render for TerminalCard {
                             .px_1()
                             .on_click(cx.listener(move |_, _, _, cx| {
                                 let _ = canvas.update(cx, |canvas, cx| {
-                                    canvas.remove(workspace_id, id);
+                                    canvas.remove(workspace_id, id, cx);
                                     cx.notify();
                                 });
                             }))

@@ -487,9 +487,9 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
 name = "auro"
-version = "0.1.0-alpha.10"
+version = "0.1.0-alpha.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "73863d27a2bee0746a0b7d91bcd5456c9062564d426805d9cc047b0d43ebdaa7"
+checksum = "3380d759dce10cfda35701e083a368568efc4104b009c1a1f9591206b4c42c23"
 dependencies = [
  "auro-core",
  "auro-ipc",
@@ -503,9 +503,9 @@ dependencies = [
 
 [[package]]
 name = "auro-core"
-version = "0.1.0-alpha.10"
+version = "0.1.0-alpha.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "481f4240af704e96be1ac886aca79d999152515f5264345675b301161d5acb9b"
+checksum = "b9cb4f0b7ddba5abb06a9633ed6da71b7cc91400ab0c30c7b4727152420808fb"
 dependencies = [
  "auro-ipc",
  "interprocess",
@@ -523,9 +523,9 @@ dependencies = [
 
 [[package]]
 name = "auro-ipc"
-version = "0.1.0-alpha.10"
+version = "0.1.0-alpha.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d9e58ca11485acd937cd1aa8c9f6c5d57d6b9f1b1c71f905290de35308e41259"
+checksum = "74e5d4bc7e9015387174128b306e1f2e82581b5bf6c5f13d99d46fc83e2f6cad"
 dependencies = [
  "schemars",
  "serde",
@@ -536,9 +536,9 @@ dependencies = [
 
 [[package]]
 name = "auro-macros"
-version = "0.1.0-alpha.10"
+version = "0.1.0-alpha.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9f1ff3325298c596fec391a661d698f5bdf4f312fc1180376e0809494441d479"
+checksum = "cdaf5a2a3e22adf2f3de4080c28527704899f997384fb56e82ea552c3fe3da73"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -547,9 +547,9 @@ dependencies = [
 
 [[package]]
 name = "auro-perms"
-version = "0.1.0-alpha.10"
+version = "0.1.0-alpha.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0520a57c8a54b15eb32d687851869f197b0627a9d68802e65979f99d5f1fabc6"
+checksum = "36479010dfad1e53b458d036dfae5e65b40ea7f51e9446897a2840c77392c75a"
 dependencies = [
  "globset",
  "thiserror 2.0.21",
@@ -557,9 +557,9 @@ dependencies = [
 
 [[package]]
 name = "auro-ui"
-version = "0.1.0-alpha.10"
+version = "0.1.0-alpha.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f64f1633dd070c364c9a05e3df566c621f4d9a5ec7a1f5809205bd8a379c5ad"
+checksum = "48e1b7f593d419894f51fdca661ec18cc9a1f2c606b753628b2f5170443929a7"
 dependencies = [
  "auro-core",
  "gpui",
