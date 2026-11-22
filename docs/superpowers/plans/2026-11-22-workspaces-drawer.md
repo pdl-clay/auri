@@ -138,7 +138,7 @@ No botão de raiz, chamar `cx.prompt_for_paths(PathPromptOptions { files: false,
 
 - [ ] **Step 2: RED → integrar → GREEN**
 
-Cartões agrupados por `WorkspaceId`; `Render` desenha o drawer à esquerda e, à direita, só os cartões do espaço ativo; trocar de espaço apenas esconde; toolbar "Adicionar terminal" desabilitada sem espaço ativo; contagem por espaço vem do `CanvasState` dele.
+Cartões agrupados por `WorkspaceId`; `Render` desenha o drawer à esquerda e, à direita, só os cartões do espaço ativo; trocar de espaço apenas esconde; toolbar "Adicionar terminal" desabilitada sem espaço ativo; contagem por espaço vem do `CanvasState` dele. **Ruling do controller, com evidência do líder da framework:** auro alpha.10 não expõe AssetSource — converter os cinco SVGs para PNG (`rsvg-convert`) e usar `img(ImageSource::Image(Arc::new(Image::from_bytes(ImageFormat::Png, include_bytes!(...).to_vec()))))` em vez de `svg().path(...)`; manter o pin `=0.1.0-alpha.10`. Após cada mutação do store, chamar `drawer.set_store(...)`; o `LoadOutcome` recebido é autoritativo para o banner.
 
 - [ ] **Step 3: Apagar espaço**
 
