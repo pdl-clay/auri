@@ -16,6 +16,7 @@ pub struct PtySession {
     pub master: Arc<parking_lot::Mutex<Box<dyn portable_pty::MasterPty + Send>>>,
     child: Box<dyn portable_pty::Child + Send + Sync>,
     pid: Option<u32>,
+    terminated: bool,
 }
 
 impl PtySession {
@@ -46,6 +47,7 @@ impl PtySession {
             master: Arc::new(parking_lot::Mutex::new(pair.master)),
             child,
             pid,
+            terminated: false,
         })
     }
 
@@ -67,14 +69,15 @@ impl PtySession {
 
     /// Terminate the child's whole process group and reap the child.
     pub fn terminate(&mut self) -> anyhow::Result<()> {
-        if self.child.try_wait()?.is_some() {
+        if self.terminated {
             return Ok(());
         }
 
         #[cfg(unix)]
         if let Some(pid) = self.pid {
-            // portable-pty calls setsid() before exec, so the child leads its
-            // own process group. A negative pid signals every process in it.
+            // Signal the group before reaping: the leader may already have
+            // exited while other members remain. portable-pty calls setsid(),
+            // so the child leads its own process group; -pid signals them all.
             if unsafe { libc::kill(-(pid as i32), libc::SIGTERM) } != 0 {
                 let err = std::io::Error::last_os_error();
                 if err.raw_os_error() != Some(libc::ESRCH) {
@@ -91,6 +94,7 @@ impl PtySession {
             }
         }
         self.child.wait()?;
+        self.terminated = true;
         Ok(())
     }
 }
@@ -177,6 +181,42 @@ mod tests {
         assert!(
             wait_until_gone(bg, Duration::from_secs(2)),
             "background child {bg} survived process-group termination"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminate_kills_descendants_after_leader_exit() {
+        let marker = tempfile::NamedTempFile::new().unwrap();
+        let mut script = CommandBuilder::new("/bin/sh");
+        script.arg("-c");
+        script.arg(format!(
+            "(trap '' HUP; sleep 30) & echo $! > {}",
+            marker.path().display()
+        ));
+        let mut pty = PtySession::spawn_command(script, 80, 24).unwrap();
+
+        let bg = read_pid_with_timeout(marker.path(), Duration::from_secs(2)).unwrap();
+        assert!(
+            process_alive(bg),
+            "background child should be alive before the leader exits"
+        );
+
+        // No `wait` in the script: the leader exits on its own, leaving the
+        // background sleep in the same process group.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if pty.child.try_wait().unwrap().is_some() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "leader did not exit on its own");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        pty.terminate().unwrap();
+        assert!(
+            wait_until_gone(bg, Duration::from_secs(2)),
+            "background child {bg} survived terminate after the leader exited"
         );
     }
 }
