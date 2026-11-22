@@ -7,7 +7,7 @@
 use anyhow::Context as _;
 use canvas_types::{WorkspaceId, WorkspaceIcon, WorkspaceState, WorkspaceStore};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::json;
 use std::ffi::OsString;
 use std::fmt;
 use std::fs;
@@ -51,6 +51,7 @@ pub enum LoadOutcome {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Header {
     #[serde(default)]
     active: Option<WorkspaceId>,
@@ -97,6 +98,21 @@ fn root_is_usable(root: &Path) -> bool {
     fs::metadata(root).is_ok_and(|metadata| metadata.is_dir())
 }
 
+/// Parse one workspace line, recording damage if it is not a complete entry.
+fn push_workspace(parsed: &mut Parsed, line: &str, line_number: usize) -> bool {
+    match serde_json::from_str::<WorkspaceState>(line) {
+        Ok(mut workspace) => {
+            workspace.invalid_root = !root_is_usable(&workspace.root);
+            parsed.workspaces.push(workspace);
+            true
+        }
+        Err(error) => {
+            parsed.error = Some(format!("line {line_number}: {error}"));
+            false
+        }
+    }
+}
+
 /// Parse every line independently so complete entries survive a damaged file.
 fn parse_entries(text: &str) -> Parsed {
     let mut parsed = Parsed {
@@ -111,29 +127,23 @@ fn parse_entries(text: &str) -> Parsed {
             continue;
         }
         line_number += 1;
-        let value: Value = match serde_json::from_str(line) {
-            Ok(value) => value,
-            Err(error) => {
-                parsed.error = Some(format!("line {line_number}: {error}"));
-                continue;
-            }
-        };
 
         if line_number == 1 {
-            match serde_json::from_value::<Header>(value) {
-                Ok(header) => parsed.header = Some(header),
-                Err(error) => parsed.error = Some(format!("line {line_number}: {error}")),
+            match serde_json::from_str::<Header>(line) {
+                Ok(header) => {
+                    parsed.header = Some(header);
+                    continue;
+                }
+                Err(_) => {
+                    if push_workspace(&mut parsed, line, line_number) {
+                        parsed.error = Some(format!("line {line_number}: missing config header"));
+                    }
+                    continue;
+                }
             }
-            continue;
         }
 
-        match serde_json::from_value::<WorkspaceState>(value) {
-            Ok(mut workspace) => {
-                workspace.invalid_root = !root_is_usable(&workspace.root);
-                parsed.workspaces.push(workspace);
-            }
-            Err(error) => parsed.error = Some(format!("line {line_number}: {error}")),
-        }
+        push_workspace(&mut parsed, line, line_number);
     }
 
     if parsed.header.is_none() {
@@ -461,6 +471,38 @@ mod tests {
         assert_eq!(recovered.workspaces().len(), 2);
         assert_eq!(recovered.workspaces()[1].name, "Dois");
         assert_eq!(fs::read_to_string(&path).unwrap(), damaged);
+    }
+
+    #[test]
+    fn missing_header_line_keeps_first_workspace_and_signals_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = config_file(dir.path());
+        let root = dir.path().join("root");
+        fs::create_dir_all(&root).unwrap();
+
+        let mut original = WorkspaceStore::new();
+        original.add("Primeiro".into(), WorkspaceIcon::Star, root.clone());
+        original.add("Segundo".into(), WorkspaceIcon::Code, root.clone());
+        save_at(&original, &path).unwrap();
+
+        let saved = fs::read_to_string(&path).unwrap();
+        let entries = saved.split_once('\n').unwrap().1;
+        fs::write(&path, entries).unwrap();
+
+        let mut recovered = WorkspaceStore::new();
+        let outcome = load_at(&mut recovered, &path);
+        assert!(
+            matches!(outcome, LoadOutcome::Recovered(_) | LoadOutcome::Corrupt(_)),
+            "a config without its header must signal recovery, got {outcome:?}"
+        );
+        assert_eq!(recovered.workspaces().len(), 2);
+        assert_eq!(recovered.workspaces()[0].name, "Primeiro");
+        assert_eq!(recovered.workspaces()[1].name, "Segundo");
+        assert_eq!(fs::read_to_string(&path).unwrap(), entries);
+        assert!(
+            save_at(&recovered, &path).is_err(),
+            "damaged config must not be overwritten"
+        );
     }
 
     #[test]
