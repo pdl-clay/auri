@@ -139,6 +139,7 @@ impl TerminalCard {
                 cols: cols as usize,
                 rows: rows as usize,
                 font_size: px(FONT_PX),
+                font_family: "DejaVu Sans Mono".into(),
                 line_height_multiplier: LINE_HEIGHT,
                 padding: Edges::all(px(10.0)),
                 ..Default::default()

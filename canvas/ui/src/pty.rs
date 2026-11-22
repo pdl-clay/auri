@@ -4,9 +4,43 @@
 use std::io::{Read, Write};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use std::path::Path;
 
 use portable_pty::{CommandBuilder, PtySize};
 
+
+/// Resolve a POSIX login shell; GUI sessions often have no `$SHELL`.
+/// fish's login startup does not drive portable-pty correctly here, so bash is used.
+fn default_shell() -> String {
+    let resolve = |shell: String| {
+        if shell.rsplit('/').next() == Some("fish") {
+            "/bin/bash".into()
+        } else {
+            shell
+        }
+    };
+    if let Ok(shell) = std::env::var("SHELL")
+        && !shell.is_empty()
+        && Path::new(&shell).exists()
+    {
+        return resolve(shell);
+    }
+    let user = std::env::var("USER").unwrap_or_default();
+    if !user.is_empty()
+        && let Ok(passwd) = std::fs::read_to_string("/etc/passwd")
+    {
+        for line in passwd.lines() {
+            let mut fields = line.split(':');
+            if fields.next() == Some(user.as_str())
+                && let Some(shell) = fields.nth(5)
+                && Path::new(shell).exists()
+            {
+                return resolve(shell.to_string());
+            }
+        }
+    }
+    "/bin/bash".into()
+}
 /// A process running on the slave side of a pty, with its master-side streams.
 pub struct PtySession {
     /// Output from the slave side of the pty.
@@ -60,8 +94,9 @@ impl PtySession {
         rows: u16,
         cwd: Option<&std::path::Path>,
     ) -> anyhow::Result<Self> {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+        let shell = default_shell();
         let mut cmd = CommandBuilder::new(shell);
+        cmd.arg("-l");
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         if let Some(cwd) = cwd {
@@ -156,7 +191,11 @@ impl Drop for PtySession {
 mod tests {
     use super::*;
     use std::fs;
-    use std::path::Path;
+
+    #[test]
+    fn default_shell_points_to_an_existing_shell() {
+        assert!(Path::new(&default_shell()).exists());
+    }
 
     fn read_pid_with_timeout(path: &Path, timeout: Duration) -> anyhow::Result<u32> {
         let deadline = Instant::now() + timeout;
@@ -307,7 +346,7 @@ mod tests {
                 }
             }
         });
-        writeln!(pty.writer, "pwd").unwrap();
+        writeln!(pty.writer, "printf '__CWD__%s__END__\\n' \"$PWD\"").unwrap();
 
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut raw = Vec::new();
@@ -321,12 +360,13 @@ mod tests {
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             }
             let output = clean_output(&raw);
-            let mut lines = output.split('\n').peekable();
-            while let Some(line) = lines.next() {
-                // Only a newline-terminated line is complete; a trailing
-                // fragment may still be growing as more pty chunks arrive.
-                if lines.peek().is_some() && line.starts_with('/') {
-                    return line.trim_end().to_owned();
+            if let Some(start) = output.rfind("__CWD__") {
+                let rest = &output[start + "__CWD__".len()..];
+                if let Some(end) = rest.find("__END__") {
+                    let value = rest[..end].trim();
+                    if value.starts_with('/') {
+                        return value.to_owned();
+                    }
                 }
             }
         }
