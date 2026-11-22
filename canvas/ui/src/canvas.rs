@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use auro::gpui::{
     Bounds, Context, CursorStyle, Entity, MouseButton, MouseDownEvent, Pixels, Point, Render,
-    Size, Window, canvas, fill, px, rgb, svg,
+    ScrollWheelEvent, Size, Window, canvas, fill, px, rgb, svg,
 };
 use auro::prelude::*;
 use gpui_component::{
@@ -14,7 +14,7 @@ use gpui_component::{
 };
 use canvas_types::{CanvasState, TerminalId, WorkspaceIcon, WorkspaceId, WorkspaceState, WorkspaceStore};
 
-use crate::card::{TerminalCard, terminal_grid};
+use crate::card::{TerminalCard, scroll_delta, terminal_grid};
 use crate::workspaces::{DRAWER_WIDTH, DrawerAction, WorkspaceDrawer};
 use crate::config::{self, LoadOutcome};
 use crate::pty::PtySession;
@@ -132,6 +132,9 @@ pub struct Canvas {
     cards: CardGroups,
     error: Option<String>,
     placing: bool,
+    zoom: f32,
+    offset_x: f32,
+    offset_y: f32,
 }
 impl Canvas {
     /// `load` is authoritative for the drawer banner; the store was already
@@ -146,6 +149,9 @@ impl Canvas {
             cards: HashMap::new(),
             error: None,
             placing: false,
+            zoom: 1.0,
+            offset_x: 0.0,
+            offset_y: 0.0,
         }
     }
 
@@ -230,6 +236,36 @@ impl Canvas {
         cx.notify();
     }
 
+    pub fn apply_scroll(
+        &mut self,
+        dx: f32,
+        dy: f32,
+        control: bool,
+        shift: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if control {
+            let factor = (1.0 - dy * 0.0015).clamp(0.8, 1.25);
+            self.zoom = (self.zoom * factor).clamp(0.25, 3.0);
+        } else if shift {
+            self.offset_x -= dx + dy;
+        } else {
+            self.offset_y -= dy;
+        }
+        let (zoom, offset_x, offset_y) = (self.zoom, self.offset_x, self.offset_y);
+        let cards: Vec<Entity<TerminalCard>> = self
+            .cards
+            .values()
+            .flat_map(|group| group.iter().map(|(_, card)| card.clone()))
+            .collect();
+        cx.defer(move |cx| {
+            for card in cards {
+                card.update(cx, |card, cx| card.set_view(zoom, offset_x, offset_y, cx));
+            }
+        });
+        cx.notify();
+    }
+
     /// Enter placement mode: the next canvas click decides where the terminal opens.
     pub fn begin_placement(&mut self, cx: &mut Context<Self>) {
         self.placing = true;
@@ -248,9 +284,11 @@ impl Canvas {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let local_x = (f32::from(position.x) - DRAWER_WIDTH - self.offset_x) / self.zoom;
+        let local_y = (f32::from(position.y) - self.offset_y) / self.zoom;
         let origin = Point::new(
-            px((f32::from(position.x) - DRAWER_WIDTH - CARD_WIDTH / 2.0).max(8.0)),
-            px((f32::from(position.y) - CARD_HEIGHT / 2.0).max(8.0)),
+            px((local_x - CARD_WIDTH / 2.0).max(8.0)),
+            px((local_y - CARD_HEIGHT / 2.0).max(8.0)),
         );
         self.placing = false;
         self.spawn_terminal(Some(origin), window, cx);
@@ -298,6 +336,8 @@ impl Canvas {
             TerminalCard::new(id, workspace_id, bounds, canvas.clone(), pty, (cols, rows), cx)
         });
         card.read(cx).terminal.read(cx).focus_handle().focus(window);
+        let (zoom, offset_x, offset_y) = (self.zoom, self.offset_x, self.offset_y);
+        card.update(cx, |card, cx| card.set_view(zoom, offset_x, offset_y, cx));
         self.cards.entry(workspace_id).or_default().push((id, card));
         self.sync_card_selection(workspace_id, cx);
         self.sync_drawer(cx);
@@ -411,6 +451,9 @@ impl Render for Canvas {
         let selected = active
             .and_then(|id| self.store.workspaces().iter().find(|item| item.id == id))
             .and_then(|workspace| workspace.canvas.selected());
+        let zoom = self.zoom;
+        let offset_x = self.offset_x;
+        let offset_y = self.offset_y;
         let add = ComponentButton::new("add-terminal")
             .tooltip("Adicionar terminal")
             .child(canvas_icon("terminal.svg"))
@@ -462,14 +505,20 @@ impl Render for Canvas {
                             .relative()
                             .flex_1()
                             .min_h_0()
+                            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
+                                let (dx, dy) = scroll_delta(event);
+                                this.apply_scroll(dx, dy, event.modifiers.control, event.modifiers.shift, cx);
+                                cx.stop_propagation();
+                            }))
                             .child(
                                 canvas(
                                     |_, _, _| {},
-                                    |bounds, _, window, _| {
+                                    move |bounds, _, window, _| {
                                         let origin = bounds.origin;
                                         let width = f32::from(bounds.size.width);
                                         let height = f32::from(bounds.size.height);
-                                        let mut x = GRID_STEP;
+                                        let step = (GRID_STEP * zoom).max(4.0);
+                                        let mut x = offset_x.rem_euclid(step);
                                         while x < width {
                                             window.paint_quad(fill(
                                                 Bounds::new(
@@ -481,9 +530,9 @@ impl Render for Canvas {
                                                 ),
                                                 rgb(0x242936),
                                             ));
-                                            x += GRID_STEP;
+                                            x += step;
                                         }
-                                        let mut y = GRID_STEP;
+                                        let mut y = offset_y.rem_euclid(step);
                                         while y < height {
                                             window.paint_quad(fill(
                                                 Bounds::new(
@@ -495,7 +544,7 @@ impl Render for Canvas {
                                                 ),
                                                 rgb(0x242936),
                                             ));
-                                            y += GRID_STEP;
+                                            y += step;
                                         }
                                     },
                                 )
@@ -603,6 +652,28 @@ impl Render for Canvas {
                             .text_color(rgb(0xf08a8a))
                             .child(message.clone())
                     })),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .bottom(px(12.0))
+                    .right(px(12.0))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded(px(20.0))
+                    .bg(rgb(0x1b2130))
+                    .border_1()
+                    .border_color(rgb(0x2b3547))
+                    .px_3()
+                    .py_1()
+                    .child(div().text_xs().text_color(rgb(0x93a0b5)).child("Zoom"))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0xc9d1d9))
+                            .child(format!("{}%", (zoom * 100.0).round() as i32)),
+                    ),
             )
             .children(gpui_component::Root::render_dialog_layer(window, cx))
     }

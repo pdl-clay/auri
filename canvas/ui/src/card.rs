@@ -2,12 +2,13 @@
 
 use auro::gpui::{
     App, Bounds, Context, Div, DragMoveEvent, Edges, Entity, EntityId, MouseButton, MouseDownEvent,
-    Pixels, Point, Render, Stateful, WeakEntity, Window, div, px, rgb,
+    Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, Stateful, WeakEntity, Window, div, px,
+    rgb,
 };
 use auro::prelude::*;
-use canvas_types::{TerminalId, WorkspaceId};
-use gpui_terminal::{TerminalConfig, TerminalView};
 use portable_pty::PtySize;
+use gpui_terminal::{TerminalConfig, TerminalView};
+use canvas_types::{TerminalId, WorkspaceId};
 
 use crate::canvas::Canvas;
 use crate::pty::PtySession;
@@ -83,6 +84,9 @@ pub struct TerminalCard {
     canvas: WeakEntity<Canvas>,
     pty: PtySession,
     drag: Option<DragStart>,
+    view_zoom: f32,
+    view_offset_x: f32,
+    view_offset_y: f32,
 }
 
 impl TerminalCard {
@@ -143,6 +147,9 @@ impl TerminalCard {
             canvas,
             pty,
             drag: None,
+            view_zoom: 1.0,
+            view_offset_x: 0.0,
+            view_offset_y: 0.0,
         }
     }
 
@@ -159,6 +166,20 @@ impl TerminalCard {
             cx.notify();
         }
     }
+
+    /// Apply the canvas zoom/pan to this card and its terminal font.
+    pub fn set_view(&mut self, zoom: f32, offset_x: f32, offset_y: f32, cx: &mut Context<Self>) {
+        self.view_zoom = zoom;
+        self.view_offset_x = offset_x;
+        self.view_offset_y = offset_y;
+        self.terminal.update(cx, |terminal, cx| {
+            let mut config = terminal.config().clone();
+            config.font_size = px(FONT_PX * zoom);
+            terminal.update_config(config, cx);
+        });
+        cx.notify();
+    }
+
 
     fn begin_drag(&mut self, mode: DragMode, position: Point<Pixels>) {
         self.drag = Some(DragStart {
@@ -180,8 +201,9 @@ impl TerminalCard {
         if !event.drag(cx).targets(start.mode, entity_id) {
             return;
         }
-        let dx = f32::from(event.event.position.x) - f32::from(start.position.x);
-        let dy = f32::from(event.event.position.y) - f32::from(start.position.y);
+        let zoom = self.view_zoom.max(0.01);
+        let dx = (f32::from(event.event.position.x) - f32::from(start.position.x)) / zoom;
+        let dy = (f32::from(event.event.position.y) - f32::from(start.position.y)) / zoom;
         match start.mode {
             DragMode::Move => {
                 self.bounds.origin = Point::new(
@@ -264,15 +286,28 @@ impl TerminalCard {
     }
 }
 
+pub(crate) fn scroll_delta(event: &ScrollWheelEvent) -> (f32, f32) {
+    match event.delta {
+        ScrollDelta::Pixels(p) => (f32::from(p.x), f32::from(p.y)),
+        ScrollDelta::Lines(p) => (p.x * 16.0, p.y * 16.0),
+    }
+}
+
 impl Render for TerminalCard {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let id = self.id;
         let workspace_id = self.workspace_id;
         let exited = self.exited;
         let selected = self.selected;
+        let select_canvas = self.canvas.clone();
         let canvas = self.canvas.clone();
         let entity_id = cx.entity_id();
-        let select_canvas = self.canvas.clone();
+        let scroll_canvas = self.canvas.clone();
+        let zoom = self.view_zoom;
+        let left = f32::from(self.bounds.origin.x) * zoom + self.view_offset_x;
+        let top = f32::from(self.bounds.origin.y) * zoom + self.view_offset_y;
+        let width = f32::from(self.bounds.size.width) * zoom;
+        let height = f32::from(self.bounds.size.height) * zoom;
         div()
             .id(("card-select", id))
             .on_mouse_down(
@@ -282,11 +317,18 @@ impl Render for TerminalCard {
                         select_canvas.update(cx, |canvas, cx| canvas.select(workspace_id, id, cx));
                 }),
             )
+            .on_scroll_wheel(cx.listener(move |_, event: &ScrollWheelEvent, _, cx| {
+                let (dx, dy) = scroll_delta(event);
+                let _ = scroll_canvas.update(cx, |canvas, cx| {
+                    canvas.apply_scroll(dx, dy, event.modifiers.control, event.modifiers.shift, cx)
+                });
+                cx.stop_propagation();
+            }))
             .absolute()
-            .left(self.bounds.origin.x)
-            .top(self.bounds.origin.y)
-            .w(self.bounds.size.width)
-            .h(self.bounds.size.height)
+            .left(px(left))
+            .top(px(top))
+            .w(px(width))
+            .h(px(height))
             .flex()
             .flex_col()
             .overflow_hidden()
