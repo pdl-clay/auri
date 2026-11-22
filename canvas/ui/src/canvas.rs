@@ -363,7 +363,7 @@ impl Canvas {
             workspace.canvas.select(id);
             cx.notify();
         }
-        drop(workspace);
+        let _ = workspace;
         self.sync_card_selection(workspace_id, cx);
     }
 
@@ -424,19 +424,7 @@ impl Render for Canvas {
             .map(|group| {
                 group
                     .iter()
-                    .map(|(id, card)| {
-                        let id = *id;
-                        let workspace_id = active.unwrap();
-                        div()
-                            .id(("card-wrapper", id))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                                    this.select(workspace_id, id, cx);
-                                }),
-                            )
-                            .child(card.clone())
-                    })
+                    .map(|(_, card)| div().child(card.clone()))
                     .collect()
             })
             .unwrap_or_default();

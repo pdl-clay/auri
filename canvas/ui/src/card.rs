@@ -42,7 +42,22 @@ enum DragMode {
 }
 
 #[derive(Clone, Copy)]
-struct DragToken(DragMode);
+struct DragToken {
+    mode: DragMode,
+    card_id: EntityId,
+}
+
+impl DragToken {
+    fn new(mode: DragMode, card_id: EntityId) -> Self {
+        Self { mode, card_id }
+    }
+
+    /// GPUI broadcasts drag events to every listener of the same type; only the
+    /// card that started the drag may apply it.
+    fn targets(&self, mode: DragMode, card_id: EntityId) -> bool {
+        self.mode == mode && self.card_id == card_id
+    }
+}
 
 impl Render for DragToken {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
@@ -162,7 +177,7 @@ impl TerminalCard {
         let Some(start) = self.drag else {
             return;
         };
-        if event.drag(cx).0 != start.mode {
+        if !event.drag(cx).targets(start.mode, entity_id) {
             return;
         }
         let dx = f32::from(event.event.position.x) - f32::from(start.position.x);
@@ -240,7 +255,7 @@ impl TerminalCard {
                     this.begin_drag(mode, event.position);
                 }),
             )
-            .on_drag(DragToken(mode), |token, _, _, cx| cx.new(|_| *token))
+            .on_drag(DragToken::new(mode, entity_id), |token, _, _, cx| cx.new(|_| *token))
             .on_drag_move(
                 cx.listener(move |this, event: &DragMoveEvent<DragToken>, _, cx| {
                     this.apply_drag(event, entity_id, cx);
@@ -257,7 +272,16 @@ impl Render for TerminalCard {
         let selected = self.selected;
         let canvas = self.canvas.clone();
         let entity_id = cx.entity_id();
+        let select_canvas = self.canvas.clone();
         div()
+            .id(("card-select", id))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |_, _, _, cx| {
+                    let _ =
+                        select_canvas.update(cx, |canvas, cx| canvas.select(workspace_id, id, cx));
+                }),
+            )
             .absolute()
             .left(self.bounds.origin.x)
             .top(self.bounds.origin.y)
@@ -327,7 +351,7 @@ impl Render for TerminalCard {
                             this.begin_drag(DragMode::Move, event.position);
                         }),
                     )
-                    .on_drag(DragToken(DragMode::Move), |token, _, _, cx| {
+                    .on_drag(DragToken::new(DragMode::Move, entity_id), |token, _, _, cx| {
                         cx.new(|_| *token)
                     })
                     .on_drag_move(
@@ -345,10 +369,20 @@ impl Render for TerminalCard {
 
 #[cfg(test)]
 mod tests {
-    use super::grid_size;
+    use super::{DragMode, DragToken, grid_size};
+    use auro::gpui::EntityId;
 
     #[test]
     fn grid_size_uses_monospace_metrics() {
         assert_eq!(grid_size(480.0, 300.0, 12.0, 1.2), (66, 20));
+    }
+    #[test]
+    fn drag_token_targets_only_its_own_card() {
+        let card_a = EntityId::from(1);
+        let card_b = EntityId::from(2);
+        let token = DragToken::new(DragMode::Move, card_b);
+        assert!(token.targets(DragMode::Move, card_b));
+        assert!(!token.targets(DragMode::Move, card_a));
+        assert!(!token.targets(DragMode::ResizeWidth, card_b));
     }
 }
