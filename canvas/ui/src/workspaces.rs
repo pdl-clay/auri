@@ -1,18 +1,37 @@
-//! Workspace drawer: filter, creation form and native directory picker.
+//! Workspace drawer: filter, creation dialog and native directory picker.
 
 use auro::gpui::{
-    App, Context, Entity, MouseButton, PathPromptOptions, Render, Subscription, Window, div, px,
-    rgb, svg,
+    App, Context, Entity, MouseButton, PathPromptOptions, Render, Subscription, WeakEntity, Window,
+    div, px, rgb, svg,
 };
 use auro::prelude::*;
 use canvas_types::{WorkspaceIcon, WorkspaceId, WorkspaceState, WorkspaceStore};
-use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::{
+    WindowExt,
+    button::{Button, ButtonVariant, ButtonVariants as _},
+    dialog::{Dialog, DialogButtonProps},
+    input::{Input, InputEvent, InputState},
+};
 use std::path::PathBuf;
 
 use crate::config::{self, LoadOutcome};
 
-const DRAWER_WIDTH: f32 = 200.0;
-const ICON_SIZE: f32 = 16.0;
+// Instrument-panel palette. One accent hue; neutral surfaces stay blue-grey.
+const COLOR_BASE: u32 = 0x0E1117;
+const COLOR_PANEL: u32 = 0x151A23;
+const COLOR_ELEVATED: u32 = 0x1B2130;
+const COLOR_BORDER: u32 = 0x2B3547;
+const COLOR_FOREGROUND: u32 = 0xE7ECF4;
+const COLOR_MUTED: u32 = 0x93A0B5;
+const COLOR_ACCENT: u32 = 0xD8A64A;
+const COLOR_DANGER: u32 = 0xF08A8A;
+
+const RADIUS_CHIP: f32 = 4.;
+const RADIUS_CONTROL: f32 = 8.;
+const RADIUS_DIALOG: f32 = 14.;
+
+const DRAWER_WIDTH: f32 = 224.;
+const ICON_SIZE: f32 = 16.;
 const PALETTE: [WorkspaceIcon; 5] = [
     WorkspaceIcon::Star,
     WorkspaceIcon::Folder,
@@ -41,7 +60,7 @@ fn filter_matches(name: &str, query: &str) -> bool {
     name.to_lowercase().contains(&query.to_lowercase())
 }
 
-/// Sidebar with the workspace list, a filter and an inline creation form.
+/// Sidebar with the workspace list, a filter and a centered creation dialog.
 pub struct WorkspaceDrawer {
     store: WorkspaceStore,
     load: LoadOutcome,
@@ -174,7 +193,11 @@ impl WorkspaceDrawer {
         }
         if self.name_input.is_none() {
             let value = self.form_name.clone();
-            let state = cx.new(|cx| InputState::new(window, cx).default_value(value));
+            let state = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .default_value(value)
+                    .placeholder("Ex.: Meu projeto")
+            });
             self.name_subscription = Some(cx.subscribe_in(
                 &state,
                 window,
@@ -189,7 +212,11 @@ impl WorkspaceDrawer {
         }
         if self.root_input.is_none() {
             let value = self.root_text();
-            let state = cx.new(|cx| InputState::new(window, cx).default_value(value));
+            let state = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .default_value(value)
+                    .placeholder("Caminho da pasta")
+            });
             self.root_subscription = Some(cx.subscribe_in(
                 &state,
                 window,
@@ -330,7 +357,15 @@ fn apply_restart_result(
     }
 }
 
-fn icon_svg(icon: WorkspaceIcon) -> impl IntoElement {
+fn asset_icon(path: &'static str, color: u32) -> impl IntoElement {
+    svg()
+        .path(path)
+        .w(px(ICON_SIZE))
+        .h(px(ICON_SIZE))
+        .text_color(rgb(color))
+}
+
+fn icon_svg(icon: WorkspaceIcon, color: u32) -> impl IntoElement {
     let path = match icon {
         WorkspaceIcon::Star => "star.svg",
         WorkspaceIcon::Folder => "folder.svg",
@@ -338,29 +373,218 @@ fn icon_svg(icon: WorkspaceIcon) -> impl IntoElement {
         WorkspaceIcon::Code => "code.svg",
         WorkspaceIcon::Globe => "globe.svg",
     };
+    asset_icon(path, color)
+}
+
+fn delete_icon() -> impl IntoElement {
     svg()
-        .path(path)
+        .path("x.svg")
         .w(px(ICON_SIZE))
         .h(px(ICON_SIZE))
-        .text_color(rgb(0xc9d1d9))
+        .text_color(rgb(COLOR_MUTED))
+        .hover(|this| this.text_color(rgb(COLOR_DANGER)))
+}
+
+fn field_label(text: &'static str) -> impl IntoElement {
+    div().text_sm().text_color(rgb(COLOR_MUTED)).child(text)
 }
 
 fn monitor(count: usize) -> impl IntoElement {
     div()
         .flex()
-        .flex_col()
         .items_center()
         .gap_1()
-        .child(div().w(px(12.0)).h(px(8.0)).bg(rgb(0x8b949e)))
-        .child(div().w(px(4.0)).h(px(2.0)).bg(rgb(0x8b949e)))
+        .px_1()
+        .rounded(px(RADIUS_CHIP))
+        .border_1()
+        .border_color(rgb(COLOR_BORDER))
+        .bg(rgb(COLOR_BASE))
+        .text_xs()
+        .text_color(rgb(COLOR_MUTED))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(px(1.))
+                .child(
+                    div()
+                        .w(px(10.))
+                        .h(px(7.))
+                        .border_1()
+                        .border_color(rgb(COLOR_MUTED)),
+                )
+                .child(div().w(px(4.)).h(px(1.)).bg(rgb(COLOR_MUTED))),
+        )
         .child(format!("{count}"))
+}
+
+/// Root calls this builder on every frame; read the drawer snapshot instead of
+/// caching form state here. The input states are reused, never recreated.
+fn workspace_dialog(
+    dialog: Dialog,
+    _window: &mut Window,
+    cx: &mut App,
+    drawer: &WeakEntity<WorkspaceDrawer>,
+) -> Dialog {
+    let Some(entity) = drawer.upgrade() else {
+        return dialog;
+    };
+    let (_form_name, icon, _form_root, error, name_input, root_input) = {
+        let state = entity.read(cx);
+        (
+            state.form_name.clone(),
+            state.form_icon,
+            state.root_text(),
+            state.form_error.clone(),
+            state.name_input.clone(),
+            state.root_input.clone(),
+        )
+    };
+    let ok_drawer = drawer.clone();
+    let cancel_drawer = drawer.clone();
+    let pick_drawer = drawer.clone();
+
+    dialog
+        .title(
+            div()
+                .text_lg()
+                .text_color(rgb(COLOR_FOREGROUND))
+                .child("Novo espaço de trabalho"),
+        )
+        .w(px(440.))
+        .overlay(true)
+        .rounded(px(RADIUS_DIALOG))
+        .border_1()
+        .border_color(rgb(COLOR_BORDER))
+        .bg(rgb(COLOR_PANEL))
+        .text_color(rgb(COLOR_FOREGROUND))
+        .button_props(
+            DialogButtonProps::default()
+                .ok_text("Criar espaço")
+                .cancel_text("Cancelar")
+                .ok_variant(ButtonVariant::Primary)
+                .cancel_variant(ButtonVariant::Ghost),
+        )
+        .footer(|ok, cancel, window, cx| vec![cancel(window, cx), ok(window, cx)])
+        .on_ok(move |_, window, cx| {
+            let mut created = false;
+            if let Some(entity) = ok_drawer.upgrade() {
+                entity.update(cx, |this, cx| {
+                    this.submit_form(window, cx);
+                    created = this.form_error.is_none();
+                    cx.notify();
+                });
+            }
+            created
+        })
+        .on_cancel(move |_, window, cx| {
+            if let Some(entity) = cancel_drawer.upgrade() {
+                entity.update(cx, |this, cx| {
+                    this.close_form(window, cx);
+                    cx.notify();
+                });
+            }
+            true
+        })
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .child(field_label("Nome"))
+                .children(name_input.iter().map(|state| {
+                    Input::new(state)
+                        .w_full()
+                        .rounded(px(RADIUS_CONTROL))
+                        .bg(rgb(COLOR_ELEVATED))
+                        .border_color(rgb(COLOR_BORDER))
+                }))
+                .child(field_label("Ícone"))
+                .child(
+                    div().flex().gap_2().children(PALETTE.map(|choice| {
+                        let selected = choice == icon;
+                        let tile_drawer = drawer.clone();
+                        Button::new(("new-workspace-icon", choice as u64))
+                            .child(icon_svg(
+                                choice,
+                                if selected {
+                                    COLOR_ACCENT
+                                } else {
+                                    COLOR_MUTED
+                                },
+                            ))
+                            .w(px(40.))
+                            .h(px(40.))
+                            .p_0()
+                            .rounded(px(RADIUS_CONTROL))
+                            .border_1()
+                            .border_color(rgb(if selected {
+                                COLOR_ACCENT
+                            } else {
+                                COLOR_BORDER
+                            }))
+                            .bg(rgb(if selected {
+                                COLOR_ELEVATED
+                            } else {
+                                COLOR_BASE
+                            }))
+                            .with_variant(ButtonVariant::Ghost)
+                            .on_click(move |_, _, cx| {
+                                if let Some(entity) = tile_drawer.upgrade() {
+                                    entity.update(cx, |this, cx| {
+                                        this.set_form_icon(choice);
+                                        cx.notify();
+                                    });
+                                }
+                            })
+                    })),
+                )
+                .child(field_label("Raiz"))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            Button::new("new-workspace-pick-root")
+                                .label("Escolher pasta")
+                                .rounded(px(RADIUS_CONTROL))
+                                .on_click({
+                                    let pick_drawer = pick_drawer.clone();
+                                    move |_, _, cx| {
+                                        if let Some(entity) = pick_drawer.upgrade() {
+                                            entity.update(cx, |this, cx| this.choose_root(cx));
+                                        }
+                                    }
+                                }),
+                        )
+                        .children(root_input.iter().map(|state| {
+                            Input::new(state)
+                                .flex_1()
+                                .rounded(px(RADIUS_CONTROL))
+                                .bg(rgb(COLOR_ELEVATED))
+                                .border_color(rgb(COLOR_BORDER))
+                        })),
+                )
+                .when_some(error, |this, error| {
+                    this.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .text_xs()
+                            .text_color(rgb(COLOR_DANGER))
+                            .child(error)
+                            .child("Corrija o campo indicado e tente novamente."),
+                    )
+                }),
+        )
 }
 
 impl Render for WorkspaceDrawer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_inputs(window, cx);
-        let bg = rgb(0x161922);
-        let fg = rgb(0xe6edf3);
         let active = self.store.active();
         let filter = self.filter.clone();
         let rows: Vec<WorkspaceState> = self
@@ -380,24 +604,40 @@ impl Render for WorkspaceDrawer {
             .w(px(DRAWER_WIDTH))
             .flex()
             .flex_col()
-            .gap_2()
-            .p_2()
-            .bg(bg)
-            .text_color(fg)
+            .gap_3()
+            .p_3()
+            .bg(rgb(COLOR_PANEL))
+            .border_r_1()
+            .border_color(rgb(COLOR_BORDER))
+            .text_color(rgb(COLOR_FOREGROUND))
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap_2()
-                    .children(
-                        self.filter_input
-                            .iter()
-                            .map(|state| Input::new(state).w(px(140.0))),
-                    )
+                    .children(self.filter_input.iter().map(|state| {
+                        Input::new(state)
+                            .flex_1()
+                            .rounded(px(RADIUS_CONTROL))
+                            .bg(rgb(COLOR_ELEVATED))
+                            .border_color(rgb(COLOR_BORDER))
+                            .prefix(asset_icon("search.svg", COLOR_MUTED))
+                    }))
                     .child(
-                        Button::new("workspace-add", "+")
-                            .on_click(cx.listener(|this, _, _, cx| {
+                        Button::new("workspace-add")
+                            .tooltip("Novo espaço")
+                            .child(asset_icon("plus.svg", COLOR_MUTED))
+                            .w(px(28.))
+                            .h(px(28.))
+                            .p_0()
+                            .rounded(px(RADIUS_CONTROL))
+                            .with_variant(ButtonVariant::Ghost)
+                            .on_click(cx.listener(|this, _, window, cx| {
                                 this.open_form();
+                                let drawer = cx.weak_entity();
+                                window.open_dialog(cx, move |dialog, window, cx| {
+                                    workspace_dialog(dialog, window, cx, &drawer)
+                                });
                                 cx.notify();
                             })),
                     ),
@@ -407,17 +647,41 @@ impl Render for WorkspaceDrawer {
                     div()
                         .flex()
                         .flex_col()
-                        .gap_1()
-                        .child(div().text_color(rgb(0xe3b341)).child(title.to_owned()))
-                        .child(div().text_xs().child(reason.clone()))
+                        .gap_2()
+                        .rounded(px(RADIUS_CONTROL))
+                        .border_1()
+                        .border_color(rgb(COLOR_BORDER))
+                        .bg(rgb(COLOR_ELEVATED))
+                        .p_2()
                         .child(
-                            Button::new("config-restart", "Recomeçar").on_click(
-                                cx.listener(|this, _, _, cx| this.restart(cx)),
-                            ),
+                            div()
+                                .text_sm()
+                                .text_color(rgb(COLOR_ACCENT))
+                                .child(title.to_owned()),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(COLOR_MUTED))
+                                .child(reason.clone()),
+                        )
+                        .child(
+                            Button::new("config-restart")
+                                .label("Recomeçar")
+                                .rounded(px(RADIUS_CONTROL))
+                                .with_variant(ButtonVariant::Ghost)
+                                .on_click(cx.listener(|this, _, _, cx| this.restart(cx))),
                         ),
                 )
             })
-            .child(div().text_xs().child("ESPAÇOS DE TRABALHO"))
+            .child(
+                div()
+                    .mt_4()
+                    .mb_1()
+                    .text_xs()
+                    .text_color(rgb(COLOR_MUTED))
+                    .child("Espaços de trabalho"),
+            )
             .children(rows.into_iter().map(|workspace| {
                 let id = workspace.id;
                 let is_active = active == Some(id);
@@ -428,11 +692,16 @@ impl Render for WorkspaceDrawer {
                     .items_center()
                     .gap_2()
                     .p_2()
-                    .bg(if is_active {
-                        rgb(0x2a3142)
+                    .rounded(px(RADIUS_CONTROL))
+                    .bg(rgb(if is_active {
+                        COLOR_ELEVATED
                     } else {
-                        rgb(0x161922)
+                        COLOR_PANEL
+                    }))
+                    .when(is_active, |this| {
+                        this.border_1().border_color(rgb(COLOR_ACCENT))
                     })
+                    .hover(|this| this.bg(rgb(COLOR_ELEVATED)))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _, _, cx| {
@@ -440,13 +709,21 @@ impl Render for WorkspaceDrawer {
                             cx.notify();
                         }),
                     )
-                    .child(icon_svg(workspace.icon))
+                    .child(icon_svg(
+                        workspace.icon,
+                        if is_active { COLOR_ACCENT } else { COLOR_MUTED },
+                    ))
                     .child(
                         div()
                             .flex_1()
                             .child(workspace.name)
                             .when(invalid, |this| {
-                                this.child(div().text_color(rgb(0xff8888)).child("!"))
+                                this.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(COLOR_DANGER))
+                                        .child("!"),
+                                )
                             }),
                     )
                     .child(monitor(workspace.canvas.terminals().len()))
@@ -458,84 +735,23 @@ impl Render for WorkspaceDrawer {
                                 cx.listener(|_, _, _, cx| cx.stop_propagation()),
                             )
                             .child(
-                                Button::new(format!("workspace-delete-{id}"), "×").on_click(
-                                    cx.listener(move |this, _, _, cx| {
-                                        this.emit(DrawerAction::Delete(id), cx);
-                                        cx.notify();
-                                    }),
-                                ),
+                                Button::new(SharedString::from(format!(
+                                    "workspace-delete-{id}"
+                                )))
+                                .tooltip("Remover espaço")
+                                .child(delete_icon())
+                                .w(px(20.))
+                                .h(px(20.))
+                                .p_0()
+                                .rounded(px(RADIUS_CONTROL))
+                                .with_variant(ButtonVariant::Ghost)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.emit(DrawerAction::Delete(id), cx);
+                                    cx.notify();
+                                })),
                             ),
                     )
             }))
-            .when(self.form_open, |this| {
-                let error = self.form_error.clone();
-                let icon = self.form_icon;
-                this.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .p_2()
-                        .bg(rgb(0x1a1d26))
-                        .child("Novo espaço")
-                        .child("Nome")
-                        .children(
-                            self.name_input
-                                .iter()
-                                .map(|state| Input::new(state).w_full()),
-                        )
-                        .child("Ícone")
-                        .child(
-                            div().flex().gap_1().children(PALETTE.map(|choice| {
-                                let selected = choice == icon;
-                                div()
-                                    .id(("workspace-icon", choice as u64))
-                                    .p_1()
-                                    .bg(if selected {
-                                        rgb(0x2a3142)
-                                    } else {
-                                        rgb(0x101219)
-                                    })
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(move |this, _, _, cx| {
-                                            this.set_form_icon(choice);
-                                            cx.notify();
-                                        }),
-                                    )
-                                    .child(icon_svg(choice))
-                            })),
-                        )
-                        .child("Raiz")
-                        .child(
-                            Button::new("workspace-pick-root", "Escolher raiz").on_click(
-                                cx.listener(|this, _, _, cx| this.choose_root(cx)),
-                            ),
-                        )
-                        .children(
-                            self.root_input
-                                .iter()
-                                .map(|state| Input::new(state).w_full()),
-                        )
-                        .when_some(error, |this, error| {
-                            this.child(div().text_xs().text_color(rgb(0xff8888)).child(error))
-                        })
-                        .child(
-                            div().flex().gap_2().child(
-                                Button::new("workspace-create", "Criar").on_click(
-                                    cx.listener(|this, _, window, cx| this.submit_form(window, cx)),
-                                ),
-                            ).child(
-                                Button::new("workspace-cancel", "Cancelar").on_click(
-                                    cx.listener(|this, _, window, cx| {
-                                        this.close_form(window, cx);
-                                        cx.notify();
-                                    }),
-                                ),
-                            ),
-                        ),
-                )
-            })
     }
 }
 

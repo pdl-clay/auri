@@ -21,7 +21,9 @@ pub fn run() {
             ("folder.svg", include_bytes!("../../icons/folder.svg")),
             ("bolt.svg", include_bytes!("../../icons/bolt.svg")),
             ("code.svg", include_bytes!("../../icons/code.svg")),
-            ("globe.svg", include_bytes!("../../icons/globe.svg")),
+            ("plus.svg", include_bytes!("../../icons/plus.svg")),
+            ("search.svg", include_bytes!("../../icons/search.svg")),
+            ("x.svg", include_bytes!("../../icons/x.svg")),
         ]))
         .setup(|cx, _| gpui_component::init(cx))
         .root_with("main", move |window, cx| {
