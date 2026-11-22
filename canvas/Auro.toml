@@ -9,12 +9,6 @@ title = "Canvas"
 width = 960
 height = 640
 
-[dev]
-# `types` is the shared shape; a change there is a restart, not a hot patch.
-watch = ["src", "ui/src", "data/src", "types/src", "Auro.toml"]
-# `hot = true` runs the hot-patch devserver instead of rebuilding and relaunching.
-hot = false
-
 [bundle]
 # A 512x512 placeholder shipped by `auro new`; replace it with the app's own icon.
 icon = ["icons/icon.png"]

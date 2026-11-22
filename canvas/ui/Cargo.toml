@@ -6,7 +6,6 @@ rust-version = "1.90"
 
 [dependencies]
 auro = "0.1.0-alpha.10"
-serde = { version = "1", features = ["derive"] }
 canvas-types = { path = "../types" }
 anyhow = "1"
 gpui-terminal = "0.1.0"
@@ -18,6 +17,3 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
-
-[features]
-hot-reload = ["auro/hot-reload"]
