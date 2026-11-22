@@ -262,7 +262,7 @@ impl Canvas {
         } else if shift {
             self.offset_x -= dx + dy;
         } else {
-            self.offset_y -= dy;
+            self.offset_y = pan_vertical(self.offset_y, dy);
         }
         let (zoom, offset_x, offset_y) = (self.zoom, self.offset_x, self.offset_y);
         let cards: Vec<Entity<TerminalCard>> = self
@@ -455,6 +455,11 @@ fn canvas_icon(path: &'static str) -> impl IntoElement {
         .w(px(16.0))
         .h(px(16.0))
         .text_color(rgb(0x93a0b5))
+}
+
+/// Scroll down moves the canvas content up, like a normal document.
+fn pan_vertical(offset_y: f32, dy: f32) -> f32 {
+    offset_y + dy
 }
 
 /// Scroll up shrinks the canvas; scroll down enlarges it.
@@ -720,6 +725,12 @@ mod tests {
     fn zoom_scroll_direction_is_inverted() {
         assert!(zoom_factor(-110.0) < 1.0);
         assert!(zoom_factor(110.0) > 1.0);
+    }
+
+    #[test]
+    fn vertical_scroll_moves_canvas_down() {
+        assert_eq!(pan_vertical(100.0, 20.0), 120.0);
+        assert_eq!(pan_vertical(100.0, -20.0), 80.0);
     }
 
     #[test]
