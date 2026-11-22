@@ -380,6 +380,12 @@ impl Render for Canvas {
                                     this.select(workspace_id, id, cx);
                                 }),
                             )
+                            .when(selected == Some(id), |wrapper| {
+                                wrapper
+                                    .border_2()
+                                    .border_dashed()
+                                    .border_color(rgb(0x5b9dff))
+                            })
                             .child(card.clone())
                     })
                     .collect()
@@ -459,14 +465,6 @@ impl Render for Canvas {
                     .flex_col()
                     .items_end()
                     .justify_center()
-                    .when_some(selected, |column, id| {
-                        column.child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(0x93a0b5))
-                                .child(format!("Terminal {id}")),
-                        )
-                    })
                     .child(
                         div()
                             .flex()
