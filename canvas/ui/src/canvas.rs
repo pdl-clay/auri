@@ -452,53 +452,56 @@ impl Render for Canvas {
             .child(
                 div()
                     .absolute()
-                    .top(px(12.0))
+                    .top(px(0.0))
+                    .bottom(px(0.0))
                     .right(px(12.0))
                     .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_1()
-                    .p_1()
-                    .rounded(px(20.0))
-                    .bg(rgb(0x1b2130))
-                    .border_1()
-                    .border_color(rgb(0x2b3547))
-                    .when_some(selected, |island, id| {
-                        island.child(
+                    .flex_col()
+                    .items_end()
+                    .justify_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
+                            .p_1()
+                            .rounded(px(20.0))
+                            .bg(rgb(0x1b2130))
+                            .border_1()
+                            .border_color(rgb(0x2b3547))
+                            .when_some(selected, |island, id| {
+                                island.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(0x93a0b5))
+                                        .child(format!("Terminal {id}")),
+                                )
+                            })
+                            .child(add)
+                            .child(remove),
+                    )
+                    .when(active.is_none(), |column| {
+                        column.child(
                             div()
                                 .text_xs()
                                 .text_color(rgb(0x93a0b5))
-                                .child(format!("Terminal {id}")),
+                                .child("Crie um espaço de trabalho para adicionar terminais."),
                         )
                     })
-                    .child(add)
-                    .child(remove),
+                    .children(self.error.iter().map(|message| {
+                        div()
+                            .rounded(px(8.0))
+                            .bg(rgb(0x1b2130))
+                            .border_1()
+                            .border_color(rgb(0x2b3547))
+                            .p_2()
+                            .text_xs()
+                            .text_color(rgb(0xf08a8a))
+                            .child(message.clone())
+                    })),
             )
-            .when(active.is_none(), |pane| {
-                pane.child(
-                    div()
-                        .absolute()
-                        .top(px(52.0))
-                        .right(px(12.0))
-                        .text_xs()
-                        .text_color(rgb(0x93a0b5))
-                        .child("Crie um espaço de trabalho para adicionar terminais."),
-                )
-            })
-            .children(self.error.iter().map(|message| {
-                div()
-                    .absolute()
-                    .top(px(52.0))
-                    .right(px(12.0))
-                    .rounded(px(8.0))
-                    .bg(rgb(0x1b2130))
-                    .border_1()
-                    .border_color(rgb(0x2b3547))
-                    .p_2()
-                    .text_xs()
-                    .text_color(rgb(0xf08a8a))
-                    .child(message.clone())
-            }))
             .children(gpui_component::Root::render_dialog_layer(window, cx))
     }
 }
