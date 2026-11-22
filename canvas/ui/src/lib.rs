@@ -2,6 +2,7 @@
 
 pub mod canvas;
 pub mod card;
+pub mod config;
 pub mod pty;
 
 use auro::{App, gpui::AppContext};

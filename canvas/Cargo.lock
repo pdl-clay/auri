@@ -877,6 +877,9 @@ dependencies = [
 [[package]]
 name = "canvas-types"
 version = "0.1.0"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "canvas-ui"
@@ -889,6 +892,8 @@ dependencies = [
  "libc",
  "parking_lot",
  "portable-pty",
+ "serde",
+ "serde_json",
  "tempfile",
 ]
 
