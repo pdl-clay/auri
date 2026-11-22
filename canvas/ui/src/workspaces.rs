@@ -1,13 +1,14 @@
 //! Workspace drawer: filter, creation form and native directory picker.
 
 use auro::gpui::{
-    Context, Entity, MouseButton, PathPromptOptions, Render, Subscription, Window, div, px, rgb,
-    svg,
+    App, Context, Entity, Image, ImageFormat, ImageSource, MouseButton, PathPromptOptions, Render,
+    Subscription, Window, div, img, px, rgb,
 };
 use auro::prelude::*;
 use canvas_types::{WorkspaceIcon, WorkspaceId, WorkspaceState, WorkspaceStore};
 use gpui_component::input::{Input, InputEvent, InputState};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::config::{self, LoadOutcome};
 
@@ -57,7 +58,8 @@ pub struct WorkspaceDrawer {
     root_subscription: Option<Subscription>,
     form_icon: WorkspaceIcon,
     form_error: Option<String>,
-    action_handler: Option<Box<dyn Fn(DrawerAction)>>,
+    action_handler: Option<Box<dyn Fn(DrawerAction, &mut App)>>,
+    restart_handler: Option<Box<dyn Fn(&WorkspaceStore, &mut App)>>,
 }
 
 impl WorkspaceDrawer {
@@ -80,12 +82,18 @@ impl WorkspaceDrawer {
             form_icon: WorkspaceIcon::Star,
             form_error: None,
             action_handler: None,
+            restart_handler: None,
         }
     }
 
     /// Consumer of every mutation requested from this drawer.
-    pub fn on_action(&mut self, handler: impl Fn(DrawerAction) + 'static) {
+    pub fn on_action(&mut self, handler: impl Fn(DrawerAction, &mut App) + 'static) {
         self.action_handler = Some(Box::new(handler));
+    }
+
+    /// Notified after `config::restart` replaces the store, so the owner can resync.
+    pub fn on_restart(&mut self, handler: impl Fn(&WorkspaceStore, &mut App) + 'static) {
+        self.restart_handler = Some(Box::new(handler));
     }
 
     /// Replace the displayed snapshot after the owner mutates its store.
@@ -135,9 +143,9 @@ impl WorkspaceDrawer {
         self.form_open
     }
 
-    fn emit(&self, action: DrawerAction) {
+    fn emit(&self, action: DrawerAction, cx: &mut App) {
         if let Some(handler) = &self.action_handler {
-            handler(action);
+            handler(action, cx);
         }
     }
 
@@ -274,11 +282,14 @@ impl WorkspaceDrawer {
             cx.notify();
             return;
         }
-        self.emit(DrawerAction::Create {
-            name,
-            icon: self.form_icon,
-            root,
-        });
+        self.emit(
+            DrawerAction::Create {
+                name,
+                icon: self.form_icon,
+                root,
+            },
+            cx,
+        );
         self.close_form();
         cx.notify();
     }
@@ -286,26 +297,33 @@ impl WorkspaceDrawer {
     /// "Recomeçar": back up the damaged config and install a fresh initial store.
     fn restart(&mut self, cx: &mut Context<Self>) {
         self.load = match config::restart(&mut self.store) {
-            Ok(()) => LoadOutcome::Loaded,
+            Ok(()) => {
+                self.set_store(self.store.clone());
+                LoadOutcome::Loaded
+            }
             Err(error) => LoadOutcome::Corrupt(format!("Recomeçar falhou: {error}")),
         };
+        if let Some(handler) = &self.restart_handler {
+            handler(&self.store, cx);
+        }
         cx.notify();
     }
 }
 
-fn icon_svg(icon: WorkspaceIcon) -> impl IntoElement {
-    let path = match icon {
-        WorkspaceIcon::Star => "icons/star.svg",
-        WorkspaceIcon::Folder => "icons/folder.svg",
-        WorkspaceIcon::Bolt => "icons/bolt.svg",
-        WorkspaceIcon::Code => "icons/code.svg",
-        WorkspaceIcon::Globe => "icons/globe.svg",
+fn icon_png(icon: WorkspaceIcon) -> impl IntoElement {
+    let bytes: &[u8] = match icon {
+        WorkspaceIcon::Star => include_bytes!("../../icons/star.png"),
+        WorkspaceIcon::Folder => include_bytes!("../../icons/folder.png"),
+        WorkspaceIcon::Bolt => include_bytes!("../../icons/bolt.png"),
+        WorkspaceIcon::Code => include_bytes!("../../icons/code.png"),
+        WorkspaceIcon::Globe => include_bytes!("../../icons/globe.png"),
     };
-    svg()
-        .path(path)
-        .w(px(ICON_SIZE))
-        .h(px(ICON_SIZE))
-        .text_color(rgb(0xe6edf3))
+    img(ImageSource::Image(Arc::new(Image::from_bytes(
+        ImageFormat::Png,
+        bytes.to_vec(),
+    ))))
+    .w(px(ICON_SIZE))
+    .h(px(ICON_SIZE))
 }
 
 fn monitor(count: usize) -> impl IntoElement {
@@ -399,11 +417,11 @@ impl Render for WorkspaceDrawer {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _, _, cx| {
-                            this.emit(DrawerAction::Select(id));
+                            this.emit(DrawerAction::Select(id), cx);
                             cx.notify();
                         }),
                     )
-                    .child(icon_svg(workspace.icon))
+                    .child(icon_png(workspace.icon))
                     .child(
                         div()
                             .flex_1()
@@ -423,7 +441,7 @@ impl Render for WorkspaceDrawer {
                             .child(
                                 Button::new(format!("workspace-delete-{id}"), "×").on_click(
                                     cx.listener(move |this, _, _, cx| {
-                                        this.emit(DrawerAction::Delete(id));
+                                        this.emit(DrawerAction::Delete(id), cx);
                                         cx.notify();
                                     }),
                                 ),
@@ -466,7 +484,7 @@ impl Render for WorkspaceDrawer {
                                             cx.notify();
                                         }),
                                     )
-                                    .child(icon_svg(choice))
+                                    .child(icon_png(choice))
                             })),
                         )
                         .child("Raiz")

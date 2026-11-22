@@ -174,6 +174,11 @@ impl WorkspaceStore {
         self.workspaces.iter_mut().find(|workspace| workspace.id == id)
     }
 
+    /// Mutable access to a workspace by id, including inactive ones.
+    pub fn workspace_mut(&mut self, id: WorkspaceId) -> Option<&mut WorkspaceState> {
+        self.workspaces.iter_mut().find(|workspace| workspace.id == id)
+    }
+
     pub fn workspaces(&self) -> &[WorkspaceState] {
         &self.workspaces
     }

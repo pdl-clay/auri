@@ -1,53 +1,240 @@
-//! Canvas view: grid background, toolbar and the lifecycle of PTY-backed cards.
+//! Canvas view: drawer, workspace groups and the lifecycle of PTY-backed cards.
+
+use std::collections::HashMap;
+use std::path::PathBuf;
 
 use auro::gpui::{
     Bounds, Context, Entity, MouseButton, MouseDownEvent, Point, Render, Size, Window, canvas,
     fill, px, rgb,
 };
 use auro::prelude::*;
-use canvas_types::{CanvasState, TerminalId};
+use canvas_types::{CanvasState, TerminalId, WorkspaceIcon, WorkspaceId, WorkspaceState, WorkspaceStore};
 
 use crate::card::{TerminalCard, terminal_grid};
+use crate::config::{self, LoadOutcome};
 use crate::pty::PtySession;
+use crate::workspaces::{DrawerAction, WorkspaceDrawer};
 
 const GRID_STEP: f32 = 24.0;
 const CARD_WIDTH: f32 = 480.0;
 const CARD_HEIGHT: f32 = 320.0;
 
-/// Owns the logical canvas state, its terminal cards and the last spawn error.
-pub struct Canvas {
-    pub(crate) state: CanvasState,
-    cards: Vec<(TerminalId, Entity<TerminalCard>)>,
-    error: Option<String>,
+type CardGroups = HashMap<WorkspaceId, Vec<(TerminalId, Entity<TerminalCard>)>>;
+
+/// Terminals are never restored from disk; their runtime state must not survive a save.
+fn clear_terminals(store: &mut WorkspaceStore) {
+    let ids: Vec<WorkspaceId> = store.workspaces().iter().map(|workspace| workspace.id).collect();
+    for id in ids {
+        if let Some(workspace) = store.workspace_mut(id) {
+            workspace.canvas = CanvasState::new();
+        }
+    }
 }
 
+fn persisted_snapshot(store: &WorkspaceStore) -> WorkspaceStore {
+    let mut snapshot = store.clone();
+    clear_terminals(&mut snapshot);
+    snapshot
+}
+/// Why no terminal can be spawned in the active workspace.
+#[derive(Debug, PartialEq, Eq)]
+enum SpawnTargetError {
+    NoWorkspace,
+    InvalidRoot(PathBuf),
+}
+
+impl SpawnTargetError {
+    fn message(&self) -> String {
+        match self {
+            Self::NoWorkspace => "Crie um espaço de trabalho antes de adicionar terminais.".into(),
+            Self::InvalidRoot(root) => {
+                format!("A raiz {} não está disponível.", root.display())
+            }
+        }
+    }
+}
+
+/// Create a workspace, refusing a blank or unusable root.
+fn create_workspace(
+    store: &mut WorkspaceStore,
+    name: String,
+    icon: WorkspaceIcon,
+    root: PathBuf,
+) -> Result<WorkspaceId, String> {
+    let name = name.trim().to_owned();
+    if name.is_empty() {
+        return Err("Informe um nome para o espaço.".into());
+    }
+    if root.as_os_str().is_empty() {
+        return Err("Escolha uma raiz para o espaço.".into());
+    }
+    if !root.is_dir() {
+        return Err(format!("A raiz {} não é um diretório.", root.display()));
+    }
+    Ok(store.add(name, icon, root).id)
+}
+
+/// Remove one workspace's state and card group, leaving every other group alone.
+fn remove_workspace(
+    store: &mut WorkspaceStore,
+    groups: &mut CardGroups,
+    id: WorkspaceId,
+) -> Option<(WorkspaceState, Vec<(TerminalId, Entity<TerminalCard>)>)> {
+    let removed = store.remove(id)?;
+    let cards = groups.remove(&id).unwrap_or_default();
+    Some((removed, cards))
+}
+
+/// Allocate a terminal in the active workspace and return its spawn target.
+fn active_spawn_target(
+    store: &mut WorkspaceStore,
+) -> Result<(WorkspaceId, TerminalId, PathBuf), SpawnTargetError> {
+    let workspace = store
+        .active_mut()
+        .ok_or(SpawnTargetError::NoWorkspace)?;
+    if workspace.root.as_os_str().is_empty()
+        || workspace.invalid_root
+        || !workspace.root.is_dir()
+    {
+        return Err(SpawnTargetError::InvalidRoot(workspace.root.clone()));
+    }
+    let id = workspace.canvas.add().id;
+    Ok((workspace.id, id, workspace.root.clone()))
+}
+
+fn terminal_owner(store: &WorkspaceStore, id: TerminalId) -> Option<WorkspaceId> {
+    store
+        .workspaces()
+        .iter()
+        .find(|workspace| workspace.canvas.terminals().iter().any(|item| item.id == id))
+        .map(|workspace| workspace.id)
+}
+
+/// Owns the workspace store, its drawer and every workspace' terminal cards.
+pub struct Canvas {
+    store: WorkspaceStore,
+    drawer: Entity<WorkspaceDrawer>,
+    cards: CardGroups,
+    error: Option<String>,
+}
 impl Canvas {
-    pub fn new() -> Self {
+    /// `load` is authoritative for the drawer banner; the store was already
+    /// loaded by the caller and is pushed back into the drawer explicitly.
+    pub fn new(mut store: WorkspaceStore, load: LoadOutcome, cx: &mut Context<Self>) -> Self {
+        clear_terminals(&mut store);
+        let drawer = cx.new(|_| WorkspaceDrawer::new(load));
+        drawer.update(cx, |drawer, _| drawer.set_store(store.clone()));
         Self {
-            state: CanvasState::new(),
-            cards: Vec::new(),
+            store,
+            drawer,
+            cards: HashMap::new(),
             error: None,
         }
     }
 
-    #[cfg(test)]
-    fn new_for_test() -> Self {
-        Self::new()
+    /// Wire drawer actions back to this canvas without creating a strong cycle.
+    pub fn bind_actions(&mut self, cx: &mut Context<Self>) {
+        let weak = cx.entity().downgrade();
+        let restart_weak = weak.clone();
+        self.drawer.update(cx, |drawer, _| {
+            drawer.on_action(move |action, cx| {
+                if let Some(canvas) = weak.upgrade() {
+                    canvas
+                        .update(cx, |canvas, cx| canvas.handle_action(action, cx))
+
+                }
+            });
+            drawer.on_restart(move |store, cx| {
+                if let Some(canvas) = restart_weak.upgrade() {
+                    canvas
+                        .update(cx, |canvas, cx| {
+                            canvas.adopt_restarted_store(store.clone(), cx)
+                        })
+
+                }
+            });
+        });
+    }
+
+    fn handle_action(&mut self, action: DrawerAction, cx: &mut Context<Self>) {
+        match action {
+            DrawerAction::Create { name, icon, root } => {
+                match create_workspace(&mut self.store, name, icon, root) {
+                    Ok(id) => {
+                        self.cards.entry(id).or_default();
+                        self.finish_store_change(cx);
+                    }
+                    Err(error) => {
+                        self.error = Some(error);
+                        cx.notify();
+                    }
+                }
+            }
+            DrawerAction::Delete(id) => {
+                if let Some((_, dropped)) = remove_workspace(&mut self.store, &mut self.cards, id) {
+                    self.finish_store_change(cx);
+                    // Dropping the card handles terminates that workspace's shells.
+                    drop(dropped);
+                }
+            }
+            DrawerAction::Select(id) => {
+                if self.store.active() != Some(id) {
+                    self.store.select(id);
+                    self.finish_store_change(cx);
+                }
+            }
+        }
+    }
+
+    fn finish_store_change(&mut self, cx: &mut Context<Self>) {
+        self.error = match config::save(&persisted_snapshot(&self.store)) {
+            Ok(()) => None,
+            Err(error) => Some(format!("Não foi possível salvar os espaços: {error}")),
+        };
+        let store = self.store.clone();
+        let drawer = self.drawer.clone();
+        // The action is emitted from inside a drawer update; defer the resync.
+        cx.defer(move |cx| {
+            drawer
+                .update(cx, |drawer, cx| {
+                    drawer.set_store(store);
+                    cx.notify();
+                })
+
+        });
+        cx.notify();
+    }
+
+    /// `config::restart` already replaced the file and the drawer's store.
+    fn adopt_restarted_store(&mut self, store: WorkspaceStore, cx: &mut Context<Self>) {
+        self.store = store;
+        self.cards.clear();
+        self.error = None;
+        cx.notify();
     }
 
     pub fn add_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let id = self.state.add().id;
-        let offset = GRID_STEP * (self.cards.len() % 8) as f32;
+        let (workspace_id, id, root) = match active_spawn_target(&mut self.store) {
+            Ok(target) => target,
+            Err(error) => {
+                self.error = Some(error.message());
+                cx.notify();
+                return;
+            }
+        };
+        let offset = GRID_STEP * (self.cards.get(&workspace_id).map_or(0, Vec::len) % 8) as f32;
         let bounds = Bounds::new(
             Point::new(px(16.0 + offset), px(16.0 + offset)),
             Size::new(px(CARD_WIDTH), px(CARD_HEIGHT)),
         );
         let (cols, rows) = terminal_grid(&bounds);
-        let pty = match PtySession::spawn_shell(cols, rows) {
+        let pty = match PtySession::spawn_shell_in(cols, rows, Some(&root)) {
             Ok(pty) => pty,
             Err(error) => {
                 // A failed fork must not leave a phantom entry in the state.
-                self.state.remove(id);
+                if let Some(workspace) = self.store.workspace_mut(workspace_id) {
+                    workspace.canvas.remove(id);
+                }
                 self.error = Some(format!("Terminal {id} não iniciou: {error}"));
                 cx.notify();
                 return;
@@ -59,35 +246,83 @@ impl Canvas {
             TerminalCard::new(id, bounds, canvas.clone(), pty, (cols, rows), cx)
         });
         card.read(cx).terminal.read(cx).focus_handle().focus(window);
-        self.cards.push((id, card));
+        self.cards.entry(workspace_id).or_default().push((id, card));
+        self.sync_drawer(cx);
         cx.notify();
     }
 
+    /// Terminal mutations only change the in-memory snapshot shown by the drawer:
+    /// they are deliberately not persisted because shells are not restored.
+    fn sync_drawer(&mut self, cx: &mut Context<Self>) {
+        let store = self.store.clone();
+        let drawer = self.drawer.clone();
+        cx.defer(move |cx| {
+            drawer
+                .update(cx, |drawer, cx| {
+                    drawer.set_store(store);
+                    cx.notify();
+                })
+
+        });
+    }
+
     pub fn remove(&mut self, id: TerminalId) {
-        if self.state.remove(id).is_some() {
-            // Dropping the last strong handle drops TerminalCard, and PtySession::Drop
-            // terminates the shell's whole process group.
-            self.cards.retain(|(card_id, _)| *card_id != id);
+        let Some(workspace_id) = terminal_owner(&self.store, id) else {
+            return;
+        };
+        let Some(workspace) = self.store.workspace_mut(workspace_id) else {
+            return;
+        };
+        if workspace.canvas.remove(id).is_none() {
+            return;
+        }
+        if let Some(cards) = self.cards.get_mut(&workspace_id) {
+            cards.retain(|(card_id, _)| *card_id != id);
         }
     }
 
-    pub fn remove_selected(&mut self) {
-        if let Some(id) = self.state.selected() {
-            self.remove(id);
-        }
+    pub fn remove_selected(&mut self, cx: &mut Context<Self>) {
+        let Some(workspace_id) = self.store.active() else {
+            return;
+        };
+        let Some(id) = self
+            .store
+            .workspace_mut(workspace_id)
+            .and_then(|workspace| workspace.canvas.selected())
+        else {
+            return;
+        };
+        self.remove(id);
+        self.sync_drawer(cx);
+        cx.notify();
     }
 
     pub fn select(&mut self, id: TerminalId, cx: &mut Context<Self>) {
-        if self.state.selected() != Some(id) {
-            self.state.select(id);
+        let Some(workspace_id) = terminal_owner(&self.store, id) else {
+            return;
+        };
+        let Some(workspace) = self.store.workspace_mut(workspace_id) else {
+            return;
+        };
+        if workspace.canvas.selected() != Some(id) {
+            workspace.canvas.select(id);
             cx.notify();
         }
     }
 
     pub fn mark_exited(&mut self, id: TerminalId, cx: &mut Context<Self>) {
-        self.state.mark_exited(id);
-        if let Some((_, card)) = self.cards.iter().find(|(card_id, _)| *card_id == id) {
-            card.update(cx, |card, cx| card.set_exited(cx));
+        let Some(workspace_id) = terminal_owner(&self.store, id) else {
+            return;
+        };
+        if let Some(workspace) = self.store.workspace_mut(workspace_id) {
+            workspace.canvas.mark_exited(id);
+        }
+        if let Some(card) = self
+            .cards
+            .get(&workspace_id)
+            .and_then(|cards| cards.iter().find(|(card_id, _)| *card_id == id))
+        {
+            card.1.update(cx, |card, cx| card.set_exited(cx));
         }
         cx.notify();
     }
@@ -95,77 +330,22 @@ impl Canvas {
 
 impl Render for Canvas {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let selected = self.state.selected();
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .bg(rgb(0x0f1117))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .p_2()
-                    .bg(rgb(0x1a1d26))
-                    .child(Button::new("add-terminal", "Adicionar terminal").on_click(
-                        cx.listener(|this, _, window, cx| this.add_terminal(window, cx)),
-                    ))
-                    .child(Button::new("remove-selected", "Apagar selecionado").on_click(
-                        cx.listener(|this, _, _, cx| {
-                            this.remove_selected();
-                            cx.notify();
-                        }),
-                    ))
-                    .when_some(selected, |bar, id| {
-                        bar.child(format!("Selecionado: Terminal {id}"))
-                    })
-                    .children(self.error.iter().map(|message| {
-                        div().text_color(rgb(0xff8888)).child(message.clone())
-                    })),
-            )
-            .child(
-                div()
-                    .relative()
-                    .flex_1()
-                    .min_h_0()
-                    .child(
-                        canvas(
-                            |_, _, _| {},
-                            |bounds, _, window, _| {
-                                let origin = bounds.origin;
-                                let width = f32::from(bounds.size.width);
-                                let height = f32::from(bounds.size.height);
-                                let mut x = GRID_STEP;
-                                while x < width {
-                                    window.paint_quad(fill(
-                                        Bounds::new(
-                                            Point::new(px(f32::from(origin.x) + x), origin.y),
-                                            Size::new(px(1.0), bounds.size.height),
-                                        ),
-                                        rgb(0x242936),
-                                    ));
-                                    x += GRID_STEP;
-                                }
-                                let mut y = GRID_STEP;
-                                while y < height {
-                                    window.paint_quad(fill(
-                                        Bounds::new(
-                                            Point::new(origin.x, px(f32::from(origin.y) + y)),
-                                            Size::new(bounds.size.width, px(1.0)),
-                                        ),
-                                        rgb(0x242936),
-                                    ));
-                                    y += GRID_STEP;
-                                }
-                            },
-                        )
-                        .absolute()
-                        .left(px(0.0))
-                        .top(px(0.0))
-                        .size_full(),
-                    )
-                    .children(self.cards.iter().map(|(id, card)| {
+        let active = self.store.active();
+        let selected = active
+            .and_then(|id| self.store.workspaces().iter().find(|item| item.id == id))
+            .and_then(|workspace| workspace.canvas.selected());
+        let add = Button::new("add-terminal", "Adicionar terminal");
+        let add = if active.is_some() {
+            add.on_click(cx.listener(|this, _, window, cx| this.add_terminal(window, cx)))
+        } else {
+            add
+        };
+        let cards: Vec<_> = active
+            .and_then(|id| self.cards.get(&id))
+            .map(|group| {
+                group
+                    .iter()
+                    .map(|(id, card)| {
                         let id = *id;
                         div()
                             .id(("card-wrapper", id))
@@ -176,7 +356,100 @@ impl Render for Canvas {
                                 }),
                             )
                             .child(card.clone())
-                    })),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        div()
+            .size_full()
+            .flex()
+            .flex_row()
+            .bg(rgb(0x0f1117))
+            .child(self.drawer.clone())
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .min_h_0()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .p_2()
+                            .bg(rgb(0x1a1d26))
+                            .child(add)
+                            .child(Button::new("remove-selected", "Apagar selecionado").on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.remove_selected(cx);
+                                }),
+                            ))
+                            .when_some(selected, |bar, id| {
+                                bar.child(format!("Selecionado: Terminal {id}"))
+                            })
+                            .when(active.is_none(), |bar| {
+                                bar.child(
+                                    div()
+                                        .text_xs()
+                                        .child("Crie um espaço de trabalho para adicionar terminais."),
+                                )
+                            })
+                            .children(self.error.iter().map(|message| {
+                                div().text_color(rgb(0xff8888)).child(message.clone())
+                            })),
+                    )
+                    .child(
+                        div()
+                            .relative()
+                            .flex_1()
+                            .min_h_0()
+                            .child(
+                                canvas(
+                                    |_, _, _| {},
+                                    |bounds, _, window, _| {
+                                        let origin = bounds.origin;
+                                        let width = f32::from(bounds.size.width);
+                                        let height = f32::from(bounds.size.height);
+                                        let mut x = GRID_STEP;
+                                        while x < width {
+                                            window.paint_quad(fill(
+                                                Bounds::new(
+                                                    Point::new(
+                                                        px(f32::from(origin.x) + x),
+                                                        origin.y,
+                                                    ),
+                                                    Size::new(px(1.0), bounds.size.height),
+                                                ),
+                                                rgb(0x242936),
+                                            ));
+                                            x += GRID_STEP;
+                                        }
+                                        let mut y = GRID_STEP;
+                                        while y < height {
+                                            window.paint_quad(fill(
+                                                Bounds::new(
+                                                    Point::new(
+                                                        origin.x,
+                                                        px(f32::from(origin.y) + y),
+                                                    ),
+                                                    Size::new(bounds.size.width, px(1.0)),
+                                                ),
+                                                rgb(0x242936),
+                                            ));
+                                            y += GRID_STEP;
+                                        }
+                                    },
+                                )
+                                .absolute()
+                                .left(px(0.0))
+                                .top(px(0.0))
+                                .size_full(),
+                            )
+                            .children(cards),
+                    ),
             )
     }
 }
@@ -185,11 +458,113 @@ impl Render for Canvas {
 mod tests {
     use super::*;
 
+    fn groups_for(store: &WorkspaceStore) -> CardGroups {
+        store
+            .workspaces()
+            .iter()
+            .map(|workspace| (workspace.id, Vec::new()))
+            .collect()
+    }
+
     #[test]
-    fn remove_selected_drops_state_entry() {
-        let mut canvas = Canvas::new_for_test();
-        canvas.state.add();
-        canvas.remove_selected();
-        assert!(canvas.state.terminals().is_empty());
+    fn remove_workspace_drops_only_its_group_and_clears_active() {
+        let mut store = WorkspaceStore::new();
+        let first = store.add("A".into(), WorkspaceIcon::Star, PathBuf::from("/a"));
+        let second = store.add("B".into(), WorkspaceIcon::Folder, PathBuf::from("/b"));
+        let mut groups = groups_for(&store);
+        store.active_mut().unwrap().canvas.add();
+
+        let (removed, dropped) = remove_workspace(&mut store, &mut groups, second.id).unwrap();
+
+        assert_eq!(removed.id, second.id);
+        assert!(dropped.is_empty());
+        assert!(!groups.contains_key(&second.id));
+        assert!(groups.contains_key(&first.id));
+        assert_eq!(store.active(), Some(first.id));
+        assert!(store.active_mut().unwrap().canvas.terminals().is_empty());
+    }
+
+    #[test]
+    fn remove_workspace_that_is_not_active_keeps_selection() {
+        let mut store = WorkspaceStore::new();
+        let first = store.add("A".into(), WorkspaceIcon::Star, PathBuf::from("/a"));
+        let second = store.add("B".into(), WorkspaceIcon::Bolt, PathBuf::from("/b"));
+        store.select(first.id);
+        let mut groups = groups_for(&store);
+
+        remove_workspace(&mut store, &mut groups, second.id).unwrap();
+
+        assert_eq!(store.active(), Some(first.id));
+        assert!(groups.contains_key(&first.id));
+    }
+
+    #[test]
+    fn create_workspace_with_empty_root_is_refused() {
+        let mut store = WorkspaceStore::new();
+
+        let result = create_workspace(
+            &mut store,
+            "Vazia".into(),
+            WorkspaceIcon::Star,
+            PathBuf::new(),
+        );
+
+        assert!(result.is_err());
+        assert!(store.workspaces().is_empty());
+        assert_eq!(store.active(), None);
+    }
+
+    #[test]
+    fn add_terminal_without_active_workspace_creates_nothing() {
+        let mut store = WorkspaceStore::new();
+
+        let result = active_spawn_target(&mut store);
+
+        assert_eq!(result, Err(SpawnTargetError::NoWorkspace));
+        assert!(store.workspaces().is_empty());
+    }
+
+    #[test]
+    fn add_terminal_uses_active_workspace_root_and_state() {
+        let mut store = WorkspaceStore::new();
+        let workspace = store.add(
+            "A".into(),
+            WorkspaceIcon::Star,
+            std::env::current_dir().unwrap(),
+        );
+
+        let (id, terminal, root) = active_spawn_target(&mut store).unwrap();
+
+        assert_eq!(id, workspace.id);
+        assert_eq!(root, workspace.root);
+        assert_eq!(
+            store
+                .workspaces()
+                .iter()
+                .find(|item| item.id == id)
+                .unwrap()
+                .canvas
+                .terminals()
+                .len(),
+            1
+        );
+        assert_eq!(terminal, 1);
+    }
+
+    #[test]
+    fn persisted_snapshot_drops_runtime_terminals() {
+        let mut store = WorkspaceStore::new();
+        let workspace = store.add(
+            "A".into(),
+            WorkspaceIcon::Star,
+            std::env::current_dir().unwrap(),
+        );
+        active_spawn_target(&mut store).unwrap();
+
+        let snapshot = persisted_snapshot(&store);
+
+        assert!(snapshot.workspaces()[0].canvas.terminals().is_empty());
+        assert_eq!(snapshot.active(), Some(workspace.id));
+        assert_eq!(store.workspaces()[0].canvas.terminals().len(), 1);
     }
 }
