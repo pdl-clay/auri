@@ -15,22 +15,8 @@ use gpui_component::{
 use std::path::PathBuf;
 
 use crate::config::{self, LoadOutcome};
+use crate::theme::*;
 
-pub const DRAWER_WIDTH: f32 = 224.0;
-const COLOR_BASE: u32 = 0x0E1117;
-const COLOR_PANEL: u32 = 0x151A23;
-const COLOR_ELEVATED: u32 = 0x1B2130;
-const COLOR_BORDER: u32 = 0x2B3547;
-const COLOR_FOREGROUND: u32 = 0xE7ECF4;
-const COLOR_MUTED: u32 = 0x93A0B5;
-const COLOR_ACCENT: u32 = 0xD8A64A;
-const COLOR_DANGER: u32 = 0xF08A8A;
-
-const RADIUS_CHIP: f32 = 4.;
-const RADIUS_CONTROL: f32 = 8.;
-const RADIUS_DIALOG: f32 = 14.;
-
-const ICON_SIZE: f32 = 16.;
 const PALETTE: [WorkspaceIcon; 5] = [
     WorkspaceIcon::Star,
     WorkspaceIcon::Folder,

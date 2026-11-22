@@ -15,13 +15,10 @@ use gpui_component::{
 use canvas_types::{CanvasState, TerminalId, WorkspaceIcon, WorkspaceId, WorkspaceState, WorkspaceStore};
 
 use crate::card::{TerminalCard, scroll_delta, terminal_grid};
-use crate::workspaces::{DRAWER_WIDTH, DrawerAction, WorkspaceDrawer};
+use crate::workspaces::{DrawerAction, WorkspaceDrawer};
+use crate::theme::*;
 use crate::config::{self, LoadOutcome};
 use crate::pty::PtySession;
-
-const GRID_STEP: f32 = 24.0;
-const CARD_WIDTH: f32 = 640.0;
-const CARD_HEIGHT: f32 = 400.0;
 
 type CardGroups = HashMap<WorkspaceId, Vec<(TerminalId, Entity<TerminalCard>)>>;
 
@@ -454,7 +451,7 @@ fn canvas_icon(path: &'static str) -> impl IntoElement {
         .path(path)
         .w(px(16.0))
         .h(px(16.0))
-        .text_color(rgb(0x93a0b5))
+        .text_color(rgb(COLOR_MUTED))
 }
 
 /// Scroll down moves the canvas content up, like a normal document.
@@ -528,7 +525,7 @@ impl Render for Canvas {
             .size_full()
             .flex()
             .flex_row()
-            .bg(rgb(0x0f1117))
+            .bg(rgb(COLOR_BASE))
             .child(self.drawer.clone())
             .child(
                 div()
@@ -566,7 +563,7 @@ impl Render for Canvas {
                                                     ),
                                                     Size::new(px(1.0), bounds.size.height),
                                                 ),
-                                                rgb(0x242936),
+                                                rgb(COLOR_GRID),
                                             ));
                                             x += step;
                                         }
@@ -580,7 +577,7 @@ impl Render for Canvas {
                                                     ),
                                                     Size::new(bounds.size.width, px(1.0)),
                                                 ),
-                                                rgb(0x242936),
+                                                rgb(COLOR_GRID),
                                             ));
                                             y += step;
                                         }
@@ -615,15 +612,15 @@ impl Render for Canvas {
                                                 .items_center()
                                                 .gap_2()
                                                 .rounded(px(20.0))
-                                                .bg(rgb(0x1b2130))
+                                                .bg(rgb(COLOR_ELEVATED))
                                                 .border_1()
-                                                .border_color(rgb(0x5b9dff))
+                                                .border_color(rgb(COLOR_SELECTION))
                                                 .px_3()
                                                 .py_1()
                                                 .child(
                                                     div()
                                                         .text_xs()
-                                                        .text_color(rgb(0xc9d1d9))
+                                                        .text_color(rgb(COLOR_FOREGROUND))
                                                         .child("Clique no canvas para posicionar o terminal"),
                                                 )
                                                 .child(
@@ -665,9 +662,9 @@ impl Render for Canvas {
                             .gap_1()
                             .p_1()
                             .rounded(px(20.0))
-                            .bg(rgb(0x1b2130))
+                            .bg(rgb(COLOR_ELEVATED))
                             .border_1()
-                            .border_color(rgb(0x2b3547))
+                            .border_color(rgb(COLOR_BORDER))
                             .child(add)
                             .child(remove),
                     )
@@ -675,19 +672,19 @@ impl Render for Canvas {
                         column.child(
                             div()
                                 .text_xs()
-                                .text_color(rgb(0x93a0b5))
+                                .text_color(rgb(COLOR_MUTED))
                                 .child("Crie um espaço de trabalho para adicionar terminais."),
                         )
                     })
                     .children(self.error.iter().map(|message| {
                         div()
                             .rounded(px(8.0))
-                            .bg(rgb(0x1b2130))
+                            .bg(rgb(COLOR_ELEVATED))
                             .border_1()
-                            .border_color(rgb(0x2b3547))
+                            .border_color(rgb(COLOR_BORDER))
                             .p_2()
                             .text_xs()
-                            .text_color(rgb(0xf08a8a))
+                            .text_color(rgb(COLOR_DANGER))
                             .child(message.clone())
                     })),
             )
@@ -700,16 +697,16 @@ impl Render for Canvas {
                     .items_center()
                     .gap_2()
                     .rounded(px(20.0))
-                    .bg(rgb(0x1b2130))
+                    .bg(rgb(COLOR_ELEVATED))
                     .border_1()
-                    .border_color(rgb(0x2b3547))
+                    .border_color(rgb(COLOR_BORDER))
                     .px_3()
                     .py_1()
-                    .child(div().text_xs().text_color(rgb(0x93a0b5)).child("Zoom"))
+                    .child(div().text_xs().text_color(rgb(COLOR_MUTED)).child("Zoom"))
                     .child(
                         div()
                             .text_sm()
-                            .text_color(rgb(0xc9d1d9))
+                            .text_color(rgb(COLOR_FOREGROUND))
                             .child(format!("{}%", (zoom * 100.0).round() as i32)),
                     ),
             )

@@ -13,14 +13,7 @@ use canvas_types::{TerminalId, WorkspaceId};
 
 use crate::canvas::Canvas;
 use crate::pty::PtySession;
-
-const FONT_PX: f32 = 13.0;
-const LINE_HEIGHT: f32 = 1.2;
-const TITLE_HEIGHT: f32 = 32.0;
-const PATH_HEIGHT: f32 = 22.0;
-const HANDLE: f32 = 12.0;
-const MIN_WIDTH: f32 = 320.0;
-const MIN_HEIGHT: f32 = 200.0;
+use crate::theme::*;
 
 /// Columns and rows that fit a monospace grid in the given pixel rectangle.
 pub fn grid_size(width_px: f32, height_px: f32, font_px: f32, line_height: f32) -> (u16, u16) {
@@ -33,7 +26,7 @@ pub fn grid_size(width_px: f32, height_px: f32, font_px: f32, line_height: f32) 
 
 pub(crate) fn terminal_grid(bounds: &Bounds<Pixels>) -> (u16, u16) {
     let content_height = (f32::from(bounds.size.height) - TITLE_HEIGHT - PATH_HEIGHT).max(1.0);
-    grid_size(f32::from(bounds.size.width), content_height, FONT_PX, LINE_HEIGHT)
+    grid_size(f32::from(bounds.size.width), content_height, FONT_TERMINAL, LINE_HEIGHT_TERMINAL)
 }
 
 /// Keep a dragged edge inside its minimum size and the canvas origin.
@@ -138,9 +131,9 @@ impl TerminalCard {
             let config = TerminalConfig {
                 cols: cols as usize,
                 rows: rows as usize,
-                font_size: px(FONT_PX),
+                font_size: px(FONT_TERMINAL),
                 font_family: "DejaVu Sans Mono".into(),
-                line_height_multiplier: LINE_HEIGHT,
+                line_height_multiplier: LINE_HEIGHT_TERMINAL,
                 padding: Edges::all(px(10.0)),
                 ..Default::default()
             };
@@ -202,7 +195,7 @@ impl TerminalCard {
         self.view_offset_y = offset_y;
         self.terminal.update(cx, |terminal, cx| {
             let mut config = terminal.config().clone();
-            config.font_size = px(FONT_PX * zoom);
+            config.font_size = px(FONT_TERMINAL * zoom);
             terminal.update_config(config, cx);
         });
         cx.notify();
@@ -240,39 +233,39 @@ impl TerminalCard {
         let (nx, ny, nw, nh) = match start.mode {
             DragMode::Move => (x + dx, y + dy, w, h),
             DragMode::ResizeLeft => {
-                let (nx, nw) = resize_axis(x, w, dx, MIN_WIDTH, 8.0, true);
+                let (nx, nw) = resize_axis(x, w, dx, MIN_TERMINAL_WIDTH, 8.0, true);
                 (nx, y, nw, h)
             }
             DragMode::ResizeRight => {
-                let (_, nw) = resize_axis(x, w, dx, MIN_WIDTH, 8.0, false);
+                let (_, nw) = resize_axis(x, w, dx, MIN_TERMINAL_WIDTH, 8.0, false);
                 (x, y, nw, h)
             }
             DragMode::ResizeTop => {
-                let (ny, nh) = resize_axis(y, h, dy, MIN_HEIGHT, 8.0, true);
+                let (ny, nh) = resize_axis(y, h, dy, MIN_TERMINAL_HEIGHT, 8.0, true);
                 (x, ny, w, nh)
             }
             DragMode::ResizeBottom => {
-                let (_, nh) = resize_axis(y, h, dy, MIN_HEIGHT, 8.0, false);
+                let (_, nh) = resize_axis(y, h, dy, MIN_TERMINAL_HEIGHT, 8.0, false);
                 (x, y, w, nh)
             }
             DragMode::ResizeTopLeft => {
-                let (nx, nw) = resize_axis(x, w, dx, MIN_WIDTH, 8.0, true);
-                let (ny, nh) = resize_axis(y, h, dy, MIN_HEIGHT, 8.0, true);
+                let (nx, nw) = resize_axis(x, w, dx, MIN_TERMINAL_WIDTH, 8.0, true);
+                let (ny, nh) = resize_axis(y, h, dy, MIN_TERMINAL_HEIGHT, 8.0, true);
                 (nx, ny, nw, nh)
             }
             DragMode::ResizeTopRight => {
-                let (_, nw) = resize_axis(x, w, dx, MIN_WIDTH, 8.0, false);
-                let (ny, nh) = resize_axis(y, h, dy, MIN_HEIGHT, 8.0, true);
+                let (_, nw) = resize_axis(x, w, dx, MIN_TERMINAL_WIDTH, 8.0, false);
+                let (ny, nh) = resize_axis(y, h, dy, MIN_TERMINAL_HEIGHT, 8.0, true);
                 (x, ny, nw, nh)
             }
             DragMode::ResizeBottomLeft => {
-                let (nx, nw) = resize_axis(x, w, dx, MIN_WIDTH, 8.0, true);
-                let (_, nh) = resize_axis(y, h, dy, MIN_HEIGHT, 8.0, false);
+                let (nx, nw) = resize_axis(x, w, dx, MIN_TERMINAL_WIDTH, 8.0, true);
+                let (_, nh) = resize_axis(y, h, dy, MIN_TERMINAL_HEIGHT, 8.0, false);
                 (nx, y, nw, nh)
             }
             DragMode::ResizeBottomRight => {
-                let (_, nw) = resize_axis(x, w, dx, MIN_WIDTH, 8.0, false);
-                let (_, nh) = resize_axis(y, h, dy, MIN_HEIGHT, 8.0, false);
+                let (_, nw) = resize_axis(x, w, dx, MIN_TERMINAL_WIDTH, 8.0, false);
+                let (_, nh) = resize_axis(y, h, dy, MIN_TERMINAL_HEIGHT, 8.0, false);
                 (x, y, nw, nh)
             }
         };
@@ -381,12 +374,12 @@ impl Render for TerminalCard {
             .flex_col()
             .overflow_hidden()
             .rounded(px(10.0))
-            .bg(rgb(0x14161b))
+            .bg(rgb(COLOR_BASE))
             .when(selected, |card| {
-                card.border_2().border_dashed().border_color(rgb(0x5b9dff))
+                card.border_2().border_dashed().border_color(rgb(COLOR_SELECTION))
             })
             .when(!selected, |card| {
-                card.border_1().border_color(rgb(0x2b3547))
+                card.border_1().border_color(rgb(COLOR_BORDER))
             })
             .child(
                 div()
@@ -396,8 +389,8 @@ impl Render for TerminalCard {
                     .justify_between()
                     .h(px(TITLE_HEIGHT))
                     .px_2()
-                    .bg(rgb(0x1b2130))
-                    .text_color(rgb(0xc9d1d9))
+                    .bg(rgb(COLOR_ELEVATED))
+                    .text_color(rgb(COLOR_FOREGROUND))
                     .child(
                         div()
                             .flex()
@@ -409,9 +402,9 @@ impl Render for TerminalCard {
                                     .h(px(8.0))
                                     .rounded_full()
                                     .bg(if selected {
-                                        rgb(0x5b9dff)
+                                        rgb(COLOR_SELECTION)
                                     } else {
-                                        rgb(0x3a4354)
+                                        rgb(COLOR_SUBTLE)
                                     }),
                             )
                             .child(div().text_sm().child(format!("Terminal {id}")))
@@ -419,7 +412,7 @@ impl Render for TerminalCard {
                                 title
                                     .child("encerrado")
                                     .text_xs()
-                                    .text_color(rgb(0xff8888))
+                                    .text_color(rgb(COLOR_DANGER))
                             }),
                     )
                     .child(
@@ -458,9 +451,9 @@ impl Render for TerminalCard {
                     .h(px(PATH_HEIGHT))
                     .px_2()
                     .overflow_hidden()
-                    .bg(rgb(0x171c27))
+                    .bg(rgb(COLOR_PANEL))
                     .text_xs()
-                    .text_color(rgb(0x93a0b5))
+                    .text_color(rgb(COLOR_MUTED))
                     .child(self.root.to_string_lossy().into_owned()),
             )
             .child(Self::resize_handle(id, DragMode::ResizeLeft, entity_id, cx))

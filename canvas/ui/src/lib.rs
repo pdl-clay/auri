@@ -4,6 +4,7 @@ pub mod canvas;
 pub mod card;
 pub mod config;
 pub mod pty;
+pub mod theme;
 pub mod workspaces;
 
 use auro::{App, assets::EmbeddedAssets, gpui::AppContext};
@@ -35,8 +36,8 @@ pub fn run() {
                 cx,
             );
             let theme = gpui_component::theme::Theme::global_mut(cx);
-            theme.radius = auro::gpui::px(8.);
-            theme.radius_lg = auro::gpui::px(14.);
+            theme.radius = auro::gpui::px(crate::theme::RADIUS_CONTROL);
+            theme.radius_lg = auro::gpui::px(crate::theme::RADIUS_DIALOG);
         })
         .root_with("main", move |window, cx| {
             let view = cx.new(|cx| canvas::Canvas::new(store.clone(), load.clone(), cx));
