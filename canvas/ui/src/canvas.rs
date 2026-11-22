@@ -537,6 +537,7 @@ impl Render for Canvas {
                             .relative()
                             .flex_1()
                             .min_h_0()
+                            .overflow_hidden()
                             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
                                 let (dx, dy) = scroll_delta(event);
                                 this.apply_scroll(event.position, dx, dy, event.modifiers.control, event.modifiers.shift, cx);
