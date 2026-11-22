@@ -63,6 +63,7 @@ pub struct WorkspaceDrawer {
     form_error: Option<String>,
     action_handler: Option<Box<dyn Fn(DrawerAction, &mut App)>>,
     restart_handler: Option<Box<dyn Fn(&WorkspaceStore, &mut App)>>,
+    context_menu: bool,
 }
 
 impl WorkspaceDrawer {
@@ -85,7 +86,18 @@ impl WorkspaceDrawer {
             form_error: None,
             action_handler: None,
             restart_handler: None,
+            context_menu: false,
         }
+    }
+
+    /// Open the shared centered workspace creation dialog.
+    pub fn open_create_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_form();
+        let drawer = cx.weak_entity();
+        window.open_dialog(cx, move |dialog, window, cx| {
+            workspace_dialog(dialog, window, cx, &drawer)
+        });
+        cx.notify();
     }
 
     /// Consumer of every mutation requested from this drawer.
@@ -596,6 +608,15 @@ impl Render for WorkspaceDrawer {
             .border_r_1()
             .border_color(rgb(COLOR_BORDER))
             .text_color(rgb(COLOR_FOREGROUND))
+            .relative()
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _, window, cx| {
+                    window.prevent_default();
+                    this.context_menu = true;
+                    cx.notify();
+                }),
+            )
             .child(
                 div()
                     .flex()
@@ -619,13 +640,8 @@ impl Render for WorkspaceDrawer {
                             .rounded(px(RADIUS_CONTROL))
                             .with_variant(ButtonVariant::Ghost)
                             .on_click(cx.listener(|this, _, window, cx| {
-                                this.open_form();
-                                let drawer = cx.weak_entity();
-                                window.open_dialog(cx, move |dialog, window, cx| {
-                                    workspace_dialog(dialog, window, cx, &drawer)
-                                });
-                                cx.notify();
-                            })),
+                                this.open_create_dialog(window, cx);
+                            }))
                     ),
             )
             .when_some(banner, |this, (title, reason)| {
@@ -695,6 +711,10 @@ impl Render for WorkspaceDrawer {
                             cx.notify();
                         }),
                     )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(|_, _, _, cx| cx.stop_propagation()),
+                    )
                     .child(icon_svg(
                         workspace.icon,
                         if is_active { COLOR_ACCENT } else { COLOR_MUTED },
@@ -738,6 +758,61 @@ impl Render for WorkspaceDrawer {
                             ),
                     )
             }))
+            .when(self.context_menu, |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .left(px(0.0))
+                        .top(px(0.0))
+                        .size_full()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.context_menu = false;
+                                cx.notify();
+                            }),
+                        ),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(DRAWER_MENU_TOP))
+                        .left(px(SPACE_WIDE))
+                        .w(px(CONTEXT_MENU_WIDTH_WIDE))
+                        .flex()
+                        .flex_col()
+                        .p(px(SPACE_TIGHT))
+                        .rounded(px(RADIUS_CONTROL))
+                        .bg(rgb(COLOR_ELEVATED))
+                        .border_1()
+                        .border_color(rgb(COLOR_BORDER))
+                        .child(
+                            div()
+                                .id("drawer-new-workspace")
+                                .h(px(CONTEXT_MENU_ITEM_HEIGHT))
+                                .flex()
+                                .items_center()
+                                .gap(px(SPACE_NORMAL))
+                                .px(px(SPACE_NORMAL))
+                                .rounded(px(RADIUS_CHIP))
+                                .hover(|style| style.bg(rgb(COLOR_BORDER)))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _, window, cx| {
+                                        this.context_menu = false;
+                                        this.open_create_dialog(window, cx);
+                                    }),
+                                )
+                                .child(asset_icon("plus.svg", COLOR_FOREGROUND))
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(rgb(COLOR_FOREGROUND))
+                                        .child("Novo espaço de trabalho"),
+                                ),
+                        ),
+                )
+            })
     }
 }
 
