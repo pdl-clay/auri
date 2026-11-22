@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use auro::gpui::{
-    Bounds, Context, Entity, MouseButton, MouseDownEvent, Point, Render, Size, Window, canvas,
-    fill, px, rgb, svg,
+    Bounds, Context, CursorStyle, Entity, MouseButton, MouseDownEvent, Pixels, Point, Render,
+    Size, Window, canvas, fill, px, rgb, svg,
 };
 use auro::prelude::*;
 use gpui_component::{
@@ -15,9 +15,9 @@ use gpui_component::{
 use canvas_types::{CanvasState, TerminalId, WorkspaceIcon, WorkspaceId, WorkspaceState, WorkspaceStore};
 
 use crate::card::{TerminalCard, terminal_grid};
+use crate::workspaces::{DRAWER_WIDTH, DrawerAction, WorkspaceDrawer};
 use crate::config::{self, LoadOutcome};
 use crate::pty::PtySession;
-use crate::workspaces::{DrawerAction, WorkspaceDrawer};
 
 const GRID_STEP: f32 = 24.0;
 const CARD_WIDTH: f32 = 640.0;
@@ -131,6 +131,7 @@ pub struct Canvas {
     drawer: Entity<WorkspaceDrawer>,
     cards: CardGroups,
     error: Option<String>,
+    placing: bool,
 }
 impl Canvas {
     /// `load` is authoritative for the drawer banner; the store was already
@@ -144,6 +145,7 @@ impl Canvas {
             drawer,
             cards: HashMap::new(),
             error: None,
+            placing: false,
         }
     }
 
@@ -228,7 +230,42 @@ impl Canvas {
         cx.notify();
     }
 
+    /// Enter placement mode: the next canvas click decides where the terminal opens.
+    pub fn begin_placement(&mut self, cx: &mut Context<Self>) {
+        self.placing = true;
+        self.error = None;
+        cx.notify();
+    }
+
+    pub fn cancel_placement(&mut self, cx: &mut Context<Self>) {
+        self.placing = false;
+        cx.notify();
+    }
+
+    fn place_terminal(
+        &mut self,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let origin = Point::new(
+            px((f32::from(position.x) - DRAWER_WIDTH - CARD_WIDTH / 2.0).max(8.0)),
+            px((f32::from(position.y) - CARD_HEIGHT / 2.0).max(8.0)),
+        );
+        self.placing = false;
+        self.spawn_terminal(Some(origin), window, cx);
+    }
+
     pub fn add_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.spawn_terminal(None, window, cx);
+    }
+
+    fn spawn_terminal(
+        &mut self,
+        origin: Option<Point<Pixels>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let (workspace_id, id, root) = match active_spawn_target(&mut self.store) {
             Ok(target) => target,
             Err(error) => {
@@ -237,11 +274,11 @@ impl Canvas {
                 return;
             }
         };
-        let offset = GRID_STEP * (self.cards.get(&workspace_id).map_or(0, Vec::len) % 8) as f32;
-        let bounds = Bounds::new(
-            Point::new(px(16.0 + offset), px(16.0 + offset)),
-            Size::new(px(CARD_WIDTH), px(CARD_HEIGHT)),
-        );
+        let origin = origin.unwrap_or_else(|| {
+            let offset = GRID_STEP * (self.cards.get(&workspace_id).map_or(0, Vec::len) % 8) as f32;
+            Point::new(px(16.0 + offset), px(16.0 + offset))
+        });
+        let bounds = Bounds::new(origin, Size::new(px(CARD_WIDTH), px(CARD_HEIGHT)));
         let (cols, rows) = terminal_grid(&bounds);
         let pty = match PtySession::spawn_shell_in(cols, rows, Some(&root)) {
             Ok(pty) => pty,
@@ -368,7 +405,7 @@ impl Render for Canvas {
             .rounded(px(8.0))
             .with_variant(ButtonVariant::Ghost);
         let add = if active.is_some() {
-            add.on_click(cx.listener(|this, _, window, cx| this.add_terminal(window, cx)))
+            add.on_click(cx.listener(|this, _, _, cx| this.begin_placement(cx)))
         } else {
             add.disabled(true)
         };
@@ -464,7 +501,60 @@ impl Render for Canvas {
                                 .top(px(0.0))
                                 .size_full(),
                             )
-                            .children(cards),
+                            .children(cards)
+                            .when(self.placing, |area| {
+                                area.child(
+                                    div()
+                                        .absolute()
+                                        .left(px(0.0))
+                                        .top(px(0.0))
+                                        .size_full()
+                                        .cursor(CursorStyle::Crosshair)
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                                                this.place_terminal(event.position, window, cx);
+                                            }),
+                                        )
+                                        .child(
+                                            div()
+                                                .absolute()
+                                                .top(px(16.0))
+                                                .left(px(16.0))
+                                                .flex()
+                                                .items_center()
+                                                .gap_2()
+                                                .rounded(px(20.0))
+                                                .bg(rgb(0x1b2130))
+                                                .border_1()
+                                                .border_color(rgb(0x5b9dff))
+                                                .px_3()
+                                                .py_1()
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(rgb(0xc9d1d9))
+                                                        .child("Clique no canvas para posicionar o terminal"),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .id("cancel-placement")
+                                                        .on_mouse_down(
+                                                            MouseButton::Left,
+                                                            cx.listener(|_, _, _, cx| cx.stop_propagation()),
+                                                        )
+                                                        .child(
+                                                            ComponentButton::new("cancel-placement-btn")
+                                                                .label("Cancelar")
+                                                                .with_variant(ButtonVariant::Ghost)
+                                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                                    this.cancel_placement(cx);
+                                                                })),
+                                                        ),
+                                                ),
+                                        ),
+                                )
+                            }),
                     ),
             )
             .child(
