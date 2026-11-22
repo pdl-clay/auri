@@ -3,6 +3,7 @@
 
 use std::io::{Read, Write};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use portable_pty::{CommandBuilder, PtySize};
 
@@ -17,6 +18,33 @@ pub struct PtySession {
     child: Box<dyn portable_pty::Child + Send + Sync>,
     pid: Option<u32>,
     terminated: bool,
+}
+
+#[cfg(unix)]
+fn signal_group(group: i32, signal: i32) -> anyhow::Result<()> {
+    if unsafe { libc::kill(group, signal) } != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ESRCH) {
+            return Err(error.into());
+        }
+    }
+    Ok(())
+}
+
+/// Poll `try_wait` instead of blocking in `wait`, and skip portable-pty's
+/// leader-only SIGHUP grace period (four 50 ms sleeps before its SIGKILL).
+fn reap_within(child: &mut dyn portable_pty::Child, timeout: Duration) -> anyhow::Result<bool> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if child.try_wait()?.is_some() {
+            return Ok(true);
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Ok(false);
+        }
+        std::thread::sleep(remaining.min(Duration::from_millis(10)));
+    }
 }
 
 impl PtySession {
@@ -68,6 +96,10 @@ impl PtySession {
     }
 
     /// Terminate the child's whole process group and reap the child.
+    ///
+    /// On Unix the group is signalled before the leader is reaped. Descendants
+    /// that form their own job-control group are not members; those rely on the
+    /// kernel SIGHUP delivered when the pty master closes.
     pub fn terminate(&mut self) -> anyhow::Result<()> {
         if self.terminated {
             return Ok(());
@@ -75,19 +107,21 @@ impl PtySession {
 
         #[cfg(unix)]
         if let Some(pid) = self.pid {
-            // Signal the group before reaping: the leader may already have
-            // exited while other members remain. portable-pty calls setsid(),
-            // so the child leads its own process group; -pid signals them all.
-            if unsafe { libc::kill(-(pid as i32), libc::SIGTERM) } != 0 {
-                let err = std::io::Error::last_os_error();
-                if err.raw_os_error() != Some(libc::ESRCH) {
-                    return Err(err.into());
+            // portable-pty calls setsid(), so -pid reaches the leader and its
+            // descendants even when the leader has already exited.
+            let group = -(pid as i32);
+            signal_group(group, libc::SIGTERM)?;
+            if !reap_within(self.child.as_mut(), Duration::from_millis(80))? {
+                signal_group(group, libc::SIGKILL)?;
+                if !reap_within(self.child.as_mut(), Duration::from_millis(80))? {
+                    anyhow::bail!("terminal {pid} did not exit after process-group SIGKILL");
                 }
             }
+            self.terminated = true;
+            return Ok(());
         }
 
-        // Fallback for platforms without process groups and for a leader that
-        // outlived the group signal.
+        // Fallback for platforms without process groups (or without a pid).
         if let Err(err) = self.child.kill() {
             if self.child.try_wait()?.is_none() {
                 return Err(err.into());
@@ -110,7 +144,6 @@ mod tests {
     use super::*;
     use std::fs;
     use std::path::Path;
-    use std::time::{Duration, Instant};
 
     fn read_pid_with_timeout(path: &Path, timeout: Duration) -> anyhow::Result<u32> {
         let deadline = Instant::now() + timeout;

@@ -28,7 +28,7 @@ pub fn grid_size(width_px: f32, height_px: f32, font_px: f32, line_height: f32) 
     (cols, rows)
 }
 
-fn terminal_grid(bounds: &Bounds<Pixels>) -> (u16, u16) {
+pub(crate) fn terminal_grid(bounds: &Bounds<Pixels>) -> (u16, u16) {
     let content_height = (f32::from(bounds.size.height) - TITLE_HEIGHT).max(1.0);
     grid_size(f32::from(bounds.size.width), content_height, FONT_PX, LINE_HEIGHT)
 }
@@ -72,10 +72,11 @@ impl TerminalCard {
         id: TerminalId,
         bounds: Bounds<Pixels>,
         canvas: WeakEntity<Canvas>,
+        mut pty: PtySession,
+        grid: (u16, u16),
         cx: &mut Context<Self>,
-    ) -> anyhow::Result<Self> {
-        let (cols, rows) = terminal_grid(&bounds);
-        let mut pty = PtySession::spawn_shell(cols, rows)?;
+    ) -> Self {
+        let (cols, rows) = grid;
         let resize_master = pty.master.clone();
         // PtySession implements Drop, so its streams cannot be moved out directly.
         let writer = std::mem::replace(&mut pty.writer, Box::new(std::io::sink()));
@@ -109,7 +110,7 @@ impl TerminalCard {
                 })
         });
 
-        Ok(Self {
+        Self {
             id,
             bounds,
             exited: false,
@@ -117,7 +118,7 @@ impl TerminalCard {
             canvas,
             pty,
             drag: None,
-        })
+        }
     }
 
     pub fn set_exited(&mut self, cx: &mut Context<Self>) {
@@ -255,13 +256,17 @@ impl Render for TerminalCard {
                             .id(("close-terminal", id))
                             .px_1()
                             .on_click(cx.listener(move |_, _, _, cx| {
-                                let _ = canvas.update(cx, |canvas, _| canvas.remove(id));
+                                let _ = canvas.update(cx, |canvas, cx| {
+                                    canvas.remove(id);
+                                    cx.notify();
+                                });
                             }))
                             .child("×"),
                     )
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(|this, event: &MouseDownEvent, _, _| {
+                        cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                            this.terminal.read(cx).focus_handle().focus(window);
                             this.begin_drag(DragMode::Move, event.position);
                         }),
                     )

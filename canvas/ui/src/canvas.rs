@@ -7,16 +7,18 @@ use auro::gpui::{
 use auro::prelude::*;
 use canvas_types::{CanvasState, TerminalId};
 
-use crate::card::TerminalCard;
+use crate::card::{TerminalCard, terminal_grid};
+use crate::pty::PtySession;
 
 const GRID_STEP: f32 = 24.0;
 const CARD_WIDTH: f32 = 480.0;
 const CARD_HEIGHT: f32 = 320.0;
 
-/// Owns the logical canvas state and the strong handles to its terminal cards.
+/// Owns the logical canvas state, its terminal cards and the last spawn error.
 pub struct Canvas {
     pub(crate) state: CanvasState,
     cards: Vec<(TerminalId, Entity<TerminalCard>)>,
+    error: Option<String>,
 }
 
 impl Canvas {
@@ -24,6 +26,7 @@ impl Canvas {
         Self {
             state: CanvasState::new(),
             cards: Vec::new(),
+            error: None,
         }
     }
 
@@ -39,10 +42,21 @@ impl Canvas {
             Point::new(px(16.0 + offset), px(16.0 + offset)),
             Size::new(px(CARD_WIDTH), px(CARD_HEIGHT)),
         );
+        let (cols, rows) = terminal_grid(&bounds);
+        let pty = match PtySession::spawn_shell(cols, rows) {
+            Ok(pty) => pty,
+            Err(error) => {
+                // A failed fork must not leave a phantom entry in the state.
+                self.state.remove(id);
+                self.error = Some(format!("Terminal {id} não iniciou: {error}"));
+                cx.notify();
+                return;
+            }
+        };
+        self.error = None;
         let canvas = cx.entity().downgrade();
-        let card = cx.new(|cx: &mut Context<TerminalCard>| {
-            TerminalCard::new(id, bounds, canvas.clone(), cx)
-                .unwrap_or_else(|error| panic!("terminal {id}: failed to start: {error}"))
+        let card = cx.new(|cx| {
+            TerminalCard::new(id, bounds, canvas.clone(), pty, (cols, rows), cx)
         });
         card.read(cx).terminal.read(cx).focus_handle().focus(window);
         self.cards.push((id, card));
@@ -105,7 +119,10 @@ impl Render for Canvas {
                     ))
                     .when_some(selected, |bar, id| {
                         bar.child(format!("Selecionado: Terminal {id}"))
-                    }),
+                    })
+                    .children(self.error.iter().map(|message| {
+                        div().text_color(rgb(0xff8888)).child(message.clone())
+                    })),
             )
             .child(
                 div()
@@ -116,13 +133,14 @@ impl Render for Canvas {
                         canvas(
                             |_, _, _| {},
                             |bounds, _, window, _| {
+                                let origin = bounds.origin;
                                 let width = f32::from(bounds.size.width);
                                 let height = f32::from(bounds.size.height);
                                 let mut x = GRID_STEP;
                                 while x < width {
                                     window.paint_quad(fill(
                                         Bounds::new(
-                                            Point::new(px(x), px(0.0)),
+                                            Point::new(px(f32::from(origin.x) + x), origin.y),
                                             Size::new(px(1.0), bounds.size.height),
                                         ),
                                         rgb(0x242936),
@@ -133,7 +151,7 @@ impl Render for Canvas {
                                 while y < height {
                                     window.paint_quad(fill(
                                         Bounds::new(
-                                            Point::new(px(0.0), px(y)),
+                                            Point::new(origin.x, px(f32::from(origin.y) + y)),
                                             Size::new(bounds.size.width, px(1.0)),
                                         ),
                                         rgb(0x242936),
@@ -157,8 +175,6 @@ impl Render for Canvas {
                                     this.select(id, cx);
                                 }),
                             )
-                            // Card's own click handlers run first; this repaints after a close.
-                            .on_click(cx.listener(|_, _, _, cx| cx.notify()))
                             .child(card.clone())
                     })),
             )
