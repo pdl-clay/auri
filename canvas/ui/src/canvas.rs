@@ -132,6 +132,7 @@ pub struct Canvas {
     zoom: f32,
     offset_x: f32,
     offset_y: f32,
+    context_menu: Option<Point<Pixels>>,
 }
 impl Canvas {
     /// `load` is authoritative for the drawer banner; the store was already
@@ -149,6 +150,7 @@ impl Canvas {
             zoom: 1.0,
             offset_x: 0.0,
             offset_y: 0.0,
+            context_menu: None,
         }
     }
 
@@ -488,6 +490,12 @@ impl Render for Canvas {
         let zoom = self.zoom;
         let offset_x = self.offset_x;
         let offset_y = self.offset_y;
+        let context_menu = self.context_menu.map(|position| {
+            (
+                (f32::from(position.x) - DRAWER_WIDTH).max(SPACE_NORMAL),
+                f32::from(position.y).max(SPACE_NORMAL),
+            )
+        });
         let add = ComponentButton::new("add-terminal")
             .tooltip("Adicionar terminal")
             .child(canvas_icon("terminal.svg"))
@@ -545,6 +553,16 @@ impl Render for Canvas {
                                 this.apply_scroll(event.position, dx, dy, event.modifiers.control, event.modifiers.shift, cx);
                                 cx.stop_propagation();
                             }))
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                                    window.prevent_default();
+                                    this.placing = false;
+                                    this.context_menu = Some(event.position);
+                                    cx.stop_propagation();
+                                    cx.notify();
+                                }),
+                            )
                             .child(
                                 canvas(
                                     |_, _, _| {},
@@ -638,6 +656,67 @@ impl Render for Canvas {
                                                                     this.cancel_placement(cx);
                                                                 })),
                                                         ),
+                                                ),
+                                        ),
+                                )
+                            })
+                            .when_some(context_menu, |area, (x, y)| {
+                                area.child(
+                                    div()
+                                        .absolute()
+                                        .left(px(0.0))
+                                        .top(px(0.0))
+                                        .size_full()
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(|this, _, _, cx| {
+                                                this.context_menu = None;
+                                                cx.notify();
+                                            }),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .left(px(x))
+                                        .top(px(y))
+                                        .w(px(CONTEXT_MENU_WIDTH))
+                                        .flex()
+                                        .flex_col()
+                                        .p(px(SPACE_TIGHT))
+                                        .rounded(px(RADIUS_CONTROL))
+                                        .bg(rgb(COLOR_ELEVATED))
+                                        .border_1()
+                                        .border_color(rgb(COLOR_BORDER))
+                                        .child(
+                                            div()
+                                                .id("context-add")
+                                                .h(px(CONTEXT_MENU_ITEM_HEIGHT))
+                                                .flex()
+                                                .items_center()
+                                                .gap(px(SPACE_NORMAL))
+                                                .px(px(SPACE_NORMAL))
+                                                .rounded(px(RADIUS_CHIP))
+                                                .hover(|style| style.bg(rgb(COLOR_BORDER)))
+                                                .on_mouse_down(
+                                                    MouseButton::Left,
+                                                    cx.listener(|this, _, _, cx| {
+                                                        this.context_menu = None;
+                                                        this.begin_placement(cx);
+                                                    }),
+                                                )
+                                                .child(
+                                                    svg()
+                                                        .path("plus.svg")
+                                                        .w(px(ICON_SIZE))
+                                                        .h(px(ICON_SIZE))
+                                                        .text_color(rgb(COLOR_FOREGROUND)),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_sm()
+                                                        .text_color(rgb(COLOR_FOREGROUND))
+                                                        .child("Adicionar"),
                                                 ),
                                         ),
                                 )
