@@ -1,9 +1,9 @@
 //! A draggable, resizable frame around one PTY-backed terminal.
 
 use auro::gpui::{
-    App, Bounds, Context, Div, DragMoveEvent, Edges, Entity, EntityId, MouseButton, MouseDownEvent,
-    Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, Stateful, WeakEntity, Window, div, px,
-    rgb,
+    App, Bounds, Context, CursorStyle, Div, DragMoveEvent, Edges, Entity, EntityId, MouseButton,
+    MouseDownEvent, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, Size, Stateful,
+    WeakEntity, Window, div, px, rgb,
 };
 use auro::prelude::*;
 use portable_pty::PtySize;
@@ -34,12 +34,34 @@ pub(crate) fn terminal_grid(bounds: &Bounds<Pixels>) -> (u16, u16) {
     grid_size(f32::from(bounds.size.width), content_height, FONT_PX, LINE_HEIGHT)
 }
 
+/// Keep a dragged edge inside its minimum size and the canvas origin.
+fn resize_axis(
+    origin: f32,
+    size: f32,
+    delta: f32,
+    min_size: f32,
+    min_origin: f32,
+    from_start: bool,
+) -> (f32, f32) {
+    if from_start {
+        let step = delta.clamp(min_origin - origin, size - min_size);
+        (origin + step, size - step)
+    } else {
+        (origin, (size + delta).max(min_size))
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DragMode {
     Move,
-    ResizeWidth,
-    ResizeHeight,
-    ResizeBoth,
+    ResizeLeft,
+    ResizeRight,
+    ResizeTop,
+    ResizeBottom,
+    ResizeTopLeft,
+    ResizeTopRight,
+    ResizeBottomLeft,
+    ResizeBottomRight,
 }
 
 #[derive(Clone, Copy)]
@@ -204,28 +226,51 @@ impl TerminalCard {
         let zoom = self.view_zoom.max(0.01);
         let dx = (f32::from(event.event.position.x) - f32::from(start.position.x)) / zoom;
         let dy = (f32::from(event.event.position.y) - f32::from(start.position.y)) / zoom;
-        match start.mode {
-            DragMode::Move => {
-                self.bounds.origin = Point::new(
-                    px(f32::from(start.bounds.origin.x) + dx),
-                    px(f32::from(start.bounds.origin.y) + dy),
-                );
+        let bounds = start.bounds;
+        let x = f32::from(bounds.origin.x);
+        let y = f32::from(bounds.origin.y);
+        let w = f32::from(bounds.size.width);
+        let h = f32::from(bounds.size.height);
+        let (nx, ny, nw, nh) = match start.mode {
+            DragMode::Move => (x + dx, y + dy, w, h),
+            DragMode::ResizeLeft => {
+                let (nx, nw) = resize_axis(x, w, dx, MIN_WIDTH, 8.0, true);
+                (nx, y, nw, h)
             }
-            DragMode::ResizeWidth => {
-                self.bounds.size.width =
-                    px((f32::from(start.bounds.size.width) + dx).max(MIN_WIDTH));
+            DragMode::ResizeRight => {
+                let (_, nw) = resize_axis(x, w, dx, MIN_WIDTH, 8.0, false);
+                (x, y, nw, h)
             }
-            DragMode::ResizeHeight => {
-                self.bounds.size.height =
-                    px((f32::from(start.bounds.size.height) + dy).max(MIN_HEIGHT));
+            DragMode::ResizeTop => {
+                let (ny, nh) = resize_axis(y, h, dy, MIN_HEIGHT, 8.0, true);
+                (x, ny, w, nh)
             }
-            DragMode::ResizeBoth => {
-                self.bounds.size.width =
-                    px((f32::from(start.bounds.size.width) + dx).max(MIN_WIDTH));
-                self.bounds.size.height =
-                    px((f32::from(start.bounds.size.height) + dy).max(MIN_HEIGHT));
+            DragMode::ResizeBottom => {
+                let (_, nh) = resize_axis(y, h, dy, MIN_HEIGHT, 8.0, false);
+                (x, y, w, nh)
             }
-        }
+            DragMode::ResizeTopLeft => {
+                let (nx, nw) = resize_axis(x, w, dx, MIN_WIDTH, 8.0, true);
+                let (ny, nh) = resize_axis(y, h, dy, MIN_HEIGHT, 8.0, true);
+                (nx, ny, nw, nh)
+            }
+            DragMode::ResizeTopRight => {
+                let (_, nw) = resize_axis(x, w, dx, MIN_WIDTH, 8.0, false);
+                let (ny, nh) = resize_axis(y, h, dy, MIN_HEIGHT, 8.0, true);
+                (x, ny, nw, nh)
+            }
+            DragMode::ResizeBottomLeft => {
+                let (nx, nw) = resize_axis(x, w, dx, MIN_WIDTH, 8.0, true);
+                let (_, nh) = resize_axis(y, h, dy, MIN_HEIGHT, 8.0, false);
+                (nx, y, nw, nh)
+            }
+            DragMode::ResizeBottomRight => {
+                let (_, nw) = resize_axis(x, w, dx, MIN_WIDTH, 8.0, false);
+                let (_, nh) = resize_axis(y, h, dy, MIN_HEIGHT, 8.0, false);
+                (x, y, nw, nh)
+            }
+        };
+        self.bounds = Bounds::new(Point::new(px(nx), px(ny)), Size::new(px(nw), px(nh)));
         if start.mode != DragMode::Move {
             let (cols, rows) = terminal_grid(&self.bounds);
             if let Err(error) = self.pty.resize(cols, rows) {
@@ -243,27 +288,41 @@ impl TerminalCard {
         entity_id: EntityId,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        let element_id: (&str, u64) = match mode {
+        let (element_id, cursor): ((&str, u64), CursorStyle) = match mode {
             DragMode::Move => unreachable!("only resize modes have handles"),
-            DragMode::ResizeWidth => ("resize-width", id),
-            DragMode::ResizeHeight => ("resize-height", id),
-            DragMode::ResizeBoth => ("resize-both", id),
+            DragMode::ResizeLeft => (("resize-left", id), CursorStyle::ResizeLeftRight),
+            DragMode::ResizeRight => (("resize-right", id), CursorStyle::ResizeLeftRight),
+            DragMode::ResizeTop => (("resize-top", id), CursorStyle::ResizeUpDown),
+            DragMode::ResizeBottom => (("resize-bottom", id), CursorStyle::ResizeUpDown),
+            DragMode::ResizeTopLeft => (("resize-top-left", id), CursorStyle::ResizeUpRightDownLeft),
+            DragMode::ResizeTopRight => (("resize-top-right", id), CursorStyle::ResizeUpLeftDownRight),
+            DragMode::ResizeBottomLeft => (("resize-bottom-left", id), CursorStyle::ResizeUpLeftDownRight),
+            DragMode::ResizeBottomRight => (("resize-bottom-right", id), CursorStyle::ResizeUpRightDownLeft),
         };
-        let mut handle = div().absolute().id(element_id);
+        let mut handle = div().absolute().id(element_id).cursor(cursor);
         handle = match mode {
             DragMode::Move => unreachable!("only resize modes have handles"),
-            DragMode::ResizeWidth => {
-                handle.right_0().top(px(TITLE_HEIGHT)).bottom_0().w(px(HANDLE))
-            }
-            DragMode::ResizeHeight => handle.bottom_0().left_0().right_0().h(px(HANDLE)),
-            DragMode::ResizeBoth => handle.bottom_0().right_0().w(px(18.0)).h(px(18.0)),
+            DragMode::ResizeLeft => handle.left_0().top(px(TITLE_HEIGHT)).bottom_0().w(px(HANDLE)),
+            DragMode::ResizeRight => handle.right_0().top(px(TITLE_HEIGHT)).bottom_0().w(px(HANDLE)),
+            DragMode::ResizeTop => handle.top_0().left(px(HANDLE)).right(px(HANDLE)).h(px(HANDLE)),
+            DragMode::ResizeBottom => handle.bottom_0().left(px(HANDLE)).right(px(HANDLE)).h(px(HANDLE)),
+            DragMode::ResizeTopLeft => handle.left_0().top_0().w(px(18.0)).h(px(18.0)),
+            DragMode::ResizeTopRight => handle.right_0().top_0().w(px(18.0)).h(px(18.0)),
+            DragMode::ResizeBottomLeft => handle.left_0().bottom_0().w(px(18.0)).h(px(18.0)),
+            DragMode::ResizeBottomRight => handle.right_0().bottom_0().w(px(18.0)).h(px(18.0)),
         };
-        if mode == DragMode::ResizeBoth {
+        if matches!(
+            mode,
+            DragMode::ResizeTopLeft
+                | DragMode::ResizeTopRight
+                | DragMode::ResizeBottomLeft
+                | DragMode::ResizeBottomRight
+        ) {
             handle = handle.child(
                 div()
                     .absolute()
-                    .bottom(px(4.0))
-                    .right(px(4.0))
+                    .left(px(5.0))
+                    .top(px(5.0))
                     .w(px(7.0))
                     .h(px(7.0))
                     .rounded_full()
@@ -273,7 +332,8 @@ impl TerminalCard {
         handle
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, event: &MouseDownEvent, _, _| {
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
                     this.begin_drag(mode, event.position);
                 }),
             )
@@ -403,15 +463,20 @@ impl Render for TerminalCard {
                     ),
             )
             .child(div().flex_1().min_h_0().child(self.terminal.clone()))
-            .child(Self::resize_handle(id, DragMode::ResizeWidth, entity_id, cx))
-            .child(Self::resize_handle(id, DragMode::ResizeHeight, entity_id, cx))
-            .child(Self::resize_handle(id, DragMode::ResizeBoth, entity_id, cx))
+            .child(Self::resize_handle(id, DragMode::ResizeLeft, entity_id, cx))
+            .child(Self::resize_handle(id, DragMode::ResizeRight, entity_id, cx))
+            .child(Self::resize_handle(id, DragMode::ResizeTop, entity_id, cx))
+            .child(Self::resize_handle(id, DragMode::ResizeBottom, entity_id, cx))
+            .child(Self::resize_handle(id, DragMode::ResizeTopLeft, entity_id, cx))
+            .child(Self::resize_handle(id, DragMode::ResizeTopRight, entity_id, cx))
+            .child(Self::resize_handle(id, DragMode::ResizeBottomLeft, entity_id, cx))
+            .child(Self::resize_handle(id, DragMode::ResizeBottomRight, entity_id, cx))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{DragMode, DragToken, grid_size};
+    use super::{DragMode, DragToken, grid_size, resize_axis};
     use auro::gpui::EntityId;
 
     #[test]
@@ -425,6 +490,16 @@ mod tests {
         let token = DragToken::new(DragMode::Move, card_b);
         assert!(token.targets(DragMode::Move, card_b));
         assert!(!token.targets(DragMode::Move, card_a));
-        assert!(!token.targets(DragMode::ResizeWidth, card_b));
+        assert!(!token.targets(DragMode::ResizeLeft, card_b));
+    }
+
+    #[test]
+    fn resizing_left_edge_moves_origin_and_keeps_minimum_width() {
+        let (origin, size) = resize_axis(100.0, 640.0, -40.0, 320.0, 8.0, true);
+        assert_eq!((origin, size), (60.0, 680.0));
+        let (origin, size) = resize_axis(100.0, 400.0, -500.0, 320.0, 8.0, true);
+        assert_eq!((origin, size), (8.0, 492.0));
+        let (_, size) = resize_axis(100.0, 640.0, -40.0, 320.0, 8.0, false);
+        assert_eq!(size, 600.0);
     }
 }
