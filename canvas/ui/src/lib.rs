@@ -7,6 +7,8 @@
 
 mod services;
 pub mod pty;
+pub mod canvas;
+pub mod card;
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
