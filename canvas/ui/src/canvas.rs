@@ -459,11 +459,18 @@ impl Render for Canvas {
                     .flex_col()
                     .items_end()
                     .justify_center()
-                    .gap_2()
+                    .when_some(selected, |column, id| {
+                        column.child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(0x93a0b5))
+                                .child(format!("Terminal {id}")),
+                        )
+                    })
                     .child(
                         div()
                             .flex()
-                            .flex_row()
+                            .flex_col()
                             .items_center()
                             .gap_1()
                             .p_1()
@@ -471,14 +478,6 @@ impl Render for Canvas {
                             .bg(rgb(0x1b2130))
                             .border_1()
                             .border_color(rgb(0x2b3547))
-                            .when_some(selected, |island, id| {
-                                island.child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(rgb(0x93a0b5))
-                                        .child(format!("Terminal {id}")),
-                                )
-                            })
                             .child(add)
                             .child(remove),
                     )
