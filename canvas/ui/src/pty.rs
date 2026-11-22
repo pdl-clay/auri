@@ -50,10 +50,23 @@ fn reap_within(child: &mut dyn portable_pty::Child, timeout: Duration) -> anyhow
 impl PtySession {
     /// Spawn `$SHELL` (falling back to `/bin/sh`) in a new pty.
     pub fn spawn_shell(cols: u16, rows: u16) -> anyhow::Result<Self> {
+        Self::spawn_shell_in(cols, rows, None)
+    }
+
+    /// Spawn `$SHELL` (falling back to `/bin/sh`) in a new pty whose working
+    /// directory is `cwd`; `None` keeps portable-pty's default (the home dir).
+    pub fn spawn_shell_in(
+        cols: u16,
+        rows: u16,
+        cwd: Option<&std::path::Path>,
+    ) -> anyhow::Result<Self> {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
         let mut cmd = CommandBuilder::new(shell);
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
+        if let Some(cwd) = cwd {
+            cmd.cwd(cwd);
+        }
         Self::spawn_command(cmd, cols, rows)
     }
 
@@ -251,5 +264,87 @@ mod tests {
             wait_until_gone(bg, Duration::from_secs(2)),
             "background child {bg} survived terminate after the leader exited"
         );
+    }
+
+    /// Strip the shell's line-editing escape sequences and carriage returns so
+    /// each line of a pty transcript can be compared literally.
+    fn clean_output(bytes: &[u8]) -> String {
+        let text = String::from_utf8_lossy(bytes);
+        let mut clean = String::new();
+        let mut chars = text.chars().peekable();
+        while let Some(ch) = chars.next() {
+            match ch {
+                '\u{1b}' => {
+                    if chars.peek() == Some(&'[') {
+                        chars.next();
+                        for final_byte in chars.by_ref() {
+                            if ('@'..='~').contains(&final_byte) {
+                                break;
+                            }
+                        }
+                    }
+                }
+                '\r' => {}
+                _ => clean.push(ch),
+            }
+        }
+        clean
+    }
+
+    fn shell_cwd(pty: &mut PtySession) -> String {
+        let mut reader = std::mem::replace(&mut pty.reader, Box::new(std::io::empty()));
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 1024];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if tx.send(buf[..n].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        writeln!(pty.writer, "pwd").unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut raw = Vec::new();
+        loop {
+            match rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(chunk) => raw.extend_from_slice(&chunk),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) if Instant::now() >= deadline => {
+                    panic!("timed out waiting for pwd output")
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+            let output = clean_output(&raw);
+            let mut lines = output.split('\n').peekable();
+            while let Some(line) = lines.next() {
+                // Only a newline-terminated line is complete; a trailing
+                // fragment may still be growing as more pty chunks arrive.
+                if lines.peek().is_some() && line.starts_with('/') {
+                    return line.trim_end().to_owned();
+                }
+            }
+        }
+        panic!("shell did not report its working directory");
+    }
+
+    #[test]
+    fn spawn_shell_in_uses_given_cwd() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut pty = PtySession::spawn_shell_in(80, 24, Some(dir.path())).unwrap();
+        let expected = fs::canonicalize(dir.path()).unwrap();
+        assert_eq!(shell_cwd(&mut pty), expected.to_str().unwrap());
+    }
+
+    #[test]
+    fn spawn_shell_in_none_matches_spawn_shell() {
+        let mut baseline = PtySession::spawn_shell(80, 24).unwrap();
+        let mut pty = PtySession::spawn_shell_in(80, 24, None).unwrap();
+        assert_eq!(shell_cwd(&mut pty), shell_cwd(&mut baseline));
     }
 }
