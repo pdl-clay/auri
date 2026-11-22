@@ -245,7 +245,7 @@ impl Canvas {
         cx: &mut Context<Self>,
     ) {
         if control {
-            let factor = (1.0 - dy * 0.0015).clamp(0.8, 1.25);
+            let factor = zoom_factor(dy);
             self.zoom = (self.zoom * factor).clamp(0.25, 3.0);
         } else if shift {
             self.offset_x -= dx + dy;
@@ -443,6 +443,11 @@ fn canvas_icon(path: &'static str) -> impl IntoElement {
         .w(px(16.0))
         .h(px(16.0))
         .text_color(rgb(0x93a0b5))
+}
+
+/// Scroll up shrinks the canvas; scroll down enlarges it.
+fn zoom_factor(dy: f32) -> f32 {
+    (1.0 + dy * 0.0015).clamp(0.8, 1.25)
 }
 
 impl Render for Canvas {
@@ -682,6 +687,12 @@ impl Render for Canvas {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zoom_scroll_direction_is_inverted() {
+        assert!(zoom_factor(-110.0) < 1.0);
+        assert!(zoom_factor(110.0) > 1.0);
+    }
 
     fn groups_for(store: &WorkspaceStore) -> CardGroups {
         store
