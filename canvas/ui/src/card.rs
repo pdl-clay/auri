@@ -449,6 +449,7 @@ impl Render for TerminalCard {
                         }),
                     ),
             )
+            .child(div().flex_1().min_h_0().child(self.terminal.clone()))
             .child(
                 div()
                     .flex()
@@ -461,7 +462,6 @@ impl Render for TerminalCard {
                     .text_color(rgb(0x93a0b5))
                     .child(self.root.to_string_lossy().into_owned()),
             )
-            .child(div().flex_1().min_h_0().child(self.terminal.clone()))
             .child(Self::resize_handle(id, DragMode::ResizeLeft, entity_id, cx))
             .child(Self::resize_handle(id, DragMode::ResizeRight, entity_id, cx))
             .child(Self::resize_handle(id, DragMode::ResizeTop, entity_id, cx))
