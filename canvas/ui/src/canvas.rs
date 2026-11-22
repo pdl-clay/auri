@@ -20,8 +20,8 @@ use crate::pty::PtySession;
 use crate::workspaces::{DrawerAction, WorkspaceDrawer};
 
 const GRID_STEP: f32 = 24.0;
-const CARD_WIDTH: f32 = 480.0;
-const CARD_HEIGHT: f32 = 320.0;
+const CARD_WIDTH: f32 = 640.0;
+const CARD_HEIGHT: f32 = 400.0;
 
 type CardGroups = HashMap<WorkspaceId, Vec<(TerminalId, Entity<TerminalCard>)>>;
 
@@ -262,6 +262,7 @@ impl Canvas {
         });
         card.read(cx).terminal.read(cx).focus_handle().focus(window);
         self.cards.entry(workspace_id).or_default().push((id, card));
+        self.sync_card_selection(workspace_id, cx);
         self.sync_drawer(cx);
         cx.notify();
     }
@@ -302,6 +303,21 @@ impl Canvas {
         cx.notify();
     }
 
+    /// Keep each card's painted selection flag in step with the logical state.
+    fn sync_card_selection(&self, workspace_id: WorkspaceId, cx: &mut Context<Self>) {
+        let selected = self
+            .store
+            .workspaces()
+            .iter()
+            .find(|workspace| workspace.id == workspace_id)
+            .and_then(|workspace| workspace.canvas.selected());
+        if let Some(cards) = self.cards.get(&workspace_id) {
+            for (id, card) in cards {
+                card.update(cx, |card, cx| card.set_selected(Some(*id) == selected, cx));
+            }
+        }
+    }
+
     pub fn select(&mut self, workspace_id: WorkspaceId, id: TerminalId, cx: &mut Context<Self>) {
         let Some(workspace) = self.store.workspace_mut(workspace_id) else {
             return;
@@ -310,6 +326,8 @@ impl Canvas {
             workspace.canvas.select(id);
             cx.notify();
         }
+        drop(workspace);
+        self.sync_card_selection(workspace_id, cx);
     }
 
     pub fn mark_exited(&mut self, workspace_id: WorkspaceId, id: TerminalId, cx: &mut Context<Self>) {
@@ -380,12 +398,6 @@ impl Render for Canvas {
                                     this.select(workspace_id, id, cx);
                                 }),
                             )
-                            .when(selected == Some(id), |wrapper| {
-                                wrapper
-                                    .border_2()
-                                    .border_dashed()
-                                    .border_color(rgb(0x5b9dff))
-                            })
                             .child(card.clone())
                     })
                     .collect()

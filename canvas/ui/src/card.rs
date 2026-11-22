@@ -1,8 +1,8 @@
 //! A draggable, resizable frame around one PTY-backed terminal.
 
 use auro::gpui::{
-    App, Bounds, Context, Div, DragMoveEvent, Entity, EntityId, MouseButton, MouseDownEvent, Pixels,
-    Point, Render, Stateful, WeakEntity, Window, div, px, rgb,
+    App, Bounds, Context, Div, DragMoveEvent, Edges, Entity, EntityId, MouseButton, MouseDownEvent,
+    Pixels, Point, Render, Stateful, WeakEntity, Window, div, px, rgb,
 };
 use auro::prelude::*;
 use canvas_types::{TerminalId, WorkspaceId};
@@ -12,12 +12,12 @@ use portable_pty::PtySize;
 use crate::canvas::Canvas;
 use crate::pty::PtySession;
 
-const FONT_PX: f32 = 12.0;
+const FONT_PX: f32 = 13.0;
 const LINE_HEIGHT: f32 = 1.2;
-const TITLE_HEIGHT: f32 = 28.0;
-const HANDLE: f32 = 8.0;
-const MIN_WIDTH: f32 = 160.0;
-const MIN_HEIGHT: f32 = 96.0;
+const TITLE_HEIGHT: f32 = 32.0;
+const HANDLE: f32 = 12.0;
+const MIN_WIDTH: f32 = 320.0;
+const MIN_HEIGHT: f32 = 200.0;
 
 /// Columns and rows that fit a monospace grid in the given pixel rectangle.
 pub fn grid_size(width_px: f32, height_px: f32, font_px: f32, line_height: f32) -> (u16, u16) {
@@ -38,6 +38,7 @@ enum DragMode {
     Move,
     ResizeWidth,
     ResizeHeight,
+    ResizeBoth,
 }
 
 #[derive(Clone, Copy)]
@@ -62,6 +63,7 @@ pub struct TerminalCard {
     pub workspace_id: WorkspaceId,
     pub bounds: Bounds<Pixels>,
     pub exited: bool,
+    pub selected: bool,
     pub terminal: Entity<TerminalView>,
     canvas: WeakEntity<Canvas>,
     pty: PtySession,
@@ -93,6 +95,7 @@ impl TerminalCard {
                 rows: rows as usize,
                 font_size: px(FONT_PX),
                 line_height_multiplier: LINE_HEIGHT,
+                padding: Edges::all(px(10.0)),
                 ..Default::default()
             };
             TerminalView::new(writer, reader, config, cx)
@@ -120,6 +123,7 @@ impl TerminalCard {
             workspace_id,
             bounds,
             exited: false,
+            selected: false,
             terminal,
             canvas,
             pty,
@@ -130,6 +134,13 @@ impl TerminalCard {
     pub fn set_exited(&mut self, cx: &mut Context<Self>) {
         if !self.exited {
             self.exited = true;
+            cx.notify();
+        }
+    }
+
+    pub fn set_selected(&mut self, selected: bool, cx: &mut Context<Self>) {
+        if self.selected != selected {
+            self.selected = selected;
             cx.notify();
         }
     }
@@ -171,6 +182,12 @@ impl TerminalCard {
                 self.bounds.size.height =
                     px((f32::from(start.bounds.size.height) + dy).max(MIN_HEIGHT));
             }
+            DragMode::ResizeBoth => {
+                self.bounds.size.width =
+                    px((f32::from(start.bounds.size.width) + dx).max(MIN_WIDTH));
+                self.bounds.size.height =
+                    px((f32::from(start.bounds.size.height) + dy).max(MIN_HEIGHT));
+            }
         }
         if start.mode != DragMode::Move {
             let (cols, rows) = terminal_grid(&self.bounds);
@@ -193,6 +210,7 @@ impl TerminalCard {
             DragMode::Move => unreachable!("only resize modes have handles"),
             DragMode::ResizeWidth => ("resize-width", id),
             DragMode::ResizeHeight => ("resize-height", id),
+            DragMode::ResizeBoth => ("resize-both", id),
         };
         let mut handle = div().absolute().id(element_id);
         handle = match mode {
@@ -201,7 +219,20 @@ impl TerminalCard {
                 handle.right_0().top(px(TITLE_HEIGHT)).bottom_0().w(px(HANDLE))
             }
             DragMode::ResizeHeight => handle.bottom_0().left_0().right_0().h(px(HANDLE)),
+            DragMode::ResizeBoth => handle.bottom_0().right_0().w(px(18.0)).h(px(18.0)),
         };
+        if mode == DragMode::ResizeBoth {
+            handle = handle.child(
+                div()
+                    .absolute()
+                    .bottom(px(4.0))
+                    .right(px(4.0))
+                    .w(px(7.0))
+                    .h(px(7.0))
+                    .rounded_full()
+                    .bg(rgb(0x7d90b0)),
+            );
+        }
         handle
             .on_mouse_down(
                 MouseButton::Left,
@@ -223,6 +254,7 @@ impl Render for TerminalCard {
         let id = self.id;
         let workspace_id = self.workspace_id;
         let exited = self.exited;
+        let selected = self.selected;
         let canvas = self.canvas.clone();
         let entity_id = cx.entity_id();
         div()
@@ -234,9 +266,14 @@ impl Render for TerminalCard {
             .flex()
             .flex_col()
             .overflow_hidden()
-            .bg(rgb(0x1e1e1e))
-            .border_1()
-            .border_color(rgb(0x555555))
+            .rounded(px(10.0))
+            .bg(rgb(0x14161b))
+            .when(selected, |card| {
+                card.border_2().border_dashed().border_color(rgb(0x5b9dff))
+            })
+            .when(!selected, |card| {
+                card.border_1().border_color(rgb(0x2b3547))
+            })
             .child(
                 div()
                     .id(("card-title", id))
@@ -245,12 +282,25 @@ impl Render for TerminalCard {
                     .justify_between()
                     .h(px(TITLE_HEIGHT))
                     .px_2()
-                    .bg(rgb(0x2d2d2d))
+                    .bg(rgb(0x1b2130))
+                    .text_color(rgb(0xc9d1d9))
                     .child(
                         div()
                             .flex()
+                            .items_center()
                             .gap_2()
-                            .child(format!("Terminal {id}"))
+                            .child(
+                                div()
+                                    .w(px(8.0))
+                                    .h(px(8.0))
+                                    .rounded_full()
+                                    .bg(if selected {
+                                        rgb(0x5b9dff)
+                                    } else {
+                                        rgb(0x3a4354)
+                                    }),
+                            )
+                            .child(div().text_sm().child(format!("Terminal {id}")))
                             .when(exited, |title| {
                                 title
                                     .child("encerrado")
@@ -289,6 +339,7 @@ impl Render for TerminalCard {
             .child(div().flex_1().min_h_0().child(self.terminal.clone()))
             .child(Self::resize_handle(id, DragMode::ResizeWidth, entity_id, cx))
             .child(Self::resize_handle(id, DragMode::ResizeHeight, entity_id, cx))
+            .child(Self::resize_handle(id, DragMode::ResizeBoth, entity_id, cx))
     }
 }
 
