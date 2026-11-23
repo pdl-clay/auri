@@ -377,7 +377,28 @@ mod tests {
         assert_eq!(got.icon, WorkspaceIcon::Bolt);
         assert_eq!(got.root, root);
         assert!(!got.invalid_root, "an existing root is valid after load");
+        assert!(!got.unloaded);
         assert_eq!(loaded.active(), Some(ws.id));
+    }
+
+    #[test]
+    fn unloaded_state_survives_save_and_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = config_file(dir.path());
+        let root = dir.path().join("root");
+        fs::create_dir_all(&root).unwrap();
+
+        let mut store = WorkspaceStore::new();
+        let ws = store.add("Descarregado".into(), WorkspaceIcon::Star, root);
+        store.workspace_mut(ws.id).unwrap().unload();
+        save_at(&store, &path).unwrap();
+
+        let mut loaded = WorkspaceStore::new();
+        assert_eq!(load_at(&mut loaded, &path), LoadOutcome::Loaded);
+        let got = &loaded.workspaces()[0];
+        assert!(got.unloaded);
+        assert!(got.canvas.terminals().is_empty());
+        assert!(got.canvas.notes().is_empty());
     }
 
     #[test]
@@ -635,6 +656,7 @@ mod tests {
         assert_eq!(canvas.terminals()[0].bounds, None);
         assert!(canvas.notes().is_empty());
         assert_eq!(canvas.next_id(), 2);
+        assert!(!loaded.workspaces()[0].unloaded);
 
         let note = loaded.active_mut().unwrap().canvas.add_note("novo".into(), CardBounds {
             x: 0.0,

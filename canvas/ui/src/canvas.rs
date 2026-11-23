@@ -1,7 +1,7 @@
 //! Canvas view: drawer, workspace groups and the lifecycle of PTY-backed cards.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use auro::gpui::{
     Bounds, Context, CursorStyle, Entity, MouseButton, MouseDownEvent, Pixels, Point, Render,
@@ -65,6 +65,20 @@ impl SpawnTargetError {
     }
 }
 
+/// Validate the values submitted by both workspace form modes.
+fn validate_workspace_details(name: &str, root: &Path) -> Result<(), String> {
+    if name.trim().is_empty() {
+        return Err("Informe um nome para o espaço.".into());
+    }
+    if root.as_os_str().is_empty() {
+        return Err("Escolha uma raiz para o espaço.".into());
+    }
+    if !root.is_dir() {
+        return Err(format!("A raiz {} não é um diretório.", root.display()));
+    }
+    Ok(())
+}
+
 /// Create a workspace, refusing a blank or unusable root.
 fn create_workspace(
     store: &mut WorkspaceStore,
@@ -74,16 +88,35 @@ fn create_workspace(
     root: PathBuf,
 ) -> Result<WorkspaceId, String> {
     let name = name.trim().to_owned();
-    if name.is_empty() {
-        return Err("Informe um nome para o espaço.".into());
-    }
-    if root.as_os_str().is_empty() {
-        return Err("Escolha uma raiz para o espaço.".into());
-    }
-    if !root.is_dir() {
-        return Err(format!("A raiz {} não é um diretório.", root.display()));
-    }
+    validate_workspace_details(&name, &root)?;
     Ok(store.add_with_color(name, icon, color, root).id)
+}
+
+/// Apply edits to an existing workspace without touching its cards.
+fn update_workspace(
+    store: &mut WorkspaceStore,
+    id: WorkspaceId,
+    name: String,
+    icon: WorkspaceIcon,
+    color: WorkspaceColor,
+    root: PathBuf,
+) -> Result<(), String> {
+    let name = name.trim().to_owned();
+    validate_workspace_details(&name, &root)?;
+    let workspace = store
+        .workspace_mut(id)
+        .ok_or_else(|| "Espaço de trabalho não encontrado.".to_owned())?;
+    workspace.update_details(name, icon, color, root);
+    Ok(())
+}
+
+/// End a workspace's cards, keeping the row and its identifier.
+fn unload_workspace(store: &mut WorkspaceStore, id: WorkspaceId) -> bool {
+    let Some(workspace) = store.workspace_mut(id) else {
+        return false;
+    };
+    workspace.unload();
+    true
 }
 
 /// Remove one workspace's state and card group, leaving every other group alone.
@@ -206,6 +239,28 @@ impl Canvas {
                         self.error = Some(error);
                         cx.notify();
                     }
+                }
+            }
+            DrawerAction::Update { id, name, icon, color, root } => {
+                match update_workspace(&mut self.store, id, name, icon, color, root) {
+                    Ok(()) => {
+                        self.error = None;
+                        self.finish_store_change(cx);
+                    }
+                    Err(error) => {
+                        self.error = Some(error);
+                        cx.notify();
+                    }
+                }
+            }
+            DrawerAction::Unload(id) => {
+                if unload_workspace(&mut self.store, id) {
+                    let dropped = self.cards.remove(&id).unwrap_or_default();
+                    let dropped_notes = self.notes.remove(&id).unwrap_or_default();
+                    self.finish_store_change(cx);
+                    // Dropping these entities ends every PTY in the workspace.
+                    drop(dropped);
+                    drop(dropped_notes);
                 }
             }
             DrawerAction::Delete(id) => {
@@ -382,7 +437,9 @@ impl Canvas {
                 cx.notify();
                 return;
             };
-            workspace.canvas.add_note(String::new(), saved).id
+            let note_id = workspace.canvas.add_note(String::new(), saved).id;
+            workspace.mark_loaded();
+            note_id
         };
         let canvas = cx.entity().downgrade();
         let note = cx.new(|cx| {
@@ -448,6 +505,9 @@ impl Canvas {
                 return;
             }
         };
+        if let Some(workspace) = self.store.workspace_mut(workspace_id) {
+            workspace.mark_loaded();
+        }
         self.error = None;
         let canvas = cx.entity().downgrade();
         let card = cx.new(|cx| {
@@ -1382,5 +1442,68 @@ mod tests {
 
         assert_eq!(store.workspace_mut(first.id).unwrap().canvas.terminals().len(), 1);
         assert!(store.workspace_mut(second.id).unwrap().canvas.terminals().is_empty());
+    }
+
+    #[test]
+    fn unload_workspace_keeps_row_and_clears_cards() {
+        let mut store = WorkspaceStore::new();
+        let first = store.add("A".into(), WorkspaceIcon::Star, PathBuf::from("/a"));
+        let second = store.add("B".into(), WorkspaceIcon::Bolt, PathBuf::from("/b"));
+        let canvas = &mut store.workspace_mut(first.id).unwrap().canvas;
+        canvas.add();
+        canvas.add_note("nota".into(), CardBounds {
+            x: 0.0,
+            y: 0.0,
+            width: 10.0,
+            height: 10.0,
+        });
+        store.workspace_mut(second.id).unwrap().canvas.add();
+
+        assert!(unload_workspace(&mut store, first.id));
+
+        assert_eq!(store.workspaces().len(), 2);
+        assert!(store.workspace_mut(first.id).unwrap().unloaded);
+        let unloaded = &store.workspace_mut(first.id).unwrap().canvas;
+        assert!(unloaded.terminals().is_empty());
+        assert!(unloaded.notes().is_empty());
+        let other = &store.workspace_mut(second.id).unwrap();
+        assert!(!other.unloaded);
+        assert_eq!(other.canvas.terminals().len(), 1);
+        assert!(!unload_workspace(&mut store, 999));
+    }
+
+    #[test]
+    fn update_workspace_changes_details_without_touching_cards() {
+        let mut store = WorkspaceStore::new();
+        let workspace = store.add("Antigo".into(), WorkspaceIcon::Star, PathBuf::from("/a"));
+        store.workspace_mut(workspace.id).unwrap().canvas.add();
+        let root = std::env::current_dir().unwrap();
+
+        update_workspace(
+            &mut store,
+            workspace.id,
+            "  Novo  ".into(),
+            WorkspaceIcon::Globe,
+            WorkspaceColor::Green,
+            root.clone(),
+        )
+        .unwrap();
+
+        let updated = store.workspace_mut(workspace.id).unwrap();
+        assert_eq!(updated.name, "Novo");
+        assert_eq!(updated.icon, WorkspaceIcon::Globe);
+        assert_eq!(updated.color, WorkspaceColor::Green);
+        assert_eq!(updated.root, root);
+        assert!(!updated.invalid_root);
+        assert_eq!(updated.canvas.terminals().len(), 1);
+        assert!(update_workspace(
+            &mut store,
+            workspace.id,
+            "Invalido".into(),
+            WorkspaceIcon::Star,
+            WorkspaceColor::Brass,
+            PathBuf::from("/nao/existe"),
+        )
+        .is_err());
     }
 }

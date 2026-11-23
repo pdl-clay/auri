@@ -41,8 +41,24 @@ pub enum DrawerAction {
         color: WorkspaceColor,
         root: PathBuf,
     },
+    Update {
+        id: WorkspaceId,
+        name: String,
+        icon: WorkspaceIcon,
+        color: WorkspaceColor,
+        root: PathBuf,
+    },
+    Unload(WorkspaceId),
+    /// Removes the workspace; used by both the row X and "Fechar" in the menu.
     Delete(WorkspaceId),
     Select(WorkspaceId),
+}
+
+/// Right-click target: the empty drawer or one of its workspace rows.
+#[derive(Clone, Copy)]
+enum MenuTarget {
+    New,
+    Workspace(WorkspaceId),
 }
 
 /// Case-insensitive substring match. Accents are deliberately not normalized.
@@ -70,6 +86,8 @@ pub struct WorkspaceDrawer {
     filter_input: Option<Entity<InputState>>,
     filter_subscription: Option<Subscription>,
     form_open: bool,
+    /// `Some` while the shared form edits an existing workspace.
+    form_id: Option<WorkspaceId>,
     form_name: String,
     name_input: Option<Entity<InputState>>,
     name_subscription: Option<Subscription>,
@@ -81,7 +99,7 @@ pub struct WorkspaceDrawer {
     action_handler: Option<Box<dyn Fn(DrawerAction, &mut App)>>,
     form_color: WorkspaceColor,
     restart_handler: Option<Box<dyn Fn(&WorkspaceStore, &mut App)>>,
-    context_menu: Option<Point<Pixels>>,
+    context_menu: Option<(MenuTarget, Point<Pixels>)>,
     drawer_width: f32,
     drag_start: Option<f32>,
 }
@@ -96,6 +114,7 @@ impl WorkspaceDrawer {
             filter_input: None,
             filter_subscription: None,
             form_open: false,
+            form_id: None,
             form_name: String::new(),
             name_input: None,
             name_subscription: None,
@@ -112,7 +131,6 @@ impl WorkspaceDrawer {
             drag_start: None,
         }
     }
-
 
     pub fn drawer_width(&self) -> f32 {
         self.drawer_width
@@ -136,12 +154,53 @@ impl WorkspaceDrawer {
     }
     /// Open the shared centered workspace creation dialog.
     pub fn open_create_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.reset_form();
         self.open_form();
+        self.show_form_dialog(window, cx);
+    }
+
+    /// Open the same form pre-filled with an existing workspace's values.
+    pub fn open_edit_dialog(
+        &mut self,
+        id: WorkspaceId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self.store.workspaces().iter().find(|ws| ws.id == id) else {
+            return;
+        };
+        let (name, icon, color, root) = (
+            workspace.name.clone(),
+            workspace.icon,
+            workspace.color,
+            workspace.root.clone(),
+        );
+        self.reset_form();
+        self.form_id = Some(id);
+        self.form_name = name;
+        self.form_icon = icon;
+        self.form_color = color;
+        self.form_root = Some(root);
+        self.open_form();
+        self.show_form_dialog(window, cx);
+    }
+
+    fn show_form_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.context_menu = None;
         let drawer = cx.weak_entity();
         window.open_dialog(cx, move |dialog, window, cx| {
             workspace_dialog(dialog, window, cx, &drawer)
         });
         cx.notify();
+    }
+
+    fn reset_form(&mut self) {
+        self.form_id = None;
+        self.form_name.clear();
+        self.form_root = None;
+        self.form_icon = WorkspaceIcon::Star;
+        self.form_color = WorkspaceColor::Brass;
+        self.form_error = None;
     }
 
     /// Consumer of every mutation requested from this drawer.
@@ -179,10 +238,7 @@ impl WorkspaceDrawer {
     /// Closing clears every form field; `sync_inputs` keeps the visible inputs in step.
     pub fn close_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.form_open = false;
-        self.form_error = None;
-        self.form_name.clear();
-        self.form_root = None;
-        self.form_color = WorkspaceColor::Brass;
+        self.reset_form();
         self.sync_inputs(window, cx);
     }
 
@@ -340,6 +396,25 @@ impl WorkspaceDrawer {
         .detach();
     }
 
+    /// The pending form mutation; edit mode reuses the create form verbatim.
+    fn form_action(&self, name: String, root: PathBuf) -> DrawerAction {
+        match self.form_id {
+            Some(id) => DrawerAction::Update {
+                id,
+                name,
+                icon: self.form_icon,
+                color: self.form_color,
+                root,
+            },
+            None => DrawerAction::Create {
+                name,
+                icon: self.form_icon,
+                color: self.form_color,
+                root,
+            },
+        }
+    }
+
     fn submit_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let name = self.form_name.trim().to_owned();
         if name.is_empty() {
@@ -357,15 +432,8 @@ impl WorkspaceDrawer {
             cx.notify();
             return;
         }
-        self.emit(
-            DrawerAction::Create {
-                name,
-                icon: self.form_icon,
-                color: self.form_color,
-                root,
-            },
-            cx,
-        );
+        let action = self.form_action(name, root);
+        self.emit(action, cx);
         self.close_form(window, cx);
         cx.notify();
     }
@@ -470,6 +538,7 @@ fn workspace_dialog(
             state.root_input.clone(),
         )
     };
+    let editing = entity.read(cx).form_id.is_some();
     let ok_drawer = drawer.clone();
     let cancel_drawer = drawer.clone();
     let pick_drawer = drawer.clone();
@@ -479,7 +548,7 @@ fn workspace_dialog(
             div()
                 .text_lg()
                 .text_color(rgb(COLOR_FOREGROUND))
-                .child("Novo espaço de trabalho"),
+                .child(if editing { "Editar espaço de trabalho" } else { "Novo espaço de trabalho" }),
         )
         .w(px(440.))
         .margin_top((window.viewport_size().height - px(320.0)) / 2.0)
@@ -491,7 +560,7 @@ fn workspace_dialog(
         .text_color(rgb(COLOR_FOREGROUND))
         .button_props(
             DialogButtonProps::default()
-                .ok_text("Criar espaço")
+                .ok_text(if editing { "Salvar alterações" } else { "Criar espaço" })
                 .cancel_text("Cancelar")
                 .ok_variant(ButtonVariant::Primary)
                 .cancel_variant(ButtonVariant::Ghost),
@@ -645,9 +714,12 @@ fn menu_origin(
     position: Point<Pixels>,
     viewport_height: f32,
     drawer_width: f32,
+    item_count: usize,
 ) -> (f32, f32) {
-    let max_x = drawer_width - CONTEXT_MENU_WIDTH - SPACE_TIGHT;
-    let max_y = viewport_height - CONTEXT_MENU_ITEM_HEIGHT - SPACE_WIDE - 2.0 * SPACE_TIGHT;
+    let menu_height =
+        CONTEXT_MENU_ITEM_HEIGHT * item_count as f32 + 2.0 * SPACE_TIGHT;
+    let max_x = (drawer_width - CONTEXT_MENU_WIDTH - SPACE_TIGHT).max(SPACE_TIGHT);
+    let max_y = (viewport_height - menu_height - SPACE_WIDE).max(SPACE_TIGHT);
     (
         f32::from(position.x).clamp(SPACE_TIGHT, max_x),
         f32::from(position.y).clamp(SPACE_TIGHT, max_y),
@@ -659,11 +731,19 @@ impl Render for WorkspaceDrawer {
         self.sync_inputs(window, cx);
         let active = self.store.active();
         let filter = self.filter.clone();
-        let context_menu = self.context_menu.map(|position| {
-            menu_origin(
-                position,
-                f32::from(window.viewport_size().height),
-                self.drawer_width,
+        let context_menu = self.context_menu.map(|(target, position)| {
+            let item_count = match target {
+                MenuTarget::New => 1,
+                MenuTarget::Workspace(_) => 3,
+            };
+            (
+                target,
+                menu_origin(
+                    position,
+                    f32::from(window.viewport_size().height),
+                    self.drawer_width,
+                    item_count,
+                ),
             )
         });
         let rows: Vec<WorkspaceState> = self
@@ -694,7 +774,7 @@ impl Render for WorkspaceDrawer {
                 MouseButton::Right,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
                     window.prevent_default();
-                    this.context_menu = Some(event.position);
+                    this.context_menu = Some((MenuTarget::New, event.position));
                     cx.notify();
                 }),
             )
@@ -769,6 +849,12 @@ impl Render for WorkspaceDrawer {
                 let id = workspace.id;
                 let is_active = active == Some(id);
                 let invalid = workspace.invalid_root;
+                let unloaded = workspace.unloaded;
+                let terminal_color = if unloaded {
+                    COLOR_UNLOADED_ICON
+                } else {
+                    COLOR_MUTED
+                };
                 let color = workspace_color(workspace.color);
                 div()
                     .id(("workspace-row", id))
@@ -796,7 +882,12 @@ impl Render for WorkspaceDrawer {
                     )
                     .on_mouse_down(
                         MouseButton::Right,
-                        cx.listener(|_, _, _, cx| cx.stop_propagation()),
+                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                            window.prevent_default();
+                            cx.stop_propagation();
+                            this.context_menu = Some((MenuTarget::Workspace(id), event.position));
+                            cx.notify();
+                        }),
                     )
                     .child(row_icon(workspace.icon, color))
                     .child(
@@ -818,7 +909,7 @@ impl Render for WorkspaceDrawer {
                             .relative()
                             .w(px(ROW_ICON_SIZE + COUNT_BADGE_RESERVE))
                             .flex_none()
-                            .child(asset_icon_sized("terminal.svg", COLOR_MUTED, ROW_ICON_SIZE))
+                            .child(asset_icon_sized("terminal.svg", terminal_color, ROW_ICON_SIZE))
                             .child(
                                 div()
                                     .absolute()
@@ -854,8 +945,8 @@ impl Render for WorkspaceDrawer {
                             ),
                     )
             }))
-            .when_some(context_menu, |this, (x, y)| {
-                this.child(
+            .when_some(context_menu, |this, (target, (x, y))| {
+                let this = this.child(
                     div()
                         .absolute()
                         .left(px(0.0))
@@ -868,23 +959,49 @@ impl Render for WorkspaceDrawer {
                                 cx.notify();
                             }),
                         ),
-                )
-                .child(
-                    div()
-                        .absolute()
-                        .top(px(y))
-                        .left(px(x))
-                        .w(px(CONTEXT_MENU_WIDTH))
-                        .flex()
-                        .flex_col()
-                        .p(px(SPACE_TIGHT))
-                        .rounded(px(RADIUS_CONTROL))
-                        .bg(rgb(COLOR_ELEVATED))
-                        .border_1()
-                        .border_color(rgb(COLOR_BORDER))
-                        .child(
+                );
+                let menu = div()
+                    .absolute()
+                    .top(px(y))
+                    .left(px(x))
+                    .w(px(CONTEXT_MENU_WIDTH))
+                    .flex()
+                    .flex_col()
+                    .p(px(SPACE_TIGHT))
+                    .rounded(px(RADIUS_CONTROL))
+                    .bg(rgb(COLOR_ELEVATED))
+                    .border_1()
+                    .border_color(rgb(COLOR_BORDER));
+                match target {
+                    MenuTarget::New => this.child(menu.child(
+                        div()
+                            .id("drawer-new-workspace")
+                            .h(px(CONTEXT_MENU_ITEM_HEIGHT))
+                            .flex()
+                            .items_center()
+                            .gap(px(SPACE_NORMAL))
+                            .px(px(SPACE_NORMAL))
+                            .rounded(px(RADIUS_CHIP))
+                            .hover(|style| style.bg(rgb(COLOR_BORDER)))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, window, cx| {
+                                    this.context_menu = None;
+                                    this.open_create_dialog(window, cx);
+                                }),
+                            )
+                            .child(asset_icon("plus.svg", COLOR_FOREGROUND))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(COLOR_FOREGROUND))
+                                    .child("Novo espaço de trabalho"),
+                            ),
+                    )),
+                    MenuTarget::Workspace(id) => this.child(
+                        menu.child(
                             div()
-                                .id("drawer-new-workspace")
+                                .id(("drawer-workspace-unload", id))
                                 .h(px(CONTEXT_MENU_ITEM_HEIGHT))
                                 .flex()
                                 .items_center()
@@ -894,20 +1011,73 @@ impl Render for WorkspaceDrawer {
                                 .hover(|style| style.bg(rgb(COLOR_BORDER)))
                                 .on_mouse_down(
                                     MouseButton::Left,
-                                    cx.listener(|this, _, window, cx| {
+                                    cx.listener(move |this, _, _, cx| {
                                         this.context_menu = None;
-                                        this.open_create_dialog(window, cx);
+                                        this.emit(DrawerAction::Unload(id), cx);
+                                        cx.notify();
                                     }),
                                 )
-                                .child(asset_icon("plus.svg", COLOR_FOREGROUND))
+                                .child(asset_icon("unload.svg", COLOR_FOREGROUND))
                                 .child(
                                     div()
                                         .text_xs()
                                         .text_color(rgb(COLOR_FOREGROUND))
-                                        .child("Novo espaço de trabalho"),
+                                        .child("Descarregar"),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .id(("drawer-workspace-edit", id))
+                                .h(px(CONTEXT_MENU_ITEM_HEIGHT))
+                                .flex()
+                                .items_center()
+                                .gap(px(SPACE_NORMAL))
+                                .px(px(SPACE_NORMAL))
+                                .rounded(px(RADIUS_CHIP))
+                                .hover(|style| style.bg(rgb(COLOR_BORDER)))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _, window, cx| {
+                                        this.context_menu = None;
+                                        this.open_edit_dialog(id, window, cx);
+                                    }),
+                                )
+                                .child(asset_icon("edit.svg", COLOR_FOREGROUND))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(COLOR_FOREGROUND))
+                                        .child("Editar"),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .id(("drawer-workspace-close", id))
+                                .h(px(CONTEXT_MENU_ITEM_HEIGHT))
+                                .flex()
+                                .items_center()
+                                .gap(px(SPACE_NORMAL))
+                                .px(px(SPACE_NORMAL))
+                                .rounded(px(RADIUS_CHIP))
+                                .hover(|style| style.bg(rgb(COLOR_BORDER)))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _, _, cx| {
+                                        this.context_menu = None;
+                                        this.emit(DrawerAction::Delete(id), cx);
+                                        cx.notify();
+                                    }),
+                                )
+                                .child(asset_icon("x.svg", COLOR_DANGER))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(COLOR_DANGER))
+                                        .child("Fechar"),
                                 ),
                         ),
-                )
+                    ),
+                }
             })
             .child(
                 div()
@@ -937,10 +1107,12 @@ impl Render for WorkspaceDrawer {
 
 #[cfg(test)]
 mod tests {
-    use canvas_types::{WorkspaceIcon, WorkspaceStore};
+    use canvas_types::{WorkspaceColor, WorkspaceIcon, WorkspaceStore};
     use std::path::PathBuf;
 
-    use super::{LoadOutcome, apply_restart_result, filter_matches, menu_origin};
+    use super::{
+        DrawerAction, LoadOutcome, WorkspaceDrawer, apply_restart_result, filter_matches, menu_origin,
+    };
     use auro::gpui::{Point, px};
 
     #[test]
@@ -952,15 +1124,44 @@ mod tests {
     #[test]
     fn drawer_menu_follows_click_and_stays_inside_drawer() {
         assert_eq!(
-            menu_origin(Point::new(px(30.0), px(140.0)), 900.0, 224.0),
+            menu_origin(Point::new(px(30.0), px(140.0)), 900.0, 224.0, 1),
             (30.0, 140.0)
         );
         assert_eq!(
-            menu_origin(Point::new(px(900.0), px(890.0)), 900.0, 224.0),
+            menu_origin(Point::new(px(900.0), px(890.0)), 900.0, 224.0, 1),
             (224.0 - 180.0 - 4.0, 900.0 - 32.0 - 12.0 - 8.0)
+        );
+        assert_eq!(
+            menu_origin(Point::new(px(900.0), px(890.0)), 900.0, 224.0, 3),
+            (224.0 - 180.0 - 4.0, 900.0 - 3.0 * 32.0 - 12.0 - 8.0)
         );
     }
 
+
+    #[test]
+    fn edit_form_emits_update_with_all_edited_fields() {
+        let mut drawer = WorkspaceDrawer::new(LoadOutcome::Loaded);
+        drawer.form_id = Some(7);
+        drawer.set_form_icon(WorkspaceIcon::Globe);
+        drawer.set_form_color(WorkspaceColor::Green);
+
+        assert_eq!(
+            drawer.form_action("Novo nome".into(), PathBuf::from("/novo")),
+            DrawerAction::Update {
+                id: 7,
+                name: "Novo nome".into(),
+                icon: WorkspaceIcon::Globe,
+                color: WorkspaceColor::Green,
+                root: PathBuf::from("/novo"),
+            }
+        );
+
+        drawer.form_id = None;
+        assert!(matches!(
+            drawer.form_action("Outro".into(), PathBuf::from("/outro")),
+            DrawerAction::Create { .. }
+        ));
+    }
     #[test]
     fn filter_is_case_insensitive_substring() {
         assert!(filter_matches("Projeto Aurora", "AUR"));

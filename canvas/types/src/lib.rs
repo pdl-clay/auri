@@ -169,6 +169,15 @@ impl CanvasState {
         &self.notes
     }
 
+    /// Drop every persisted card while keeping the id allocator ahead of old ids,
+    /// so a later reload never reuses an id from a previous session.
+    pub fn unload(&mut self) {
+        self.terminals.clear();
+        self.notes.clear();
+        self.selected = None;
+    }
+
+
     /// Keep the shared allocator above every id found in a restored config.
     pub fn reserve_id_above(&mut self, id: u64) {
         self.next_id = self.next_id.max(id.saturating_add(1));
@@ -217,6 +226,37 @@ pub struct WorkspaceState {
     pub invalid_root: bool,
     #[serde(default)]
     pub canvas: CanvasState,
+    /// True after "Descarregar": cards are gone and stay gone across restarts.
+    #[serde(default)]
+    pub unloaded: bool,
+}
+
+impl WorkspaceState {
+    /// End this workspace's cards and remember the unloaded state on disk.
+    pub fn unload(&mut self) {
+        self.canvas.unload();
+        self.unloaded = true;
+    }
+
+    /// A new terminal or note brings the workspace back to life.
+    pub fn mark_loaded(&mut self) {
+        self.unloaded = false;
+    }
+
+    /// Apply the values edited in the shared workspace form.
+    pub fn update_details(
+        &mut self,
+        name: String,
+        icon: WorkspaceIcon,
+        color: WorkspaceColor,
+        root: PathBuf,
+    ) {
+        self.name = name;
+        self.icon = icon;
+        self.color = color;
+        self.root = root;
+        self.invalid_root = false;
+    }
 }
 
 /// All workspaces plus the current selection and the id allocator.
@@ -260,6 +300,7 @@ impl WorkspaceStore {
             invalid_root: false,
             color,
             canvas: CanvasState::new(),
+            unloaded: false,
         };
         self.workspaces.push(workspace.clone());
         self.active = Some(id);
@@ -465,9 +506,54 @@ mod workspace_tests {
             color: WorkspaceColor::Red,
             invalid_root: true,
             canvas: CanvasState::new(),
+            unloaded: false,
         };
         state.canvas.add();
         assert!(state.invalid_root);
         assert_eq!(state.canvas.terminals().len(), 1);
+    }
+
+    #[test]
+    fn unloading_clears_cards_and_marking_loaded_clears_the_flag() {
+        let mut store = WorkspaceStore::new();
+        let mut workspace = store.add("A".into(), WorkspaceIcon::Star, PathBuf::from("/a"));
+        workspace.canvas.add();
+        workspace.canvas.add_note("nota".into(), CardBounds {
+            x: 0.0,
+            y: 0.0,
+            width: 10.0,
+            height: 10.0,
+        });
+        let next_id = workspace.canvas.next_id();
+
+        workspace.unload();
+
+        assert!(workspace.unloaded);
+        assert!(workspace.canvas.terminals().is_empty());
+        assert!(workspace.canvas.notes().is_empty());
+        assert_eq!(workspace.canvas.next_id(), next_id);
+
+        workspace.mark_loaded();
+        assert!(!workspace.unloaded);
+    }
+
+    #[test]
+    fn update_details_replaces_form_fields() {
+        let mut store = WorkspaceStore::new();
+        let mut workspace = store.add("Antigo".into(), WorkspaceIcon::Star, PathBuf::from("/a"));
+        workspace.invalid_root = true;
+
+        workspace.update_details(
+            "Novo".into(),
+            WorkspaceIcon::Globe,
+            WorkspaceColor::Green,
+            PathBuf::from("/b"),
+        );
+
+        assert_eq!(workspace.name, "Novo");
+        assert_eq!(workspace.icon, WorkspaceIcon::Globe);
+        assert_eq!(workspace.color, WorkspaceColor::Green);
+        assert_eq!(workspace.root, PathBuf::from("/b"));
+        assert!(!workspace.invalid_root);
     }
 }

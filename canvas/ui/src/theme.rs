@@ -7,6 +7,7 @@ pub const COLOR_ELEVATED: u32 = 0x222326;
 pub const COLOR_BORDER: u32 = 0x35373A;
 pub const COLOR_FOREGROUND: u32 = 0xE8E8E6;
 pub const COLOR_MUTED: u32 = 0x9C9D9A;
+pub const COLOR_UNLOADED_ICON: u32 = 0x4E5052;
 pub const COLOR_ACCENT: u32 = 0xC9A227;
 pub const COLOR_DANGER: u32 = 0xE06C63;
 pub const COLOR_SELECTION: u32 = 0x7E96AE;
