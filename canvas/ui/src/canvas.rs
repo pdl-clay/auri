@@ -1,6 +1,6 @@
 //! Canvas view: drawer, workspace groups and the lifecycle of PTY-backed cards.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -58,7 +58,7 @@ fn random_token() -> String {
 struct AgentRegistry {
     tokens: HashMap<String, TerminalId>,
     homes: HashMap<String, WorkspaceId>,
-    writers: HashMap<TerminalId, Arc<Mutex<Box<dyn Write + Send>>>>,
+    writers: HashMap<(WorkspaceId, TerminalId), Arc<Mutex<Box<dyn Write + Send>>>>,
 }
 
 impl AgentRegistry {
@@ -71,12 +71,13 @@ impl AgentRegistry {
     }
 
     /// Retain a shared handle to a card's PTY input for later `ask` dispatch.
-    fn register(&mut self, id: TerminalId, writer: Arc<Mutex<Box<dyn Write + Send>>>) {
-        self.writers.insert(id, writer);
+    /// Ids are workspace-local, so the full (workspace, id) key is required.
+    fn register(&mut self, workspace: WorkspaceId, id: TerminalId, writer: Arc<Mutex<Box<dyn Write + Send>>>) {
+        self.writers.insert((workspace, id), writer);
     }
 
     /// Forget one card's credentials; ids are workspace-local, so a card with
-    /// the same id in a different workspace keeps its token.
+    /// the same id in a different workspace keeps its token and writer.
     fn revoke_agent(&mut self, workspace: WorkspaceId, id: TerminalId) {
         let stale: Vec<String> = self
             .tokens
@@ -90,9 +91,7 @@ impl AgentRegistry {
             self.tokens.remove(&token);
             self.homes.remove(&token);
         }
-        if !self.tokens.values().any(|card| *card == id) {
-            self.writers.remove(&id);
-        }
+        self.writers.remove(&(workspace, id));
     }
 
     /// Invalidate every token issued by one workspace (unload or delete).
@@ -107,8 +106,7 @@ impl AgentRegistry {
             self.tokens.remove(&token);
             self.homes.remove(&token);
         }
-        let live: HashSet<TerminalId> = self.tokens.values().copied().collect();
-        self.writers.retain(|id, _| live.contains(id));
+        self.writers.retain(|(home, _), _| *home != workspace);
     }
 
     /// Drop every credential when the whole store is replaced.
@@ -116,6 +114,28 @@ impl AgentRegistry {
         self.tokens.clear();
         self.homes.clear();
         self.writers.clear();
+    }
+
+    /// Best-effort workspace for a card id: the home of a live token, preferring
+    /// the active workspace when an id is reused, then the live card in the store.
+    fn home_for(&self, store: &WorkspaceStore, id: TerminalId) -> Option<WorkspaceId> {
+        let active = store.active();
+        let homes = || {
+            self.tokens
+                .iter()
+                .filter(|(_, card)| **card == id)
+                .filter_map(|(token, _)| self.homes.get(token).copied())
+        };
+        homes()
+            .find(|home| Some(*home) == active)
+            .or_else(|| homes().next())
+            .or_else(|| {
+                store
+                    .workspaces()
+                    .iter()
+                    .find(|workspace| workspace.canvas.agent(id).is_some())
+                    .map(|workspace| workspace.id)
+            })
     }
 
     /// Resolve a token to the workspace and card it was issued for. The card
@@ -647,7 +667,9 @@ impl Canvas {
     /// Keep the shared PTY input handle for one agent card. This handle and the
     /// terminal view drive the same pty, so a host `ask` reaches the shell.
     pub fn register_agent_pty(&mut self, id: TerminalId, writer: Arc<Mutex<Box<dyn Write + Send>>>) {
-        self.registry.register(id, writer);
+        if let Some(home) = self.registry.home_for(&self.store, id) {
+            self.registry.register(home, id, writer);
+        }
     }
 
     /// Authenticate one host request before any command is dispatched.
@@ -3563,10 +3585,34 @@ mod registry_tests {
         let mut registry = AgentRegistry::default();
         let id = 7;
         let writer = sink_writer();
-        registry.register(id, writer.clone());
-        assert!(Arc::ptr_eq(registry.writers.get(&id).unwrap(), &writer));
+        registry.register(1, id, writer.clone());
+        assert!(Arc::ptr_eq(registry.writers.get(&(1, id)).unwrap(), &writer));
 
         registry.revoke_agent(1, id);
         assert!(registry.writers.is_empty());
+    }
+
+    #[test]
+    fn same_id_cards_in_different_workspaces_keep_independent_writers() {
+        let (mut store, first, agent_id, _) = workspace_with_cards();
+        let other = store.add("Other".into(), WorkspaceIcon::Star, PathBuf::from("/tmp/auri-other"));
+        let other_agent = store.workspace_mut(other.id).unwrap().canvas.add_agent(AgentKind::Codex, card_bounds());
+        assert_eq!(other_agent.id, agent_id);
+
+        let mut registry = AgentRegistry::default();
+        let first_writer = sink_writer();
+        let other_writer = sink_writer();
+        registry.register(first, agent_id, first_writer.clone());
+        registry.register(other.id, other_agent.id, other_writer.clone());
+
+        let stored_first = registry.writers.get(&(first, agent_id)).unwrap();
+        let stored_other = registry.writers.get(&(other.id, other_agent.id)).unwrap();
+        assert!(Arc::ptr_eq(stored_first, &first_writer));
+        assert!(Arc::ptr_eq(stored_other, &other_writer));
+        assert!(!Arc::ptr_eq(stored_first, stored_other));
+
+        registry.revoke_agent(first, agent_id);
+        assert!(registry.writers.get(&(first, agent_id)).is_none());
+        assert!(Arc::ptr_eq(registry.writers.get(&(other.id, other_agent.id)).unwrap(), &other_writer));
     }
 }
