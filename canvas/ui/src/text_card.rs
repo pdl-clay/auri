@@ -61,6 +61,11 @@ pub struct TextCard {
     view_offset_y: f32,
 }
 
+/// Notes move like terminal cards: the canvas does not clamp their origin.
+fn move_origin(origin: Point<Pixels>, dx: f32, dy: f32) -> Point<Pixels> {
+    Point::new(px(f32::from(origin.x) + dx), px(f32::from(origin.y) + dy))
+}
+
 impl TextCard {
     pub fn new(
         id: u64,
@@ -132,13 +137,7 @@ impl TextCard {
         let origin = bounds.origin;
         let size = bounds.size;
         let next = match start.mode {
-            DragMode::Move => Bounds::new(
-                Point::new(
-                    px((f32::from(origin.x) + dx).max(SPACE_NORMAL)),
-                    px((f32::from(origin.y) + dy).max(SPACE_NORMAL)),
-                ),
-                size,
-            ),
+            DragMode::Move => Bounds::new(move_origin(origin, dx, dy), size),
             DragMode::ResizeBottomRight => Bounds::new(
                 origin,
                 Size::new(
@@ -278,5 +277,16 @@ impl Render for TextCard {
                         this.apply_drag(event, entity_id, cx);
                     })),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn move_origin_allows_the_top_left_corner() {
+        let moved = move_origin(Point::new(px(100.0), px(100.0)), -240.0, -180.0);
+        assert_eq!((f32::from(moved.x), f32::from(moved.y)), (-140.0, -80.0));
     }
 }
