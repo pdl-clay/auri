@@ -10,6 +10,26 @@ canvas-ui = { path = "ui" }
 [profile.release]
 strip = "symbols"
 
+# `auro dev` builds this profile. Keep the app itself comfortably debuggable
+# and fast to rebuild, but run every dependency (GPUI, cosmic-text, wgpu) at
+# full optimization: at opt-level 0 the terminal's scene painting costs more
+# than a display frame. Debug assertions in dependencies are also disabled so
+# their debug-only inspector and paint checks do not run in the dev app.
+[profile.dev]
+opt-level = 2
+
+[profile.dev.package."*"]
+opt-level = 3
+debug = false
+debug-assertions = false
+
+# The vendored terminal renderer is the app's hot path; keep it fully
+# optimized even when every other local crate builds at `opt-level = 2`.
+[profile.dev.package.gpui-terminal]
+opt-level = 3
+debug = false
+debug-assertions = false
+
 # Its own workspace: a parent manifest must never capture the generated app.
 [workspace]
 members = [".", "ui", "types"]
