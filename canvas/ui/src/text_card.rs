@@ -145,6 +145,14 @@ impl TextCard {
         self.input.read(cx).value().to_string()
     }
 
+    /// Replace the note's visible text after a host-side `auri note write`.
+    /// The input's observer mirrors the value back into the store unchanged.
+    pub fn set_text(&mut self, text: &str, window: &mut Window, cx: &mut App) {
+        if self.text(cx) != text {
+            self.input.update(cx, |input, cx| input.set_value(text.to_owned(), window, cx));
+        }
+    }
+
     /// Focus the note's input so placement drops the caret straight into it.
     pub fn focus(&self, window: &mut Window, cx: &mut App) {
         self.focus_input(window, cx);

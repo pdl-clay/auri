@@ -190,7 +190,7 @@ pub fn run() {
                             .upgrade()
                             .and_then(|entity| {
                                 entity
-                                    .update(cx, |canvas, _| canvas.handle_request(&line.token, line.request))
+                                    .update(cx, |canvas, cx| canvas.handle_request(&line.token, line.request, cx))
                                     .ok()
                             })
                             .unwrap_or_else(|| Response::Err("host_unavailable".into()));

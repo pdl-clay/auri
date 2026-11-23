@@ -848,6 +848,28 @@ impl TerminalView {
         (self.state.cols(), self.state.rows())
     }
 
+    /// Text of the visible screen, top to bottom, with trailing blanks removed.
+    /// Scrollback is deliberately excluded: this is what the user can see.
+    pub fn visible_lines(&self) -> Vec<String> {
+        self.state.with_term(|term| {
+            let mut rows = Vec::new();
+            let mut current_line = None;
+            let mut row = String::new();
+            for cell in term.grid().display_iter() {
+                let line = cell.point.line.0;
+                if current_line.is_some_and(|previous| previous != line) {
+                    rows.push(std::mem::take(&mut row));
+                }
+                current_line = Some(line);
+                row.push(cell.cell.c);
+            }
+            if current_line.is_some() {
+                rows.push(row);
+            }
+            rows.into_iter().map(|row| row.trim_end().to_owned()).collect()
+        })
+    }
+
     /// Resize the terminal to new dimensions.
     ///
     /// This method should be called when the terminal view size changes.

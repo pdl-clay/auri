@@ -1,5 +1,7 @@
 //! A draggable, resizable frame around one PTY-backed terminal.
+use std::io::{self, Write};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use auro::gpui::{
     App, Bounds, Context, CursorStyle, Div, DragMoveEvent, Edges, Entity, EntityId, MouseButton,
@@ -15,6 +17,33 @@ use crate::canvas::{Canvas, card_bounds};
 use crate::pty::{BatchedReader, PtySession};
 use crate::theme::*;
 
+/// One PTY input stream shared by the terminal view and the host's `ask`
+/// dispatch. The id is workspace-local, so callers key it with both ids.
+pub type SharedPtyWriter = Arc<Mutex<Box<dyn Write + Send>>>;
+
+fn lock_writer(writer: &SharedPtyWriter) -> MutexGuard<'_, Box<dyn Write + Send>> {
+    writer.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Queue exact bytes for a PTY through a host-held handle.
+pub(crate) fn write_shared(writer: &SharedPtyWriter, bytes: &[u8]) -> io::Result<()> {
+    let mut writer = lock_writer(writer);
+    writer.write_all(bytes)?;
+    writer.flush()
+}
+
+/// Adapt the shared stream into another `Write` handle for the terminal view.
+struct SharedWriter(SharedPtyWriter);
+
+impl Write for SharedWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        lock_writer(&self.0).write(bytes)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        lock_writer(&self.0).flush()
+    }
+}
 
 /// At most one terminal repaint per display frame while dragging.
 const DRAG_NOTIFY_INTERVAL: Duration = Duration::from_millis(16);
@@ -103,6 +132,7 @@ pub struct TerminalCard {
     number: usize,
     pub selected: bool,
     pub terminal: Entity<TerminalView>,
+    writer: SharedPtyWriter,
     canvas: WeakEntity<Canvas>,
     root: PathBuf,
     /// Owns the child process group; dropping it terminates the session.
@@ -128,7 +158,10 @@ impl TerminalCard {
         let (cols, rows) = grid;
         let resize_master = pty.master.clone();
         // PtySession implements Drop, so its streams cannot be moved out directly.
-        let writer = std::mem::replace(&mut pty.writer, Box::new(std::io::sink()));
+        let writer: SharedPtyWriter = Arc::new(Mutex::new(std::mem::replace(
+            &mut pty.writer,
+            Box::new(std::io::sink()),
+        )));
         let reader = BatchedReader::new(std::mem::replace(
             &mut pty.reader,
             Box::new(std::io::empty()),
@@ -136,6 +169,7 @@ impl TerminalCard {
         let this = cx.weak_entity();
         let exit_canvas = canvas.clone();
         let exit_workspace = workspace_id;
+        let view_writer = writer.clone();
 
         let terminal = cx.new(move |cx| {
             let config = TerminalConfig {
@@ -147,7 +181,7 @@ impl TerminalCard {
                 padding: Edges::all(px(10.0)),
                 ..Default::default()
             };
-            TerminalView::new(writer, reader, config, cx)
+            TerminalView::new(SharedWriter(view_writer), reader, config, cx)
                 .with_resize_callback(move |cols, rows| {
                     let size = PtySize {
                         rows: rows as u16,
@@ -176,6 +210,7 @@ impl TerminalCard {
             number: 1,
             selected: false,
             terminal,
+            writer,
             canvas,
             _pty: pty,
             last_drag_notify: None,
@@ -185,6 +220,20 @@ impl TerminalCard {
             view_offset_x: 0.0,
             view_offset_y: 0.0,
         }
+    }
+
+    /// Shared handle to this card's PTY input, keyed by workspace and id.
+    pub fn writer(&self) -> SharedPtyWriter {
+        self.writer.clone()
+    }
+
+    pub fn write_input(&self, bytes: &[u8]) -> io::Result<()> {
+        write_shared(&self.writer, bytes)
+    }
+
+    /// Visible screen rows, top to bottom, for `auri check`.
+    pub fn visible_lines(&self, cx: &App) -> Vec<String> {
+        self.terminal.read(cx).visible_lines()
     }
 
     pub fn set_exited(&mut self, cx: &mut Context<Self>) {

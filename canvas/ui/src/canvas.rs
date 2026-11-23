@@ -20,7 +20,7 @@ use gpui_component::{
 use gpui_component::input::{Input, InputEvent, InputState};
 use canvas_types::{AgentIcon, AgentKind, AgentState, CardBounds, ConnectionTarget, NoteState, TerminalId, TerminalState, WorkspaceColor, WorkspaceIcon, WorkspaceId, WorkspaceState, WorkspaceStore};
 
-use crate::card::{TerminalCard, scroll_delta, terminal_grid};
+use crate::card::{TerminalCard, scroll_delta, terminal_grid, write_shared, SharedPtyWriter};
 use crate::text_card::TextCard;
 use crate::workspaces::{DrawerAction, WorkspaceDrawer};
 use crate::theme::*;
@@ -116,28 +116,6 @@ impl AgentRegistry {
         self.writers.clear();
     }
 
-    /// Best-effort workspace for a card id: the home of a live token, preferring
-    /// the active workspace when an id is reused, then the live card in the store.
-    fn home_for(&self, store: &WorkspaceStore, id: TerminalId) -> Option<WorkspaceId> {
-        let active = store.active();
-        let homes = || {
-            self.tokens
-                .iter()
-                .filter(|(_, card)| **card == id)
-                .filter_map(|(token, _)| self.homes.get(token).copied())
-        };
-        homes()
-            .find(|home| Some(*home) == active)
-            .or_else(|| homes().next())
-            .or_else(|| {
-                store
-                    .workspaces()
-                    .iter()
-                    .find(|workspace| workspace.canvas.agent(id).is_some())
-                    .map(|workspace| workspace.id)
-            })
-    }
-
     /// Resolve a token to the workspace and card it was issued for. The card
     /// must still exist in that workspace's state.
     fn resolve(&self, store: &WorkspaceStore, token: &str) -> Option<(WorkspaceId, TerminalId)> {
@@ -154,23 +132,7 @@ impl AgentRegistry {
 /// the exact display name printed by `list`. Unresolvable names become an
 /// unreachable id so authorization refuses them like any other missing edge.
 fn card_target(workspace: &WorkspaceState, target: &str) -> ConnectionTarget {
-    let id = target.parse::<TerminalId>().ok().or_else(|| {
-        workspace
-            .canvas
-            .agents()
-            .iter()
-            .find(|agent| agent.name == target)
-            .map(|agent| agent.id)
-            .or_else(|| {
-                workspace
-                    .canvas
-                    .terminals()
-                    .iter()
-                    .find(|terminal| terminal.title == target)
-                    .map(|terminal| terminal.id)
-            })
-    });
-    ConnectionTarget::Card(id.unwrap_or(u64::MAX))
+    Canvas::resolve_target(workspace, target).unwrap_or(ConnectionTarget::Card(u64::MAX))
 }
 
 /// Note ids are already canonical; there is no display name to resolve.
@@ -199,8 +161,7 @@ fn action_for_request(workspace: &WorkspaceState, request: &Request) -> Action {
 
 /// The host's permission gate. An unknown or revoked token is deliberately
 /// indistinguishable from a refused request; the plain-terminal case resolves
-/// to no agent identity and is reported as such. Command dispatch is layered
-/// on top of this gate by the next task.
+/// to no agent identity. Every dispatched request passes through here first.
 fn authorize_request(
     registry: &AgentRegistry,
     store: &WorkspaceStore,
@@ -219,6 +180,370 @@ fn authorize_request(
         Ok(()) => Response::Ok(String::new()),
         Err(Denied::NoIdentity) => Response::Err("no_identity".into()),
         Err(Denied::NotAdmin | Denied::NotConnected) => Response::Err("permission_denied".into()),
+    }
+}
+
+/// Which kind of card an admin asked the host to create. The persisted state
+/// is authoritative; the GPUI entity is attached afterwards.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CardKind {
+    Terminal,
+    Agent(AgentKind),
+}
+
+/// Host-side effects that need a GPUI window or entity handle.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Effect {
+    SpawnCard { workspace: WorkspaceId, id: TerminalId, kind: CardKind, command: Option<String> },
+    RemoveCard { workspace: WorkspaceId, id: TerminalId },
+    SpawnNote { workspace: WorkspaceId, id: u64, text: String },
+    NoteText { workspace: WorkspaceId, id: u64, text: String },
+    RemoveNote { workspace: WorkspaceId, id: u64 },
+}
+
+#[derive(Debug)]
+struct DispatchOutcome {
+    response: Response,
+    effects: Vec<Effect>,
+    changed: bool,
+}
+
+fn outcome(response: Response, effects: Vec<Effect>, changed: bool) -> DispatchOutcome {
+    DispatchOutcome { response, effects, changed }
+}
+
+fn replied(text: impl Into<String>) -> DispatchOutcome {
+    outcome(Response::Ok(text.into()), Vec::new(), false)
+}
+
+fn refused(reason: &str) -> DispatchOutcome {
+    outcome(Response::Err(reason.into()), Vec::new(), false)
+}
+
+/// Visible screen text, trimmed at the bottom and optionally limited to the
+/// last `count` rows. Scrollback is never included.
+fn screen_output(lines: &[String], count: Option<u32>) -> String {
+    let mut rows: Vec<&str> = lines.iter().map(String::as_str).collect();
+    while rows.last().is_some_and(|row| row.trim().is_empty()) {
+        rows.pop();
+    }
+    if let Some(count) = count {
+        let keep = count as usize;
+        if keep < rows.len() {
+            rows = rows[rows.len() - keep..].to_vec();
+        }
+    }
+    rows.join("\n")
+}
+
+fn workspace_root(store: &WorkspaceStore, id: WorkspaceId) -> Result<PathBuf, String> {
+    let workspace = store
+        .workspaces()
+        .iter()
+        .find(|item| item.id == id)
+        .ok_or_else(|| "no_workspace".to_owned())?;
+    if workspace.root.as_os_str().is_empty() || workspace.invalid_root || !workspace.root.is_dir() {
+        return Err("invalid_root".into());
+    }
+    Ok(workspace.root.clone())
+}
+
+fn next_card_bounds(workspace: &WorkspaceState) -> CardBounds {
+    let index = workspace.canvas.terminals().len() + workspace.canvas.agents().len();
+    CardBounds {
+        x: SPACE_PANEL + index as f32 * (CARD_WIDTH + CARD_GAP),
+        y: SPACE_PANEL,
+        width: CARD_WIDTH,
+        height: CARD_HEIGHT,
+    }
+}
+
+fn next_note_bounds(workspace: &WorkspaceState) -> CardBounds {
+    let index = workspace.canvas.notes().len() as f32;
+    CardBounds {
+        x: SPACE_PANEL + index * (TEXT_CARD_WIDTH + CARD_GAP),
+        y: SPACE_PANEL + TEXT_CARD_HEIGHT + CARD_GAP,
+        width: TEXT_CARD_WIDTH,
+        height: TEXT_CARD_HEIGHT,
+    }
+}
+
+/// Authenticate and run one request against persisted state. Screen reads are
+/// answered by `Canvas::handle_request`, which owns the GPUI terminal views.
+#[cfg(test)]
+fn dispatch_authorized(
+    store: &mut WorkspaceStore,
+    registry: &mut AgentRegistry,
+    token: &str,
+    request: Request,
+) -> DispatchOutcome {
+    if let Response::Err(reason) = authorize_request(registry, store, token, &request) {
+        return refused(&reason);
+    }
+    let Some((workspace_id, caller)) = registry.resolve(store, token) else {
+        return refused("permission_denied");
+    };
+    dispatch(store, registry, workspace_id, caller, request)
+}
+
+fn dispatch(
+    store: &mut WorkspaceStore,
+    registry: &mut AgentRegistry,
+    workspace_id: WorkspaceId,
+    caller: TerminalId,
+    request: Request,
+) -> DispatchOutcome {
+    let Some(workspace) = store.workspaces().iter().find(|item| item.id == workspace_id) else {
+        return refused("no_workspace");
+    };
+    let visible = |target| {
+        workspace
+            .canvas
+            .agent(caller)
+            .is_some_and(|agent| agent.admin)
+            || workspace.canvas.connected(caller, target)
+    };
+
+    match request {
+        Request::List => {
+            let mut lines = Vec::new();
+            if let Some(agent) = workspace.canvas.agent(caller) {
+                lines.push(format!(
+                    "agent {} {} {}",
+                    agent.id,
+                    agent.name,
+                    if agent.admin { "admin" } else { "normal" }
+                ));
+            }
+            for agent in workspace.canvas.agents() {
+                if agent.id != caller && visible(ConnectionTarget::Card(agent.id)) {
+                    lines.push(format!(
+                        "agent {} {} {}",
+                        agent.id,
+                        agent.name,
+                        if agent.admin { "admin" } else { "normal" }
+                    ));
+                }
+            }
+            for terminal in workspace.canvas.terminals() {
+                if visible(ConnectionTarget::Card(terminal.id)) {
+                    lines.push(format!("terminal {} {}", terminal.id, terminal.title));
+                }
+            }
+            for note in workspace.canvas.notes() {
+                if visible(ConnectionTarget::Note(note.id)) {
+                    lines.push(format!("note {}", note.id));
+                }
+            }
+            replied(lines.join("\n"))
+        }
+        Request::Ask { target, raw } => {
+            let Some(ConnectionTarget::Card(target_id)) = Canvas::resolve_target(workspace, &target)
+            else {
+                return refused("unknown_target");
+            };
+            let name = workspace
+                .canvas
+                .agent(caller)
+                .map(|agent| agent.name.clone())
+                .or_else(|| {
+                    workspace
+                        .canvas
+                        .terminals()
+                        .iter()
+                        .find(|terminal| terminal.id == caller)
+                        .map(|terminal| terminal.title.clone())
+                })
+                .unwrap_or_else(|| caller.to_string());
+            let Some(writer) = registry.writers.get(&(workspace_id, target_id)).cloned() else {
+                return refused("target_unavailable");
+            };
+            let mut bytes = format!("auri from {name} <{caller}>\n").into_bytes();
+            bytes.extend_from_slice(&raw);
+            // The submit key is a separate write, so a TUI sees a real Enter.
+            bytes.push(b'\r');
+            match write_shared(&writer, &bytes) {
+                Ok(()) => replied(""),
+                Err(error) => refused(&format!("write_failed: {error}")),
+            }
+        }
+        Request::Check { .. } => refused("check_requires_host_screen"),
+        Request::NoteRead { note, start, count } => {
+            let id = note_target(&note);
+            let Some(saved) = workspace.canvas.notes().iter().find(|item| item.id == id) else {
+                return refused("note_not_found");
+            };
+            let mut rows: Vec<&str> = saved.text.lines().collect();
+            if let Some(start) = start {
+                rows = rows.into_iter().skip(start as usize).collect();
+            }
+            if let Some(count) = count {
+                rows.truncate(count as usize);
+            }
+            replied(rows.join("\n"))
+        }
+        Request::NoteWrite { note, text } => {
+            let id = note_target(&note);
+            let Some(ws) = store.workspace_mut(workspace_id) else {
+                return refused("no_workspace");
+            };
+            if !ws.canvas.notes().iter().any(|item| item.id == id) {
+                return refused("note_not_found");
+            }
+            ws.canvas.set_note_text(id, text.clone());
+            outcome(
+                Response::Ok(String::new()),
+                vec![Effect::NoteText { workspace: workspace_id, id, text }],
+                true,
+            )
+        }
+        Request::NoteEdit { note, old, new } => {
+            let id = note_target(&note);
+            if old.is_empty() {
+                return refused("invalid_edit");
+            }
+            let Some(saved) = store
+                .workspace_mut(workspace_id)
+                .and_then(|ws| ws.canvas.notes().iter().find(|item| item.id == id))
+                .map(|item| item.text.clone())
+            else {
+                return refused("note_not_found");
+            };
+            let Some(index) = saved.find(&old) else {
+                return refused("text_not_found");
+            };
+            let mut text = saved;
+            text.replace_range(index..index + old.len(), &new);
+            store
+                .workspace_mut(workspace_id)
+                .expect("workspace just checked")
+                .canvas
+                .set_note_text(id, text.clone());
+            outcome(
+                Response::Ok(String::new()),
+                vec![Effect::NoteText { workspace: workspace_id, id, text }],
+                true,
+            )
+        }
+        Request::NoteCreate { text, name: _ } => {
+            if let Err(error) = workspace_root(store, workspace_id) {
+                return refused(&error);
+            }
+            let text = text.unwrap_or_default();
+            let id = {
+                let ws = store.workspace_mut(workspace_id).expect("workspace just checked");
+                let note = ws.canvas.add_note(text.clone(), next_note_bounds(ws));
+                ws.canvas.connect(caller, ConnectionTarget::Note(note.id));
+                note.id
+            };
+            outcome(
+                Response::Ok(format!("note {id}")),
+                vec![Effect::SpawnNote { workspace: workspace_id, id, text }],
+                true,
+            )
+        }
+        Request::NoteDelete { note } => {
+            let id = note_target(&note);
+            let Some(ws) = store.workspace_mut(workspace_id) else {
+                return refused("no_workspace");
+            };
+            if ws.canvas.remove_note(id).is_none() {
+                return refused("note_not_found");
+            }
+            outcome(
+                Response::Ok(String::new()),
+                vec![Effect::RemoveNote { workspace: workspace_id, id }],
+                true,
+            )
+        }
+        Request::TerminalNew { name: _, command } => {
+            if let Err(error) = workspace_root(store, workspace_id) {
+                return refused(&error);
+            }
+            let id = {
+                let ws = store.workspace_mut(workspace_id).expect("workspace just checked");
+                let bounds = next_card_bounds(ws);
+                let terminal = ws.canvas.add();
+                ws.canvas.set_terminal_bounds(terminal.id, bounds);
+                ws.canvas.connect(caller, ConnectionTarget::Card(terminal.id));
+                terminal.id
+            };
+            outcome(
+                Response::Ok(format!("terminal {id}")),
+                vec![Effect::SpawnCard {
+                    workspace: workspace_id,
+                    id,
+                    kind: CardKind::Terminal,
+                    command,
+                }],
+                true,
+            )
+        }
+        Request::AgentNew { name, command } => {
+            let command = command.unwrap_or_default();
+            if command.trim().is_empty() || name.trim().is_empty() {
+                return refused("invalid_agent");
+            }
+            if let Err(error) = workspace_root(store, workspace_id) {
+                return refused(&error);
+            }
+            let custom = store.add_custom_agent(name.clone(), command.clone(), AgentIcon::Claude);
+            let id = {
+                let ws = store.workspace_mut(workspace_id).expect("workspace just checked");
+                let bounds = next_card_bounds(ws);
+                let agent = ws.canvas.add_agent_named(name, custom.kind(), bounds);
+                ws.canvas.connect(caller, ConnectionTarget::Card(agent.id));
+                agent.id
+            };
+            outcome(
+                Response::Ok(format!("agent {id}")),
+                vec![Effect::SpawnCard {
+                    workspace: workspace_id,
+                    id,
+                    kind: CardKind::Agent(custom.kind()),
+                    command: Some(command),
+                }],
+                true,
+            )
+        }
+        Request::TerminalRemove { target } | Request::AgentRemove { target } => {
+            let Some(ConnectionTarget::Card(id)) = Canvas::resolve_target(workspace, &target) else {
+                return refused("unknown_target");
+            };
+            let is_agent = workspace.canvas.agent(id).is_some();
+            let removed = {
+                let ws = store.workspace_mut(workspace_id).expect("workspace just checked");
+                if is_agent {
+                    ws.canvas.remove_agent(id).is_some()
+                } else {
+                    ws.canvas.remove(id).is_some()
+                }
+            };
+            if !removed {
+                return refused("card_not_found");
+            }
+            registry.revoke_agent(workspace_id, id);
+            outcome(
+                Response::Ok(String::new()),
+                vec![Effect::RemoveCard { workspace: workspace_id, id }],
+                true,
+            )
+        }
+        Request::AgentRole { target, admin } => {
+            let Some(ConnectionTarget::Card(id)) = Canvas::resolve_target(workspace, &target) else {
+                return refused("unknown_target");
+            };
+            let Some(ws) = store.workspace_mut(workspace_id) else {
+                return refused("no_workspace");
+            };
+            if ws.canvas.agent(id).is_none() {
+                return refused("agent_not_found");
+            }
+            ws.canvas.set_agent_admin(id, admin);
+            outcome(Response::Ok(String::new()), Vec::new(), true)
+        }
+        // The CLI answers `skill` locally from AURI_SKILL; no host work to do.
+        Request::Skill => replied(""),
     }
 }
 
@@ -664,17 +989,246 @@ impl Canvas {
         }
     }
 
-    /// Keep the shared PTY input handle for one agent card. This handle and the
-    /// terminal view drive the same pty, so a host `ask` reaches the shell.
-    pub fn register_agent_pty(&mut self, id: TerminalId, writer: Arc<Mutex<Box<dyn Write + Send>>>) {
-        if let Some(home) = self.registry.home_for(&self.store, id) {
-            self.registry.register(home, id, writer);
+    /// Resolve an address from `auri list`: canonical workspace-local id first,
+    /// then the exact display name. Unresolvable names are not cards.
+    pub fn resolve_target(workspace: &WorkspaceState, name_or_id: &str) -> Option<ConnectionTarget> {
+        let id = name_or_id.parse::<TerminalId>().ok().or_else(|| {
+            workspace
+                .canvas
+                .agents()
+                .iter()
+                .find(|agent| agent.name == name_or_id)
+                .map(|agent| agent.id)
+                .or_else(|| {
+                    workspace
+                        .canvas
+                        .terminals()
+                        .iter()
+                        .find(|terminal| terminal.title == name_or_id)
+                        .map(|terminal| terminal.id)
+                })
+        });
+        id.map(ConnectionTarget::Card)
+    }
+
+    /// Keep the shared PTY input handle for one card. Ids are workspace-local,
+    /// so the caller supplies the owning workspace explicitly.
+    pub fn register_agent_pty(&mut self, workspace: WorkspaceId, id: TerminalId, writer: SharedPtyWriter) {
+        self.registry.register(workspace, id, writer);
+    }
+
+    /// Authenticate and run one host request on the main GPUI thread.
+    pub fn handle_request(&mut self, token: &str, request: Request, cx: &mut Context<Self>) -> Response {
+        if let Response::Err(reason) = authorize_request(&self.registry, &self.store, token, &request) {
+            return Response::Err(reason);
+        }
+        let Some((workspace_id, caller)) = self.registry.resolve(&self.store, token) else {
+            return Response::Err("permission_denied".into());
+        };
+        if let Request::Check { target, lines } = &request {
+            return self.answer_check(workspace_id, target, *lines, cx);
+        }
+        let mut result = dispatch(&mut self.store, &mut self.registry, workspace_id, caller, request);
+        for effect in std::mem::take(&mut result.effects) {
+            if let Err(error) = self.apply_effect(effect, cx) {
+                result.response = Response::Err(error);
+            }
+        }
+        if result.changed {
+            self.finish_store_change(cx);
+        }
+        result.response
+    }
+
+    /// `check` reads the terminal view the user can actually see. Permission
+    /// has already been checked for this target by `authorize_request`.
+    fn answer_check(&self, workspace: WorkspaceId, target: &str, limit: Option<u32>, cx: &App) -> Response {
+        let Some(state) = self.store.workspaces().iter().find(|item| item.id == workspace) else {
+            return Response::Err("no_workspace".into());
+        };
+        let Some(ConnectionTarget::Card(id)) = Canvas::resolve_target(state, target) else {
+            return Response::Err("unknown_target".into());
+        };
+        let screen = self
+            .cards
+            .get(&workspace)
+            .and_then(|cards| cards.iter().find(|(card_id, _)| *card_id == id))
+            .map(|(_, card)| card.read(cx).visible_lines(cx));
+        match screen {
+            Some(lines) => Response::Ok(screen_output(&lines, limit)),
+            None => Response::Err("target_unavailable".into()),
         }
     }
 
-    /// Authenticate one host request before any command is dispatched.
-    pub fn handle_request(&self, token: &str, request: Request) -> Response {
-        authorize_request(&self.registry, &self.store, token, &request)
+    /// Apply a state mutation that also needs a live GPUI entity.
+    fn apply_effect(&mut self, effect: Effect, cx: &mut Context<Self>) -> Result<(), String> {
+        match effect {
+            Effect::SpawnCard { workspace, id, kind, command } => {
+                self.spawn_cli_card(workspace, id, kind, command, cx)
+            }
+            Effect::RemoveCard { workspace, id } => {
+                if let Some(cards) = self.cards.get_mut(&workspace) {
+                    cards.retain(|(card_id, _)| *card_id != id);
+                }
+                self.sync_card_selection(workspace, cx);
+                Ok(())
+            }
+            Effect::SpawnNote { workspace, id, text } => self.spawn_cli_note(workspace, id, text, cx),
+            Effect::NoteText { workspace, id, text } => {
+                let Some(note) = self
+                    .notes
+                    .get(&workspace)
+                    .and_then(|notes| notes.iter().find(|(note_id, _)| *note_id == id))
+                    .map(|(_, note)| note.clone())
+                else {
+                    return Ok(());
+                };
+                cx.update_window(self.window, move |_, window, app| {
+                    note.update(app, |note, app| note.set_text(&text, window, app));
+                })
+                .map_err(|_| "window_unavailable".to_owned())
+            }
+            Effect::RemoveNote { workspace, id } => {
+                if let Some(notes) = self.notes.get_mut(&workspace) {
+                    notes.retain(|(note_id, _)| *note_id != id);
+                }
+                self.selected_note.clear_note(workspace, id);
+                self.repaint_note_selection(cx);
+                Ok(())
+            }
+        }
+    }
+
+    /// Attach a PTY and card entity to state already created by dispatch.
+    fn spawn_cli_card(
+        &mut self,
+        workspace: WorkspaceId,
+        id: TerminalId,
+        kind: CardKind,
+        command: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let root = workspace_root(&self.store, workspace)?;
+        let (bounds, name, agent_kind, icon) = {
+            let state = self.store.workspaces().iter().find(|item| item.id == workspace).expect("root checked");
+            match kind {
+                CardKind::Terminal => {
+                    let terminal = state
+                        .canvas
+                        .terminals()
+                        .iter()
+                        .find(|terminal| terminal.id == id)
+                        .ok_or_else(|| "card_not_found".to_owned())?;
+                    let saved = terminal.bounds.unwrap_or_else(|| next_card_bounds(state));
+                    (pixel_bounds(saved), terminal.title.clone(), None, None)
+                }
+                CardKind::Agent(agent_kind) => {
+                    let agent = state
+                        .canvas
+                        .agent(id)
+                        .ok_or_else(|| "card_not_found".to_owned())?;
+                    let (_, stored_command, icon) = resolve_agent_details(&self.store, agent_kind);
+                    (
+                        pixel_bounds(agent.bounds),
+                        agent.name.clone(),
+                        Some(agent_kind),
+                        Some((stored_command, icon)),
+                    )
+                }
+            }
+        };
+        let (cols, rows) = terminal_grid(&bounds);
+        let env = if agent_kind.is_some() {
+            let token = self.registry.issue(workspace, id);
+            vec![
+                ("AURI_SOCKET".to_owned(), crate::socket_path().to_string_lossy().into_owned()),
+                ("AURI_TOKEN".to_owned(), token),
+            ]
+        } else {
+            Vec::new()
+        };
+        let mut pty = match PtySession::spawn_shell_in_with_env(cols, rows, Some(&root), &env) {
+            Ok(pty) => pty,
+            Err(error) => {
+                return self.rollback_cli_card(workspace, id, agent_kind.is_some(), format!("spawn_failed: {error}"), cx);
+            }
+        };
+        let command = command.or_else(|| icon.as_ref().map(|(stored, _)| stored.clone())).unwrap_or_default();
+        if !command.is_empty() {
+            if let Err(error) = pty.send_line(&command) {
+                return self.rollback_cli_card(workspace, id, agent_kind.is_some(), format!("spawn_failed: {error}"), cx);
+            }
+        }
+        if let Some(state) = self.store.workspace_mut(workspace) {
+            state.mark_loaded();
+        }
+        self.error = None;
+        let canvas = cx.entity().downgrade();
+        let card = cx.new(|cx| {
+            TerminalCard::new(id, workspace, bounds, canvas, root, pty, (cols, rows), cx)
+        });
+        if let Some(kind) = agent_kind {
+            let (_, icon) = icon.expect("agent icon");
+            card.update(cx, |card, cx| card.set_agent(kind, name, icon, cx));
+        }
+        let (zoom, offset_x, offset_y) = (self.zoom, self.offset_x, self.offset_y);
+        card.update(cx, |card, cx| card.set_view(zoom, offset_x, offset_y, cx));
+        self.register_agent_pty(workspace, id, card.read(cx).writer());
+        self.cards.entry(workspace).or_default().push((id, card));
+        self.sync_card_selection(workspace, cx);
+        Ok(())
+    }
+
+    /// Roll back a persisted card whose PTY could not be started.
+    fn rollback_cli_card(
+        &mut self,
+        workspace: WorkspaceId,
+        id: TerminalId,
+        agent: bool,
+        error: String,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        self.registry.revoke_agent(workspace, id);
+        if let Some(state) = self.store.workspace_mut(workspace) {
+            if agent {
+                state.canvas.remove_agent(id);
+            } else {
+                state.canvas.remove(id);
+            }
+        }
+        self.error = Some(error.clone());
+        cx.notify();
+        Err(error)
+    }
+
+    /// Create the live note entity for a persisted note from `note create`.
+    fn spawn_cli_note(
+        &mut self,
+        workspace: WorkspaceId,
+        id: u64,
+        text: String,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let (bounds, zoom, offset_x, offset_y) = {
+            let state = self.store.workspaces().iter().find(|item| item.id == workspace).ok_or_else(|| "no_workspace".to_owned())?;
+            let saved = state
+                .canvas
+                .notes()
+                .iter()
+                .find(|note| note.id == id)
+                .map(|note| note.bounds)
+                .unwrap_or_else(|| next_note_bounds(state));
+            (pixel_bounds(saved), self.zoom, self.offset_x, self.offset_y)
+        };
+        let canvas = cx.entity().downgrade();
+        let note = cx
+            .update_window(self.window, move |_, window, app| {
+                app.new(|cx| TextCard::new(id, workspace, bounds, text, canvas, window, cx))
+            })
+            .map_err(|_| "window_unavailable".to_owned())?;
+        note.update(cx, |note, cx| note.set_view(zoom, offset_x, offset_y, cx));
+        self.notes.entry(workspace).or_default().push((id, note));
+        Ok(())
     }
 
     /// Own the host socket for the canvas' lifetime; dropping it stops the
@@ -1208,6 +1762,7 @@ impl Canvas {
         card.read(cx).terminal.read(cx).focus_handle().focus(window);
         let (zoom, offset_x, offset_y) = (self.zoom, self.offset_x, self.offset_y);
         card.update(cx, |card, cx| card.set_view(zoom, offset_x, offset_y, cx));
+        self.register_agent_pty(workspace_id, id, card.read(cx).writer());
         self.cards.entry(workspace_id).or_default().push((id, card));
         self.sync_card_selection(workspace_id, cx);
         self.finish_store_change(cx);
@@ -1292,6 +1847,7 @@ impl Canvas {
         card.read(cx).terminal.read(cx).focus_handle().focus(window);
         let (zoom, offset_x, offset_y) = (self.zoom, self.offset_x, self.offset_y);
         card.update(cx, |card, cx| card.set_view(zoom, offset_x, offset_y, cx));
+        self.register_agent_pty(workspace_id, id, card.read(cx).writer());
         self.cards.entry(workspace_id).or_default().push((id, card));
         self.sync_card_selection(workspace_id, cx);
         self.finish_store_change(cx);
@@ -1972,6 +2528,7 @@ impl Canvas {
                 )
             });
             card.update(cx, |card, cx| card.set_view(zoom, offset_x, offset_y, cx));
+            self.register_agent_pty(id, terminal.id, card.read(cx).writer());
             self.cards.entry(id).or_default().push((terminal.id, card));
         }
 
@@ -1979,18 +2536,27 @@ impl Canvas {
             let bounds = pixel_bounds(agent.bounds);
             let (_, command, icon) = self.agent_details(agent.kind);
             let (cols, rows) = terminal_grid(&bounds);
+            // Reloaded agents need a fresh token and a writer, like new ones.
+            let token = self.registry.issue(id, agent.id);
+            let env = vec![
+                ("AURI_SOCKET".to_owned(), crate::socket_path().to_string_lossy().into_owned()),
+                ("AURI_TOKEN".to_owned(), token),
+            ];
             let mut pty = if root_ok {
-                match PtySession::spawn_shell_in(cols, rows, Some(&root)) {
+                match PtySession::spawn_shell_in_with_env(cols, rows, Some(&root), &env) {
                     Ok(pty) => pty,
                     Err(error) => {
+                        self.registry.revoke_agent(id, agent.id);
                         self.error = Some(format!("Agente {} não iniciou: {error}", agent.name));
                         continue;
                     }
                 }
             } else {
+                self.registry.revoke_agent(id, agent.id);
                 continue;
             };
             if let Err(error) = pty.send_line(&command) {
+                self.registry.revoke_agent(id, agent.id);
                 self.error = Some(format!("Agente {} não iniciou: {error}", agent.name));
                 continue;
             }
@@ -2010,6 +2576,7 @@ impl Canvas {
                 card.set_agent(agent.kind, agent.name.clone(), icon, cx);
                 card.set_view(zoom, offset_x, offset_y, cx);
             });
+            self.register_agent_pty(id, agent.id, card.read(cx).writer());
             self.cards.entry(id).or_default().push((agent.id, card));
         }
 
@@ -3614,5 +4181,264 @@ mod registry_tests {
         registry.revoke_agent(first, agent_id);
         assert!(registry.writers.get(&(first, agent_id)).is_none());
         assert!(Arc::ptr_eq(registry.writers.get(&(other.id, other_agent.id)).unwrap(), &other_writer));
+    }
+}
+
+#[cfg(test)]
+mod dispatch_tests {
+    use super::*;
+    use std::io::{self, Write};
+
+    use auri_protocol::Request;
+
+    #[derive(Clone, Default)]
+    struct RecordingWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for RecordingWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().expect("test buffer").extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct Harness {
+        store: WorkspaceStore,
+        registry: AgentRegistry,
+        workspace: WorkspaceId,
+        caller: TerminalId,
+        target: TerminalId,
+        written: Arc<Mutex<Vec<u8>>>,
+        token: String,
+    }
+
+    fn bounds() -> CardBounds {
+        CardBounds { x: 0.0, y: 0.0, width: 100.0, height: 100.0 }
+    }
+
+    fn harness(admin: bool, connected: bool) -> Harness {
+        let mut store = WorkspaceStore::new();
+        let workspace = store.add("Demo".into(), WorkspaceIcon::Folder, std::env::temp_dir());
+        let caller = store
+            .workspace_mut(workspace.id)
+            .unwrap()
+            .canvas
+            .add_agent(AgentKind::Claude, bounds())
+            .id;
+        let target = store
+            .workspace_mut(workspace.id)
+            .unwrap()
+            .canvas
+            .add_agent(AgentKind::Codex, bounds())
+            .id;
+        let canvas = &mut store.workspace_mut(workspace.id).unwrap().canvas;
+        canvas.set_agent_admin(caller, admin);
+        if connected {
+            canvas.connect(caller, ConnectionTarget::Card(target));
+        }
+        let mut registry = AgentRegistry::default();
+        let token = registry.issue(workspace.id, caller);
+        let written = Arc::new(Mutex::new(Vec::new()));
+        registry.register(
+            workspace.id,
+            target,
+            Arc::new(Mutex::new(Box::new(RecordingWriter(written.clone())))),
+        );
+        Harness { store, registry, workspace: workspace.id, caller, target, written, token }
+    }
+
+    fn run(harness: &mut Harness, request: Request) -> DispatchOutcome {
+        dispatch_authorized(&mut harness.store, &mut harness.registry, &harness.token, request)
+    }
+
+    fn note_text(harness: &Harness, note: u64) -> String {
+        harness
+            .store
+            .workspaces()
+            .iter()
+            .find(|workspace| workspace.id == harness.workspace)
+            .unwrap()
+            .canvas
+            .notes()
+            .iter()
+            .find(|item| item.id == note)
+            .unwrap()
+            .text
+            .clone()
+    }
+
+    #[test]
+    fn ask_writes_header_prompt_and_enter_to_the_target() {
+        let mut harness = harness(true, true);
+        let name = harness
+            .store
+            .workspaces()
+            .iter()
+            .find(|workspace| workspace.id == harness.workspace)
+            .unwrap()
+            .canvas
+            .agent(harness.caller)
+            .unwrap()
+            .name
+            .clone();
+
+        let target = harness.target.to_string();
+        let result = run(&mut harness, Request::Ask { target, raw: b"ping".to_vec() });
+
+        assert_eq!(result.response, Response::Ok(String::new()));
+        assert_eq!(
+            *harness.written.lock().unwrap(),
+            format!("auri from {name} <{}>\nping\r", harness.caller).into_bytes()
+        );
+    }
+
+    #[test]
+    fn unconnected_ask_is_denied_and_writes_nothing() {
+        let mut harness = harness(false, false);
+
+        let target = harness.target.to_string();
+        let result = run(&mut harness, Request::Ask { target, raw: b"ping".to_vec() });
+
+        assert_eq!(result.response, Response::Err("permission_denied".into()));
+        assert!(harness.written.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn note_write_changes_the_stored_text() {
+        let mut harness = harness(false, false);
+        let note = harness
+            .store
+            .workspace_mut(harness.workspace)
+            .unwrap()
+            .canvas
+            .add_note("before".into(), bounds())
+            .id;
+        harness
+            .store
+            .workspace_mut(harness.workspace)
+            .unwrap()
+            .canvas
+            .connect(harness.caller, ConnectionTarget::Note(note));
+
+        let result = run(&mut harness, Request::NoteWrite { note: note.to_string(), text: "after".into() });
+
+        assert_eq!(result.response, Response::Ok(String::new()));
+        assert_eq!(note_text(&harness, note), "after");
+        assert!(result.changed);
+    }
+
+    #[test]
+    fn admin_terminal_new_connects_the_creator() {
+        let mut harness = harness(true, false);
+
+        let result = run(
+            &mut harness,
+            Request::TerminalNew { name: Some("Aux".into()), command: None },
+        );
+
+        let Response::Ok(message) = &result.response else {
+            panic!("expected a created terminal, got {:?}", result.response);
+        };
+        let id = message.split_whitespace().last().unwrap().parse::<TerminalId>().unwrap();
+        let workspace = harness.store.workspaces().iter().find(|item| item.id == harness.workspace).unwrap();
+        assert!(workspace.canvas.terminals().iter().any(|terminal| terminal.id == id));
+        assert!(workspace.canvas.connected(harness.caller, ConnectionTarget::Card(id)));
+        assert!(matches!(
+            result.effects.as_slice(),
+            [Effect::SpawnCard { id: spawned, kind: CardKind::Terminal, .. }] if *spawned == id
+        ));
+    }
+
+    #[test]
+    fn admin_agent_new_is_normal_and_connected_to_the_creator() {
+        let mut harness = harness(true, false);
+
+        let result = run(
+            &mut harness,
+            Request::AgentNew { name: "Aux".into(), command: Some("pi".into()) },
+        );
+
+        let Response::Ok(message) = &result.response else {
+            panic!("expected a created agent, got {:?}", result.response);
+        };
+        let id = message.split_whitespace().last().unwrap().parse::<TerminalId>().unwrap();
+        let workspace = harness.store.workspaces().iter().find(|item| item.id == harness.workspace).unwrap();
+        let agent = workspace.canvas.agent(id).expect("agent persisted");
+        assert!(!agent.admin);
+        assert_eq!(agent.name, "Aux");
+        assert!(workspace.canvas.connected(harness.caller, ConnectionTarget::Card(id)));
+        assert!(result.effects.iter().any(|effect| matches!(
+            effect,
+            Effect::SpawnCard { id: spawned, kind: CardKind::Agent(_), .. } if *spawned == id
+        )));
+        assert!(harness.store.custom_agents().iter().any(|custom| custom.command == "pi"));
+    }
+
+    #[test]
+    fn admin_role_toggle_changes_the_stored_bit() {
+        let mut harness = harness(true, false);
+
+        let target = harness.target.to_string();
+        let result = run(&mut harness, Request::AgentRole { target, admin: true });
+
+        assert_eq!(result.response, Response::Ok(String::new()));
+        let workspace = harness.store.workspaces().iter().find(|item| item.id == harness.workspace).unwrap();
+        assert!(workspace.canvas.agent(harness.target).unwrap().admin);
+        assert!(result.changed);
+    }
+
+    #[test]
+    fn list_shows_only_connected_endpoints_for_a_normal_agent() {
+        let mut harness = harness(false, false);
+        let note = harness
+            .store
+            .workspace_mut(harness.workspace)
+            .unwrap()
+            .canvas
+            .add_note("shared".into(), bounds())
+            .id;
+        harness
+            .store
+            .workspace_mut(harness.workspace)
+            .unwrap()
+            .canvas
+            .connect(harness.caller, ConnectionTarget::Note(note));
+
+        let result = run(&mut harness, Request::List);
+
+        let Response::Ok(list) = result.response else {
+            panic!("expected a list, got {:?}", result.response);
+        };
+        assert!(list.contains(&format!("agent {} ", harness.caller)), "{list}");
+        assert!(list.contains(&format!("note {note}")), "{list}");
+        assert!(!list.contains(&format!("agent {} ", harness.target)), "{list}");
+    }
+
+    #[test]
+    fn resolve_target_prefers_id_then_display_name() {
+        let harness = harness(false, false);
+        let workspace = harness.store.workspaces().iter().find(|item| item.id == harness.workspace).unwrap();
+        let name = workspace.canvas.agent(harness.target).unwrap().name.clone();
+
+        assert_eq!(
+            Canvas::resolve_target(workspace, &harness.target.to_string()),
+            Some(ConnectionTarget::Card(harness.target))
+        );
+        assert_eq!(
+            Canvas::resolve_target(workspace, &name),
+            Some(ConnectionTarget::Card(harness.target))
+        );
+        assert_eq!(Canvas::resolve_target(workspace, "missing"), None);
+    }
+
+    #[test]
+    fn screen_output_keeps_the_last_requested_lines() {
+        let lines = vec!["old".to_owned(), "ping".to_owned(), String::new()];
+
+        assert_eq!(screen_output(&lines, None), "old\nping");
+        assert_eq!(screen_output(&lines, Some(1)), "ping");
     }
 }
