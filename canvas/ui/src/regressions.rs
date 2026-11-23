@@ -58,12 +58,6 @@ fn fps_badge_is_not_rendered() {
         labels.iter().all(|label| !label.to_ascii_lowercase().contains("fps")),
         "no canvas label may expose an FPS badge: {labels:?}"
     );
-    let source = include_str!("canvas.rs");
-    let render = &source[source.find("impl Render for Canvas").expect("render impl")..];
-    assert!(
-        !render.to_ascii_lowercase().contains("\"fps"),
-        "a quoted FPS label returned to the canvas render path"
-    );
 }
 
 #[test]

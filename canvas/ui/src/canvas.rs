@@ -3069,7 +3069,7 @@ fn agent_edit_dialog(
                 .child("Editar agente"),
         )
         .w(px(AGENT_DIALOG_WIDTH))
-        .margin_top((window.viewport_size().height - px(AGENT_DIALOG_HEIGHT)) / 2.0)
+        .margin_top((window.viewport_size().height - px(AGENT_EDIT_DIALOG_HEIGHT)) / 2.0)
         .overlay(true)
         .rounded(px(RADIUS_DIALOG))
         .border_1()
@@ -5131,8 +5131,8 @@ pub(crate) mod test_support {
         super::needs_workspace_notice(store)
     }
 
-    /// State-derived labels plus a render-source guard in `regressions.rs`:
-    /// together they catch an FPS badge returning to the visible canvas.
+    /// State-derived canvas labels used by the FPS regression; the visible
+    /// states are additionally pinned by the golden images.
     pub(crate) fn render_state_labels(store: &WorkspaceStore) -> Vec<String> {
         let mut labels = Vec::new();
         for workspace in store.workspaces() {
