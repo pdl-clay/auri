@@ -1,0 +1,35 @@
+[package]
+edition = "2024"
+name = "gpui-terminal"
+version = "0.1.0"
+authors = ["Leonard Seibold <git[@]zrtx.de>"]
+description = "Terminal emulator component for gpui"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/zortax/gpui-terminal"
+
+# Local fork of gpui-terminal 0.1.0. See PATCHES.md for the rendering changes.
+[lib]
+name = "gpui_terminal"
+path = "src/lib.rs"
+# Upstream examples depend on dev-only crates; our app uses the library API.
+doctest = false
+
+[dependencies.alacritty_terminal]
+version = "0.25.1"
+
+[dependencies.anyhow]
+version = "1"
+
+[dependencies.arboard]
+version = "3"
+features = ["wayland-data-control"]
+
+[dependencies.flume]
+version = "0.12"
+
+[dependencies.gpui]
+version = "0.2.2"
+
+[dependencies.parking_lot]
+version = "0.12"

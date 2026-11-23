@@ -9,7 +9,7 @@ gpui-component = "=0.5.1"
 auro = "=0.1.0-alpha.13"
 canvas-types = { path = "../types" }
 anyhow = "1"
-gpui-terminal = "0.1.0"
+gpui-terminal = { path = "../vendor/gpui-terminal" }
 parking_lot = "0.12"
 portable-pty = "0.9"
 serde = { version = "1", features = ["derive"] }

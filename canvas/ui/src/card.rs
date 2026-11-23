@@ -105,7 +105,8 @@ pub struct TerminalCard {
     pub terminal: Entity<TerminalView>,
     canvas: WeakEntity<Canvas>,
     root: PathBuf,
-    pty: PtySession,
+    /// Owns the child process group; dropping it terminates the session.
+    _pty: PtySession,
     drag: Option<DragStart>,
     last_drag_notify: Option<Instant>,
     view_zoom: f32,
@@ -176,7 +177,7 @@ impl TerminalCard {
             selected: false,
             terminal,
             canvas,
-            pty,
+            _pty: pty,
             last_drag_notify: None,
             drag: None,
             root,
@@ -335,14 +336,8 @@ impl TerminalCard {
             }
         };
         self.bounds = Bounds::new(Point::new(px(nx), px(ny)), Size::new(px(nw), px(nh)));
-        if start.mode != DragMode::Move {
-            let (cols, rows) = terminal_grid(&self.bounds);
-            if let Err(error) = self.pty.resize(cols, rows) {
-                eprintln!("terminal {}: PTY resize failed: {error}", self.id);
-            }
-            self.terminal
-                .update(cx, |terminal, _| terminal.resize(cols as usize, rows as usize));
-        }
+        // The terminal view resizes its PTY from its own measured metrics on
+        // the next paint; doing it here as well would resize twice per event.
         let now = Instant::now();
         let due = self
             .last_drag_notify
