@@ -1,8 +1,8 @@
 //! Workspace drawer: filter, creation dialog and native directory picker.
 
 use auro::gpui::{
-    App, Context, Entity, MouseButton, MouseDownEvent, PathPromptOptions, Pixels, Point, Render,
-    Subscription, WeakEntity, Window, div, px, rgb, rgba, svg,
+    App, Context, CursorStyle, DragMoveEvent, Entity, MouseButton, MouseDownEvent, PathPromptOptions,
+    Pixels, Point, Render, Subscription, WeakEntity, Window, div, px, rgb, rgba, svg,
 };
 use auro::prelude::*;
 use canvas_types::{WorkspaceColor, WorkspaceIcon, WorkspaceId, WorkspaceState, WorkspaceStore};
@@ -53,6 +53,15 @@ fn filter_matches(name: &str, query: &str) -> bool {
     name.to_lowercase().contains(&query.to_lowercase())
 }
 
+#[derive(Clone, Copy)]
+struct DrawerDragToken;
+
+impl Render for DrawerDragToken {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
+
 /// Sidebar with the workspace list, a filter and a centered creation dialog.
 pub struct WorkspaceDrawer {
     store: WorkspaceStore,
@@ -73,6 +82,8 @@ pub struct WorkspaceDrawer {
     form_color: WorkspaceColor,
     restart_handler: Option<Box<dyn Fn(&WorkspaceStore, &mut App)>>,
     context_menu: Option<Point<Pixels>>,
+    drawer_width: f32,
+    drag_start: Option<f32>,
 }
 
 impl WorkspaceDrawer {
@@ -97,9 +108,32 @@ impl WorkspaceDrawer {
             restart_handler: None,
             context_menu: None,
             form_color: WorkspaceColor::Brass,
+            drawer_width: DRAWER_WIDTH,
+            drag_start: None,
         }
     }
 
+
+    pub fn drawer_width(&self) -> f32 {
+        self.drawer_width
+    }
+
+    fn begin_drawer_drag(&mut self, x: f32) {
+        self.drag_start = Some(x - self.drawer_width);
+    }
+
+    fn apply_drawer_drag(
+        &mut self,
+        event: &DragMoveEvent<DrawerDragToken>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(offset) = self.drag_start else {
+            return;
+        };
+        self.drawer_width = (f32::from(event.event.position.x) - offset)
+            .clamp(MIN_DRAWER_WIDTH, MAX_DRAWER_WIDTH);
+        cx.notify();
+    }
     /// Open the shared centered workspace creation dialog.
     pub fn open_create_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_form();
@@ -370,30 +404,41 @@ fn apply_restart_result(
     }
 }
 
-fn asset_icon(path: &'static str, color: u32) -> impl IntoElement {
+fn asset_icon_sized(path: &'static str, color: u32, size: f32) -> impl IntoElement {
     svg()
         .path(path)
-        .w(px(ICON_SIZE))
-        .h(px(ICON_SIZE))
+        .w(px(size))
+        .h(px(size))
         .text_color(rgb(color))
 }
 
-fn icon_svg(icon: WorkspaceIcon, color: u32) -> impl IntoElement {
-    let path = match icon {
+fn asset_icon(path: &'static str, color: u32) -> impl IntoElement {
+    asset_icon_sized(path, color, ICON_SIZE)
+}
+
+fn icon_path(icon: WorkspaceIcon) -> &'static str {
+    match icon {
         WorkspaceIcon::Star => "star.svg",
         WorkspaceIcon::Folder => "folder.svg",
         WorkspaceIcon::Bolt => "bolt.svg",
         WorkspaceIcon::Code => "code.svg",
         WorkspaceIcon::Globe => "globe.svg",
-    };
-    asset_icon(path, color)
+    }
+}
+
+fn icon_svg(icon: WorkspaceIcon, color: u32) -> impl IntoElement {
+    asset_icon(icon_path(icon), color)
+}
+
+fn row_icon(icon: WorkspaceIcon, color: u32) -> impl IntoElement {
+    asset_icon_sized(icon_path(icon), color, ROW_ICON_SIZE)
 }
 
 fn delete_icon() -> impl IntoElement {
     svg()
         .path("x.svg")
-        .w(px(ICON_SIZE))
-        .h(px(ICON_SIZE))
+        .w(px(ROW_ICON_SIZE))
+        .h(px(ROW_ICON_SIZE))
         .text_color(rgb(COLOR_MUTED))
         .hover(|this| this.text_color(rgb(COLOR_DANGER)))
 }
@@ -596,8 +641,12 @@ fn workspace_dialog(
 }
 
 /// Keep the context menu inside the drawer and above the window bottom.
-fn menu_origin(position: Point<Pixels>, viewport_height: f32) -> (f32, f32) {
-    let max_x = DRAWER_WIDTH - CONTEXT_MENU_WIDTH - SPACE_TIGHT;
+fn menu_origin(
+    position: Point<Pixels>,
+    viewport_height: f32,
+    drawer_width: f32,
+) -> (f32, f32) {
+    let max_x = drawer_width - CONTEXT_MENU_WIDTH - SPACE_TIGHT;
     let max_y = viewport_height - CONTEXT_MENU_ITEM_HEIGHT - SPACE_WIDE - 2.0 * SPACE_TIGHT;
     (
         f32::from(position.x).clamp(SPACE_TIGHT, max_x),
@@ -610,9 +659,13 @@ impl Render for WorkspaceDrawer {
         self.sync_inputs(window, cx);
         let active = self.store.active();
         let filter = self.filter.clone();
-        let context_menu = self
-            .context_menu
-            .map(|position| menu_origin(position, f32::from(window.viewport_size().height)));
+        let context_menu = self.context_menu.map(|position| {
+            menu_origin(
+                position,
+                f32::from(window.viewport_size().height),
+                self.drawer_width,
+            )
+        });
         let rows: Vec<WorkspaceState> = self
             .store
             .workspaces()
@@ -627,7 +680,7 @@ impl Render for WorkspaceDrawer {
         };
 
         div()
-            .w(px(DRAWER_WIDTH))
+            .w(px(self.drawer_width))
             .flex()
             .flex_col()
             .gap_3()
@@ -745,10 +798,11 @@ impl Render for WorkspaceDrawer {
                         MouseButton::Right,
                         cx.listener(|_, _, _, cx| cx.stop_propagation()),
                     )
-                    .child(icon_svg(workspace.icon, color))
+                    .child(row_icon(workspace.icon, color))
                     .child(
                         div()
                             .flex_1()
+                            .text_xs()
                             .child(workspace.name)
                             .when(invalid, |this| {
                                 this.child(
@@ -762,9 +816,9 @@ impl Render for WorkspaceDrawer {
                     .child(
                         div()
                             .relative()
-                            .w(px(ICON_SIZE + COUNT_BADGE_RESERVE))
+                            .w(px(ROW_ICON_SIZE + COUNT_BADGE_RESERVE))
                             .flex_none()
-                            .child(asset_icon("terminal.svg", COLOR_MUTED))
+                            .child(asset_icon_sized("terminal.svg", COLOR_MUTED, ROW_ICON_SIZE))
                             .child(
                                 div()
                                     .absolute()
@@ -788,8 +842,8 @@ impl Render for WorkspaceDrawer {
                                 )))
                                 .tooltip("Remover espaço")
                                 .child(delete_icon())
-                                .w(px(20.))
-                                .h(px(20.))
+                                .w(px(ROW_ICON_SIZE))
+                                .h(px(ROW_ICON_SIZE))
                                 .p_0()
                                 .rounded(px(RADIUS_CONTROL))
                                 .with_variant(ButtonVariant::Ghost)
@@ -855,6 +909,29 @@ impl Render for WorkspaceDrawer {
                         ),
                 )
             })
+            .child(
+                div()
+                    .absolute()
+                    .top(px(0.0))
+                    .right(px(0.0))
+                    .bottom(px(0.0))
+                    .w(px(DRAWER_HANDLE_WIDTH))
+                    .cursor(CursorStyle::ResizeLeftRight)
+                    .id("drawer-resize-handle")
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            this.begin_drawer_drag(f32::from(event.position.x));
+                        }),
+                    )
+                    .on_drag(DrawerDragToken, |_, _, _, cx| cx.new(|_| DrawerDragToken))
+                    .on_drag_move(cx.listener(
+                        |this, event: &DragMoveEvent<DrawerDragToken>, _, cx| {
+                            this.apply_drawer_drag(event, cx);
+                        },
+                    )),
+            )
     }
 }
 
@@ -874,9 +951,12 @@ mod tests {
 
     #[test]
     fn drawer_menu_follows_click_and_stays_inside_drawer() {
-        assert_eq!(menu_origin(Point::new(px(30.0), px(140.0)), 900.0), (30.0, 140.0));
         assert_eq!(
-            menu_origin(Point::new(px(900.0), px(890.0)), 900.0),
+            menu_origin(Point::new(px(30.0), px(140.0)), 900.0, 224.0),
+            (30.0, 140.0)
+        );
+        assert_eq!(
+            menu_origin(Point::new(px(900.0), px(890.0)), 900.0, 224.0),
             (224.0 - 180.0 - 4.0, 900.0 - 32.0 - 12.0 - 8.0)
         );
     }

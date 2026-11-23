@@ -246,7 +246,8 @@ impl Canvas {
         cx: &mut Context<Self>,
     ) {
         if control {
-            let local_x = f32::from(position.x) - DRAWER_WIDTH;
+            let drawer_width = self.drawer.read(cx).drawer_width();
+            let local_x = f32::from(position.x) - drawer_width;
             let local_y = f32::from(position.y);
             let (zoom, offset_x, offset_y) = zoom_at(
                 self.zoom,
@@ -296,7 +297,8 @@ impl Canvas {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let local_x = (f32::from(position.x) - DRAWER_WIDTH - self.offset_x) / self.zoom;
+        let drawer_width = self.drawer.read(cx).drawer_width();
+        let local_x = (f32::from(position.x) - drawer_width - self.offset_x) / self.zoom;
         let local_y = (f32::from(position.y) - self.offset_y) / self.zoom;
         let origin = Point::new(
             px((local_x - CARD_WIDTH / 2.0).max(8.0)),
@@ -491,9 +493,10 @@ impl Render for Canvas {
         let zoom = self.zoom;
         let offset_x = self.offset_x;
         let offset_y = self.offset_y;
+        let drawer_width = self.drawer.read(cx).drawer_width();
         let context_menu = self.context_menu.map(|position| {
             (
-                (f32::from(position.x) - DRAWER_WIDTH).max(SPACE_NORMAL),
+                (f32::from(position.x) - drawer_width).max(SPACE_NORMAL),
                 f32::from(position.y).max(SPACE_NORMAL),
             )
         });

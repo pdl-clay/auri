@@ -17,7 +17,11 @@ pub const COLOR_SUCCESS: u32 = 0x6F9E7A;
 // Workspace row (translucent gray, not a solid accent).
 pub const COLOR_ROW_BORDER_SOFT: u32 = 0x8A8D9133;
 pub const COLOR_ROW_BORDER_ACTIVE: u32 = 0x9A9DA266;
-pub const WORKSPACE_ROW_PAD_Y: f32 = 3.;
+pub const WORKSPACE_ROW_PAD_Y: f32 = 2.;
+pub const DRAWER_HANDLE_WIDTH: f32 = 4.;
+pub const MIN_DRAWER_WIDTH: f32 = 160.;
+pub const MAX_DRAWER_WIDTH: f32 = 420.;
+pub const ROW_ICON_SIZE: f32 = 12.;
 
 // Radii and icons.
 pub const RADIUS_CHIP: f32 = 4.;
@@ -25,7 +29,7 @@ pub const RADIUS_CONTROL: f32 = 8.;
 pub const RADIUS_DIALOG: f32 = 14.;
 pub const ICON_SIZE: f32 = 16.;
 pub const COLOR_SWATCH_SIZE: f32 = 20.;
-pub const COUNT_BADGE_OFFSET: f32 = -6.;
+pub const COUNT_BADGE_OFFSET: f32 = -3.;
 pub const COUNT_BADGE_RESERVE: f32 = 8.;
 
 // Spacing scale.
