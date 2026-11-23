@@ -27,6 +27,62 @@ type CardGroups = HashMap<WorkspaceId, Vec<(TerminalId, Entity<TerminalCard>)>>;
 type NoteGroups = HashMap<WorkspaceId, Vec<(u64, Entity<TextCard>)>>;
 
 
+/// Transient menu state. Grouping these flags makes every close path clear the
+/// nested panels together, including the agent list.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct MenuState {
+    context_menu: Option<Point<Pixels>>,
+    submenu: bool,
+    agent_list: bool,
+    placing_agent: Option<AgentKind>,
+}
+
+impl MenuState {
+    fn close(&mut self) {
+        *self = Self::default();
+    }
+
+    fn open_context_menu(&mut self, position: Point<Pixels>) {
+        self.close();
+        self.context_menu = Some(position);
+    }
+
+    fn begin_placement(&mut self, kind: Option<AgentKind>) {
+        self.close();
+        self.placing_agent = kind;
+    }
+}
+
+/// UI-only sticky-note selection; never written to the workspace store.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct NoteSelection(Option<(WorkspaceId, u64)>);
+
+impl NoteSelection {
+    fn get(&self) -> Option<(WorkspaceId, u64)> {
+        self.0
+    }
+
+    fn select(&mut self, workspace_id: WorkspaceId, id: u64) {
+        self.0 = Some((workspace_id, id));
+    }
+
+    fn clear(&mut self) {
+        self.0 = None;
+    }
+
+    fn clear_workspace(&mut self, workspace_id: WorkspaceId) {
+        if self.0.is_some_and(|(selected_workspace, _)| selected_workspace == workspace_id) {
+            self.0 = None;
+        }
+    }
+
+    fn clear_note(&mut self, workspace_id: WorkspaceId, id: u64) {
+        if self.0 == Some((workspace_id, id)) {
+            self.0 = None;
+        }
+    }
+}
+
 /// Transient UI state for the header menu and its edit dialog.
 #[derive(Clone, Debug)]
 struct AgentMenu {
@@ -264,10 +320,8 @@ pub struct Canvas {
     zoom: f32,
     offset_x: f32,
     offset_y: f32,
-    context_menu: Option<Point<Pixels>>,
-    submenu: bool,
-    placing_agent: Option<AgentKind>,
-    agent_list: bool,
+    menu: MenuState,
+    selected_note: NoteSelection,
     agent_menu: Option<AgentMenu>,
     agent_name_input: Option<Entity<InputState>>,
     agent_name_subscription: Option<Subscription>,
@@ -290,10 +344,8 @@ impl Canvas {
             zoom: 1.0,
             offset_x: 0.0,
             offset_y: 0.0,
-            context_menu: None,
-            submenu: false,
-            placing_agent: None,
-            agent_list: false,
+            menu: MenuState::default(),
+            selected_note: NoteSelection::default(),
             agent_menu: None,
             agent_name_input: None,
             agent_name_subscription: None,
@@ -339,6 +391,7 @@ impl Canvas {
 
     /// A row click always activates its workspace and loads its saved cards.
     fn handle_select(&mut self, id: WorkspaceId, window: &mut Window, cx: &mut Context<Self>) {
+        self.clear_note_selection(cx);
         if self.store.workspace_mut(id).is_some_and(|workspace| !workspace.unloaded) {
             self.store.select(id);
             self.finish_store_change(cx);
@@ -350,6 +403,7 @@ impl Canvas {
     fn handle_action(&mut self, action: DrawerAction, cx: &mut Context<Self>) {
         match action {
             DrawerAction::Create { name, icon, color, root } => {
+                self.clear_note_selection(cx);
                 match create_workspace(&mut self.store, name, icon, color, root) {
                     Ok(id) => {
                         self.cards.entry(id).or_default();
@@ -374,6 +428,8 @@ impl Canvas {
                 }
             }
             DrawerAction::Unload(id) => {
+                self.selected_note.clear_workspace(id);
+                self.repaint_note_selection(cx);
                 if unload_workspace(&mut self.store, id) {
                     let dropped = self.cards.remove(&id).unwrap_or_default();
                     let dropped_notes = self.notes.remove(&id).unwrap_or_default();
@@ -384,6 +440,8 @@ impl Canvas {
                 }
             }
             DrawerAction::Delete(id) => {
+                self.selected_note.clear_workspace(id);
+                self.repaint_note_selection(cx);
                 if let Some((_, dropped)) = remove_workspace(&mut self.store, &mut self.cards, id) {
                     let dropped_notes = self.notes.remove(&id).unwrap_or_default();
                     self.finish_store_change(cx);
@@ -393,6 +451,7 @@ impl Canvas {
                 }
             }
             DrawerAction::Select(id) => {
+                self.clear_note_selection(cx);
                 self.store.select(id);
                 self.finish_store_change(cx);
             }
@@ -423,6 +482,7 @@ impl Canvas {
 
     /// `config::restart` already replaced the file and the drawer's store.
     fn adopt_restarted_store(&mut self, mut store: WorkspaceStore, cx: &mut Context<Self>) {
+        self.clear_note_selection(cx);
         store.mark_all_unloaded();
         self.store = store;
         self.cards.clear();
@@ -488,11 +548,8 @@ impl Canvas {
     pub fn begin_placement(&mut self, cx: &mut Context<Self>) {
         self.placing = true;
         self.placing_text = false;
-        self.placing_agent = None;
+        self.menu.begin_placement(None);
         self.error = None;
-        self.context_menu = None;
-        self.submenu = false;
-        self.agent_list = false;
         self.agent_menu = None;
         cx.notify();
     }
@@ -501,11 +558,8 @@ impl Canvas {
     pub fn begin_text_placement(&mut self, cx: &mut Context<Self>) {
         self.placing_text = true;
         self.placing = false;
-        self.placing_agent = None;
+        self.menu.begin_placement(None);
         self.error = None;
-        self.context_menu = None;
-        self.submenu = false;
-        self.agent_list = false;
         self.agent_menu = None;
         cx.notify();
     }
@@ -513,9 +567,9 @@ impl Canvas {
     pub fn cancel_placement(&mut self, cx: &mut Context<Self>) {
         self.placing = false;
         self.placing_text = false;
-        self.placing_agent = None;
+        self.menu.close();
+        cx.notify();
     }
-
     fn place_terminal(
         &mut self,
         position: Point<Pixels>,
@@ -530,7 +584,7 @@ impl Canvas {
             px((local_y - CARD_HEIGHT / 2.0).max(8.0)),
         );
         self.placing = false;
-        if let Some(kind) = self.placing_agent.take() {
+        if let Some(kind) = self.menu.placing_agent.take() {
             self.spawn_agent(kind, Some(origin), window, cx);
         } else {
             self.spawn_terminal(Some(origin), window, cx);
@@ -593,6 +647,8 @@ impl Canvas {
         if let Some(notes) = self.notes.get_mut(&workspace_id) {
             notes.retain(|(note_id, _)| *note_id != id);
         }
+        self.selected_note.clear_note(workspace_id, id);
+        self.repaint_note_selection(cx);
         self.finish_store_change(cx);
     }
 
@@ -606,6 +662,7 @@ impl Canvas {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.clear_note_selection(cx);
         let (workspace_id, id, root) = match active_spawn_target(&mut self.store) {
             Ok(target) => target,
             Err(error) => {
@@ -659,11 +716,8 @@ impl Canvas {
     pub fn begin_agent_placement(&mut self, kind: AgentKind, cx: &mut Context<Self>) {
         self.placing = true;
         self.placing_text = false;
-        self.placing_agent = Some(kind);
+        self.menu.begin_placement(Some(kind));
         self.error = None;
-        self.context_menu = None;
-        self.submenu = false;
-        self.agent_list = false;
         self.agent_menu = None;
         cx.notify();
     }
@@ -676,6 +730,7 @@ impl Canvas {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.clear_note_selection(cx);
         let origin = origin.unwrap_or_else(|| {
             self.cards
                 .get(&self.store.active().unwrap_or_default())
@@ -762,9 +817,7 @@ impl Canvas {
             original_name: agent.name,
             original_kind: agent.kind,
         });
-        self.context_menu = None;
-        self.submenu = false;
-        self.agent_list = false;
+        self.menu.close();
         cx.notify();
     }
 
@@ -937,6 +990,66 @@ impl Canvas {
         cx.notify();
     }
 
+    /// Repaint every note after the UI-only selection changes.
+    fn repaint_note_selection(&self, cx: &mut Context<Self>) {
+        let selected = self.selected_note.get();
+        let notes: Vec<_> = self
+            .notes
+            .iter()
+            .flat_map(|(workspace_id, group)| {
+                group
+                    .iter()
+                    .map(move |(id, note)| (*workspace_id, *id, note.clone()))
+            })
+            .collect();
+        cx.defer(move |cx| {
+            for (workspace_id, id, note) in notes {
+                note.update(cx, |note, cx| {
+                    note.set_selected(selected == Some((workspace_id, id)), cx)
+                });
+            }
+        });
+    }
+
+    /// Drop the note selection without persisting anything.
+    fn clear_note_selection(&mut self, cx: &mut Context<Self>) {
+        if self.selected_note.get().is_none() {
+            return;
+        }
+        self.selected_note.clear();
+        self.repaint_note_selection(cx);
+        cx.notify();
+    }
+
+    /// Select a sticky note; terminal selection lives in the store, so clear it there.
+    pub fn select_note(&mut self, workspace_id: WorkspaceId, id: u64, cx: &mut Context<Self>) {
+        let had_terminal_selection = self
+            .store
+            .workspace_mut(workspace_id)
+            .is_some_and(|workspace| workspace.canvas.selected().is_some());
+        if let Some(workspace) = self.store.workspace_mut(workspace_id) {
+            workspace.canvas.clear_selection();
+        }
+        if had_terminal_selection {
+            self.persist_store(cx);
+        }
+        self.selected_note.select(workspace_id, id);
+        let store = self.store.clone();
+        let cards = self.cards.get(&workspace_id).cloned().unwrap_or_default();
+        cx.defer(move |cx| {
+            let selected = store
+                .workspaces()
+                .iter()
+                .find(|workspace| workspace.id == workspace_id)
+                .and_then(|workspace| workspace.canvas.selected());
+            for (card_id, card) in cards {
+                card.update(cx, |card, cx| card.set_selected(Some(card_id) == selected, cx));
+            }
+        });
+        self.repaint_note_selection(cx);
+        cx.notify();
+    }
+
     /// Keep each card's painted selection flag in step with the logical state.
     fn sync_card_selection(&self, workspace_id: WorkspaceId, cx: &mut Context<Self>) {
         let selected = self
@@ -954,6 +1067,7 @@ impl Canvas {
 
 
     pub fn select(&mut self, workspace_id: WorkspaceId, id: TerminalId, cx: &mut Context<Self>) {
+        self.clear_note_selection(cx);
         let Some(workspace) = self.store.workspace_mut(workspace_id) else {
             return;
         };
@@ -1104,6 +1218,7 @@ impl Canvas {
         else {
             return;
         };
+        self.clear_note_selection(cx);
         // An unloaded workspace has no live cards; drop any stale entities.
         let dropped = self.cards.remove(&id).unwrap_or_default();
         let dropped_notes = self.notes.remove(&id).unwrap_or_default();
@@ -1272,8 +1387,8 @@ impl Render for Canvas {
         let offset_x = self.offset_x;
         let offset_y = self.offset_y;
         let placing_text = self.placing_text;
-        let submenu = self.submenu;
-        let agent_list = self.agent_list;
+        let submenu = self.menu.submenu;
+        let agent_list = self.menu.agent_list;
         let agent_menu = self.agent_menu.clone();
         let agent_name_input = self.agent_name_input.clone();
         let dialog_error = self.error.clone();
@@ -1289,7 +1404,7 @@ impl Render for Canvas {
             .map(|workspace| workspace.root.to_string_lossy().into_owned())
             .unwrap_or_default();
         let drawer_width = self.drawer.read(cx).drawer_width();
-        let context_menu = self.context_menu.map(|position| {
+        let context_menu = self.menu.context_menu.map(|position| {
             (
                 (f32::from(position.x) - drawer_width).max(SPACE_NORMAL),
                 f32::from(position.y).max(SPACE_NORMAL),
@@ -1380,8 +1495,8 @@ impl Render for Canvas {
                                     window.prevent_default();
                                     this.placing = false;
                                     this.placing_text = false;
-                                    this.submenu = false;
-                                    this.context_menu = Some(event.position);
+                                    this.close_agent_menu(cx);
+                                    this.menu.open_context_menu(event.position);
                                     cx.stop_propagation();
                                     cx.notify();
                                 }),
@@ -1506,8 +1621,7 @@ impl Render for Canvas {
                                         .on_mouse_down(
                                             MouseButton::Left,
                                             cx.listener(|this, _, _, cx| {
-                                                this.context_menu = None;
-                                                this.submenu = false;
+                                                this.menu.close();
                                                 cx.notify();
                                             }),
                                         ),
@@ -1537,14 +1651,14 @@ impl Render for Canvas {
                                                 .hover(|style| style.bg(rgb(COLOR_BORDER)))
                                                 .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                                                     if *hovered {
-                                                        this.submenu = true;
+                                                        this.menu.submenu = true;
                                                         cx.notify();
                                                     }
                                                 }))
                                                 .on_mouse_down(
                                                     MouseButton::Left,
                                                     cx.listener(|this, _, _, cx| {
-                                                        this.submenu = true;
+                                                        this.menu.submenu = true;
                                                         cx.notify();
                                                     }),
                                                 )
@@ -1649,14 +1763,14 @@ impl Render for Canvas {
                                                     .hover(|style| style.bg(rgb(COLOR_BORDER)))
                                                     .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                                                         if *hovered {
-                                                            this.agent_list = true;
+                                                            this.menu.agent_list = true;
                                                             cx.notify();
                                                         }
                                                     }))
                                                     .on_mouse_down(
                                                         MouseButton::Left,
                                                         cx.listener(|this, _, _, cx| {
-                                                            this.agent_list = true;
+                                                            this.menu.agent_list = true;
                                                             cx.notify();
                                                         }),
                                                     )
@@ -1994,6 +2108,70 @@ impl Render for Canvas {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+
+    #[test]
+    fn closing_context_menu_clears_nested_panels() {
+        let mut menu = MenuState::default();
+        menu.open_context_menu(Point::new(px(40.0), px(60.0)));
+        menu.submenu = true;
+        menu.agent_list = true;
+
+        menu.close();
+
+        assert_eq!(menu, MenuState::default());
+    }
+
+    #[test]
+    fn reopening_context_menu_does_not_restore_agent_list() {
+        let mut menu = MenuState::default();
+        menu.open_context_menu(Point::new(px(10.0), px(20.0)));
+        menu.submenu = true;
+        menu.agent_list = true;
+
+        menu.open_context_menu(Point::new(px(30.0), px(40.0)));
+
+        assert_eq!(menu.context_menu, Some(Point::new(px(30.0), px(40.0))));
+        assert!(!menu.submenu);
+        assert!(!menu.agent_list);
+        assert_eq!(menu.placing_agent, None);
+    }
+
+    #[test]
+    fn starting_placement_clears_menu_and_remembers_the_agent() {
+        let mut menu = MenuState::default();
+        menu.open_context_menu(Point::new(px(1.0), px(2.0)));
+        menu.agent_list = true;
+
+        menu.begin_placement(Some(AgentKind::Codex));
+
+        assert_eq!(menu.context_menu, None);
+        assert!(!menu.submenu);
+        assert!(!menu.agent_list);
+        assert_eq!(menu.placing_agent, Some(AgentKind::Codex));
+    }
+
+    #[test]
+    fn note_selection_tracks_only_the_current_workspace_and_note() {
+        let mut selected = NoteSelection::default();
+        assert_eq!(selected.get(), None);
+
+        selected.select(1, 7);
+        assert_eq!(selected.get(), Some((1, 7)));
+        selected.clear_note(2, 7);
+        selected.clear_note(1, 8);
+        assert_eq!(selected.get(), Some((1, 7)));
+
+        selected.select(2, 9);
+        selected.clear_workspace(1);
+        assert_eq!(selected.get(), Some((2, 9)));
+        selected.clear_workspace(2);
+        assert_eq!(selected.get(), None);
+
+        selected.select(3, 4);
+        selected.clear();
+        assert_eq!(selected.get(), None);
+    }
 
     #[test]
     fn zoom_scroll_direction_is_inverted() {

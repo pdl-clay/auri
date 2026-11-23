@@ -88,7 +88,6 @@ struct DragStart {
     mode: DragMode,
     position: Point<Pixels>,
     bounds: Bounds<Pixels>,
-    moved: bool,
 }
 
 /// Visual card for a single terminal, owning the PTY and its emulator view.
@@ -201,6 +200,21 @@ impl TerminalCard {
         self.agent.clone()
     }
 
+    /// Open the agent edit menu at the event's own position, never a synthetic one.
+    fn open_agent_menu_at(&self, position: Point<Pixels>, cx: &mut App) {
+        if self.agent.is_none() {
+            return;
+        }
+        let Some(canvas) = self.canvas.upgrade() else {
+            return;
+        };
+        let workspace_id = self.workspace_id;
+        let id = self.id;
+        let _ = canvas.update(cx, |canvas, cx| {
+            canvas.open_agent_menu(workspace_id, id, position, cx)
+        });
+    }
+
     /// Apply the canvas zoom/pan to this card and its terminal font.
     pub fn set_view(&mut self, zoom: f32, offset_x: f32, offset_y: f32, cx: &mut Context<Self>) {
         self.view_zoom = zoom;
@@ -220,7 +234,6 @@ impl TerminalCard {
             mode,
             position,
             bounds: self.bounds,
-            moved: false,
         });
     }
 
@@ -239,9 +252,6 @@ impl TerminalCard {
         let zoom = self.view_zoom.max(0.01);
         let dx = (f32::from(event.event.position.x) - f32::from(start.position.x)) / zoom;
         let dy = (f32::from(event.event.position.y) - f32::from(start.position.y)) / zoom;
-        if dx.abs() > DRAG_CLICK_SLOP || dy.abs() > DRAG_CLICK_SLOP {
-            self.drag = Some(DragStart { moved: true, ..start });
-        }
         let bounds = start.bounds;
         let x = f32::from(bounds.origin.x);
         let y = f32::from(bounds.origin.y);
@@ -378,6 +388,13 @@ impl Render for TerminalCard {
                         select_canvas.update(cx, |canvas, cx| canvas.select(workspace_id, id, cx));
                 }),
             )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.open_agent_menu_at(event.position, cx);
+                }),
+            )
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(move |_, _, _, cx| {
@@ -484,22 +501,11 @@ impl Render for TerminalCard {
                             this.apply_drag(event, entity_id, cx);
                         }),
                     )
-                    .on_mouse_up(
-                        MouseButton::Left,
-                        cx.listener(|this, _, window, cx| {
-                            let moved = this.drag.is_some_and(|drag| drag.moved);
-                            this.drag = None;
-                            if !moved && this.agent.is_some() {
-                                let workspace_id = this.workspace_id;
-                                let id = this.id;
-                                let position = window.mouse_position();
-                                let Some(canvas) = this.canvas.upgrade() else {
-                                    return;
-                                };
-                                let _ = canvas.update(cx, |canvas, cx| {
-                                    canvas.open_agent_menu(workspace_id, id, position, cx)
-                                });
-                            }
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            this.open_agent_menu_at(event.position, cx);
                         }),
                     ),
             )

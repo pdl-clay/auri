@@ -54,6 +54,7 @@ pub struct TextCard {
     pub id: u64,
     pub workspace_id: WorkspaceId,
     pub bounds: Bounds<Pixels>,
+    pub selected: bool,
     input: Entity<InputState>,
     canvas: WeakEntity<Canvas>,
     drag: Option<DragStart>,
@@ -105,6 +106,7 @@ impl TextCard {
             view_offset_x: 0.0,
             view_offset_y: 0.0,
             _text_subscription: text_subscription,
+            selected: false,
         }
     }
 
@@ -114,6 +116,13 @@ impl TextCard {
         self.view_offset_x = offset_x;
         self.view_offset_y = offset_y;
         cx.notify();
+    }
+
+    pub fn set_selected(&mut self, selected: bool, cx: &mut Context<Self>) {
+        if self.selected != selected {
+            self.selected = selected;
+            cx.notify();
+        }
     }
 
     /// Current canvas geometry, used by the canvas-wide commit listener.
@@ -133,6 +142,14 @@ impl TextCard {
 
     fn focus_input(&self, window: &mut Window, cx: &mut App) {
         self.input.update(cx, |input, cx| input.focus(window, cx));
+    }
+
+    /// Select this note on the canvas and focus its input on mouse-down.
+    fn select_and_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(canvas) = self.canvas.upgrade() {
+            let _ = canvas.update(cx, |canvas, cx| canvas.select_note(self.workspace_id, self.id, cx));
+        }
+        self.focus_input(window, cx);
     }
 
     fn begin_drag(&mut self, mode: DragMode, position: Point<Pixels>) {
@@ -181,6 +198,7 @@ impl Render for TextCard {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let id = self.id;
         let workspace_id = self.workspace_id;
+        let selected = self.selected;
         let canvas = self.canvas.clone();
         let scroll_canvas = self.canvas.clone();
         let bounds_canvas = self.canvas.clone();
@@ -194,8 +212,9 @@ impl Render for TextCard {
             .id(("text-card", id))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, _, window, cx| this.focus_input(window, cx)),
+                cx.listener(move |this, _, window, cx| this.select_and_focus(window, cx)),
             )
+            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(move |this, _, _, cx| {
@@ -229,8 +248,12 @@ impl Render for TextCard {
             .overflow_hidden()
             .rounded(px(RADIUS_CONTROL))
             .bg(rgb(COLOR_NOTE_BG))
-            .border_1()
-            .border_color(rgb(COLOR_BORDER))
+            .when(selected, |card| {
+                card.border_2().border_dashed().border_color(rgb(COLOR_SELECTION))
+            })
+            .when(!selected, |card| {
+                card.border_1().border_color(rgb(COLOR_BORDER))
+            })
             .text_color(rgb(COLOR_NOTE_FG))
             .child(
                 div()
@@ -263,7 +286,7 @@ impl Render for TextCard {
                         MouseButton::Left,
                         cx.listener(|this, event: &MouseDownEvent, window, cx| {
                             cx.stop_propagation();
-                            this.focus_input(window, cx);
+                            this.select_and_focus(window, cx);
                             this.begin_drag(DragMode::Move, event.position);
                         }),
                     )
@@ -300,7 +323,7 @@ impl Render for TextCard {
                         MouseButton::Left,
                         cx.listener(|this, event: &MouseDownEvent, window, cx| {
                             cx.stop_propagation();
-                            this.focus_input(window, cx);
+                            this.select_and_focus(window, cx);
                             this.begin_drag(DragMode::ResizeBottomRight, event.position);
                         }),
                     )

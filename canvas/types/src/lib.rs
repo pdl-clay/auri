@@ -159,6 +159,11 @@ impl CanvasState {
         self.selected = Some(id);
     }
 
+    /// Clear the selected terminal without touching the saved cards.
+    pub fn clear_selection(&mut self) {
+        self.selected = None;
+    }
+
     pub fn selected(&self) -> Option<TerminalId> {
         self.selected
     }
@@ -499,6 +504,15 @@ mod tests {
         state.remove(a.id);
         assert_eq!(state.selected(), None);
         assert_eq!(state.terminals().len(), 1);
+    }
+
+    #[test]
+    fn clear_selection_drops_only_the_selected_terminal() {
+        let mut state = CanvasState::new();
+        let a = state.add();
+        state.clear_selection();
+        assert_eq!(state.selected(), None);
+        assert_eq!(state.terminals()[0].id, a.id);
     }
 
     #[test]
