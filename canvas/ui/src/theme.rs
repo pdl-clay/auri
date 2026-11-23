@@ -17,7 +17,7 @@ pub const COLOR_SUCCESS: u32 = 0x6F9E7A;
 // Workspace row (translucent gray, not a solid accent).
 pub const COLOR_ROW_BORDER_SOFT: u32 = 0x8A8D9133;
 pub const COLOR_ROW_BORDER_ACTIVE: u32 = 0x9A9DA266;
-pub const WORKSPACE_ROW_PAD_Y: f32 = 2.;
+pub const WORKSPACE_ROW_PAD_Y: f32 = 4.;
 pub const DRAWER_HANDLE_WIDTH: f32 = 4.;
 pub const MIN_DRAWER_WIDTH: f32 = 160.;
 pub const MAX_DRAWER_WIDTH: f32 = 420.;
