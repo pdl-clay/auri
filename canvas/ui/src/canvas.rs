@@ -15,12 +15,15 @@ use gpui_component::{
 use canvas_types::{CanvasState, TerminalId, WorkspaceColor, WorkspaceIcon, WorkspaceId, WorkspaceState, WorkspaceStore};
 
 use crate::card::{TerminalCard, scroll_delta, terminal_grid};
+use crate::text_card::TextCard;
 use crate::workspaces::{DrawerAction, WorkspaceDrawer};
 use crate::theme::*;
 use crate::config::{self, LoadOutcome};
 use crate::pty::PtySession;
 
 type CardGroups = HashMap<WorkspaceId, Vec<(TerminalId, Entity<TerminalCard>)>>;
+
+type NoteGroups = HashMap<WorkspaceId, Vec<(u64, Entity<TextCard>)>>;
 
 /// Terminals are never restored from disk; their runtime state must not survive a save.
 fn clear_terminals(store: &mut WorkspaceStore) {
@@ -128,12 +131,16 @@ pub struct Canvas {
     store: WorkspaceStore,
     drawer: Entity<WorkspaceDrawer>,
     cards: CardGroups,
+    notes: NoteGroups,
     error: Option<String>,
     placing: bool,
+    placing_text: bool,
+    next_note_id: u64,
     zoom: f32,
     offset_x: f32,
     offset_y: f32,
     context_menu: Option<Point<Pixels>>,
+    submenu: bool,
 }
 impl Canvas {
     /// `load` is authoritative for the drawer banner; the store was already
@@ -146,12 +153,16 @@ impl Canvas {
             store,
             drawer,
             cards: HashMap::new(),
+            notes: HashMap::new(),
             error: None,
             placing: false,
+            placing_text: false,
+            next_note_id: 1,
             zoom: 1.0,
             offset_x: 0.0,
             offset_y: 0.0,
             context_menu: None,
+            submenu: false,
         }
     }
 
@@ -195,9 +206,11 @@ impl Canvas {
             }
             DrawerAction::Delete(id) => {
                 if let Some((_, dropped)) = remove_workspace(&mut self.store, &mut self.cards, id) {
+                    let dropped_notes = self.notes.remove(&id).unwrap_or_default();
                     self.finish_store_change(cx);
                     // Dropping the card handles terminates that workspace's shells.
                     drop(dropped);
+                    drop(dropped_notes);
                 }
             }
             DrawerAction::Select(id) => {
@@ -232,6 +245,7 @@ impl Canvas {
     fn adopt_restarted_store(&mut self, store: WorkspaceStore, cx: &mut Context<Self>) {
         self.store = store;
         self.cards.clear();
+        self.notes.clear();
         self.error = None;
         cx.notify();
     }
@@ -271,9 +285,17 @@ impl Canvas {
             .values()
             .flat_map(|group| group.iter().map(|(_, card)| card.clone()))
             .collect();
+        let notes: Vec<Entity<TextCard>> = self
+            .notes
+            .values()
+            .flat_map(|group| group.iter().map(|(_, note)| note.clone()))
+            .collect();
         cx.defer(move |cx| {
             for card in cards {
                 card.update(cx, |card, cx| card.set_view(zoom, offset_x, offset_y, cx));
+            }
+            for note in notes {
+                note.update(cx, |note, cx| note.set_view(zoom, offset_x, offset_y, cx));
             }
         });
         cx.notify();
@@ -282,12 +304,26 @@ impl Canvas {
     /// Enter placement mode: the next canvas click decides where the terminal opens.
     pub fn begin_placement(&mut self, cx: &mut Context<Self>) {
         self.placing = true;
+        self.placing_text = false;
         self.error = None;
+        self.context_menu = None;
+        self.submenu = false;
+        cx.notify();
+    }
+
+    /// Enter placement mode for a new sticky note.
+    pub fn begin_text_placement(&mut self, cx: &mut Context<Self>) {
+        self.placing_text = true;
+        self.placing = false;
+        self.error = None;
+        self.context_menu = None;
+        self.submenu = false;
         cx.notify();
     }
 
     pub fn cancel_placement(&mut self, cx: &mut Context<Self>) {
         self.placing = false;
+        self.placing_text = false;
         cx.notify();
     }
 
@@ -306,6 +342,54 @@ impl Canvas {
         );
         self.placing = false;
         self.spawn_terminal(Some(origin), window, cx);
+    }
+
+    fn place_text_at(
+        &mut self,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let drawer_width = self.drawer.read(cx).drawer_width();
+        let local_x = (f32::from(position.x) - drawer_width - self.offset_x) / self.zoom;
+        let local_y = (f32::from(position.y) - self.offset_y) / self.zoom;
+        let origin = Point::new(
+            px((local_x - TEXT_CARD_WIDTH / 2.0).max(SPACE_NORMAL)),
+            px((local_y - TEXT_CARD_HEIGHT / 2.0).max(SPACE_NORMAL)),
+        );
+        let Some(workspace_id) = self.store.active() else {
+            self.placing_text = false;
+            self.error = Some(SpawnTargetError::NoWorkspace.message());
+            cx.notify();
+            return;
+        };
+        let id = self.next_note_id;
+        self.next_note_id += 1;
+        let bounds = Bounds::new(
+            origin,
+            Size::new(px(TEXT_CARD_WIDTH), px(TEXT_CARD_HEIGHT)),
+        );
+        let canvas = cx.entity().downgrade();
+        let note = cx.new(|cx| {
+            TextCard::new(id, workspace_id, bounds, canvas.clone(), window, cx)
+        });
+        let (zoom, offset_x, offset_y) = (self.zoom, self.offset_x, self.offset_y);
+        note.update(cx, |note, cx| {
+            note.set_view(zoom, offset_x, offset_y, cx);
+            note.focus(window, cx);
+        });
+        self.notes.entry(workspace_id).or_default().push((id, note));
+        self.placing_text = false;
+        self.error = None;
+        cx.notify();
+    }
+
+    /// Remove one note by its runtime id; notes are never persisted.
+    pub fn remove_text(&mut self, workspace_id: WorkspaceId, id: u64, cx: &mut Context<Self>) {
+        if let Some(notes) = self.notes.get_mut(&workspace_id) {
+            notes.retain(|(note_id, _)| *note_id != id);
+        }
+        cx.notify();
     }
 
     pub fn add_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -493,6 +577,8 @@ impl Render for Canvas {
         let zoom = self.zoom;
         let offset_x = self.offset_x;
         let offset_y = self.offset_y;
+        let placing_text = self.placing_text;
+        let submenu = self.submenu;
         let drawer_width = self.drawer.read(cx).drawer_width();
         let context_menu = self.context_menu.map(|position| {
             (
@@ -513,6 +599,19 @@ impl Render for Canvas {
         } else {
             add.disabled(true)
         };
+        let add_note = ComponentButton::new("add-text-card")
+            .tooltip("Adicionar bloco de texto")
+            .child(canvas_icon("note.svg"))
+            .w(px(28.0))
+            .h(px(28.0))
+            .p_0()
+            .rounded(px(8.0))
+            .with_variant(ButtonVariant::Ghost);
+        let add_note = if active.is_some() {
+            add_note.on_click(cx.listener(|this, _, _, cx| this.begin_text_placement(cx)))
+        } else {
+            add_note.disabled(true)
+        };
         let remove = ComponentButton::new("remove-selected")
             .tooltip("Apagar selecionado")
             .child(canvas_icon("trash.svg"))
@@ -529,6 +628,15 @@ impl Render for Canvas {
                 group
                     .iter()
                     .map(|(_, card)| div().child(card.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let notes: Vec<_> = active
+            .and_then(|id| self.notes.get(&id))
+            .map(|group| {
+                group
+                    .iter()
+                    .map(|(_, note)| div().child(note.clone()))
                     .collect()
             })
             .unwrap_or_default();
@@ -562,6 +670,8 @@ impl Render for Canvas {
                                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
                                     window.prevent_default();
                                     this.placing = false;
+                                    this.placing_text = false;
+                                    this.submenu = false;
                                     this.context_menu = Some(event.position);
                                     cx.stop_propagation();
                                     cx.notify();
@@ -611,7 +721,8 @@ impl Render for Canvas {
                                 .size_full(),
                             )
                             .children(cards)
-                            .when(self.placing, |area| {
+                            .children(notes)
+                            .when(self.placing || self.placing_text, |area| {
                                 area.child(
                                     div()
                                         .absolute()
@@ -622,7 +733,11 @@ impl Render for Canvas {
                                         .on_mouse_down(
                                             MouseButton::Left,
                                             cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                                                this.place_terminal(event.position, window, cx);
+                                                if this.placing_text {
+                                                    this.place_text_at(event.position, window, cx);
+                                                } else {
+                                                    this.place_terminal(event.position, window, cx);
+                                                }
                                             }),
                                         )
                                         .child(
@@ -643,7 +758,11 @@ impl Render for Canvas {
                                                     div()
                                                         .text_xs()
                                                         .text_color(rgb(COLOR_FOREGROUND))
-                                                        .child("Clique no canvas para posicionar o terminal"),
+                                                        .child(if placing_text {
+                                                            "Clique no canvas para posicionar o bloco de texto"
+                                                        } else {
+                                                            "Clique no canvas para posicionar o terminal"
+                                                        }),
                                                 )
                                                 .child(
                                                     div()
@@ -675,6 +794,7 @@ impl Render for Canvas {
                                             MouseButton::Left,
                                             cx.listener(|this, _, _, cx| {
                                                 this.context_menu = None;
+                                                this.submenu = false;
                                                 cx.notify();
                                             }),
                                         ),
@@ -702,11 +822,17 @@ impl Render for Canvas {
                                                 .px(px(SPACE_NORMAL))
                                                 .rounded(px(RADIUS_CHIP))
                                                 .hover(|style| style.bg(rgb(COLOR_BORDER)))
+                                                .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                                                    if *hovered {
+                                                        this.submenu = true;
+                                                        cx.notify();
+                                                    }
+                                                }))
                                                 .on_mouse_down(
                                                     MouseButton::Left,
                                                     cx.listener(|this, _, _, cx| {
-                                                        this.context_menu = None;
-                                                        this.begin_placement(cx);
+                                                        this.submenu = true;
+                                                        cx.notify();
                                                     }),
                                                 )
                                                 .child(
@@ -724,6 +850,82 @@ impl Render for Canvas {
                                                 ),
                                         ),
                                 )
+                                .when(submenu, |area| {
+                                    area.child(
+                                        div()
+                                            .absolute()
+                                            .left(px(x + CONTEXT_MENU_WIDTH + SUBMENU_GAP))
+                                            .top(px(y))
+                                            .w(px(CONTEXT_MENU_WIDTH))
+                                            .flex()
+                                            .flex_col()
+                                            .p(px(SPACE_TIGHT))
+                                            .rounded(px(RADIUS_CONTROL))
+                                            .bg(rgb(COLOR_ELEVATED))
+                                            .border_1()
+                                            .border_color(rgb(COLOR_BORDER))
+                                            .child(
+                                                div()
+                                                    .id("context-add-terminal-option")
+                                                    .h(px(CONTEXT_MENU_ITEM_HEIGHT))
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap(px(SPACE_NORMAL))
+                                                    .px(px(SPACE_NORMAL))
+                                                    .rounded(px(RADIUS_CHIP))
+                                                    .hover(|style| style.bg(rgb(COLOR_BORDER)))
+                                                    .on_mouse_down(
+                                                        MouseButton::Left,
+                                                        cx.listener(|this, _, _, cx| {
+                                                            this.begin_placement(cx);
+                                                        }),
+                                                    )
+                                                    .child(
+                                                        svg()
+                                                            .path("terminal.svg")
+                                                            .w(px(ICON_SIZE))
+                                                            .h(px(ICON_SIZE))
+                                                            .text_color(rgb(COLOR_FOREGROUND)),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_sm()
+                                                            .text_color(rgb(COLOR_FOREGROUND))
+                                                            .child("Terminal"),
+                                                    ),
+                                            )
+                                            .child(
+                                                div()
+                                                    .id("context-add-text-option")
+                                                    .h(px(CONTEXT_MENU_ITEM_HEIGHT))
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap(px(SPACE_NORMAL))
+                                                    .px(px(SPACE_NORMAL))
+                                                    .rounded(px(RADIUS_CHIP))
+                                                    .hover(|style| style.bg(rgb(COLOR_BORDER)))
+                                                    .on_mouse_down(
+                                                        MouseButton::Left,
+                                                        cx.listener(|this, _, _, cx| {
+                                                            this.begin_text_placement(cx);
+                                                        }),
+                                                    )
+                                                    .child(
+                                                        svg()
+                                                            .path("note.svg")
+                                                            .w(px(ICON_SIZE))
+                                                            .h(px(ICON_SIZE))
+                                                            .text_color(rgb(COLOR_FOREGROUND)),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_sm()
+                                                            .text_color(rgb(COLOR_FOREGROUND))
+                                                            .child("Bloco de texto"),
+                                                    ),
+                                            ),
+                                    )
+                                })
                             }),
                     ),
             )
@@ -749,6 +951,7 @@ impl Render for Canvas {
                             .border_1()
                             .border_color(rgb(COLOR_BORDER))
                             .child(add)
+                            .child(add_note)
                             .child(remove),
                     )
                     .when(active.is_none(), |column| {

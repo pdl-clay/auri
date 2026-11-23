@@ -12,6 +12,9 @@ pub const COLOR_DANGER: u32 = 0xE06C63;
 pub const COLOR_SELECTION: u32 = 0x7E96AE;
 pub const COLOR_GRID: u32 = 0x2D2F32;
 pub const COLOR_SUBTLE: u32 = 0x424446;
+pub const COLOR_NOTE_BG: u32 = 0xD8CBA6;
+pub const COLOR_NOTE_FG: u32 = 0x2A2721;
+pub const COLOR_NOTE_PLACEHOLDER: u32 = 0x6B6553;
 pub const COLOR_SUCCESS: u32 = 0x6F9E7A;
 
 // Workspace row (translucent gray, not a solid accent).
@@ -54,6 +57,10 @@ pub const GRID_STEP: f32 = 24.;
 // Context menu.
 pub const CONTEXT_MENU_WIDTH: f32 = 180.;
 pub const CONTEXT_MENU_ITEM_HEIGHT: f32 = 32.;
+pub const SUBMENU_GAP: f32 = 4.;
+pub const TEXT_CARD_WIDTH: f32 = 320.;
+pub const TEXT_CARD_HEIGHT: f32 = 220.;
+pub const TEXT_CARD_PADDING: f32 = 12.;
 
 use canvas_types::WorkspaceColor;
 

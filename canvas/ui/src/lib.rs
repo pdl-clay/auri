@@ -5,6 +5,7 @@ pub mod card;
 pub mod config;
 pub mod pty;
 pub mod theme;
+pub mod text_card;
 pub mod workspaces;
 
 use auro::{App, assets::EmbeddedAssets, gpui::AppContext};
@@ -27,6 +28,7 @@ pub fn run() {
             ("x.svg", include_bytes!("../../icons/x.svg")),
             ("terminal.svg", include_bytes!("../../icons/terminal.svg")),
             ("trash.svg", include_bytes!("../../icons/trash.svg")),
+            ("note.svg", include_bytes!("../../icons/note.svg")),
         ]))
         .setup(|cx, _| {
             gpui_component::init(cx);
