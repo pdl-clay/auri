@@ -403,6 +403,7 @@ impl Render for TerminalCard {
         let entity_id = cx.entity_id();
         let scroll_canvas = self.canvas.clone();
         let zoom = self.view_zoom;
+        let dragging = self.drag.is_some();
         let agent = self.agent();
         let left = f32::from(self.bounds.origin.x) * zoom + self.view_offset_x;
         let top = f32::from(self.bounds.origin.y) * zoom + self.view_offset_y;
@@ -538,7 +539,11 @@ impl Render for TerminalCard {
                         }),
                     ),
             )
-            .child(div().flex_1().min_h_0().child(self.terminal.clone()))
+            .child(if dragging {
+                div().flex_1().min_h_0().bg(rgb(COLOR_BASE))
+            } else {
+                div().flex_1().min_h_0().child(self.terminal.clone())
+            })
             .child(
                 div()
                     .flex()
