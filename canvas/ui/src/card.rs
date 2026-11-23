@@ -1,6 +1,6 @@
 //! A draggable, resizable frame around one PTY-backed terminal.
 use std::path::PathBuf;
-
+use std::time::{Duration, Instant};
 use auro::gpui::{
     App, Bounds, Context, CursorStyle, Div, DragMoveEvent, Edges, Entity, EntityId, MouseButton,
     MouseDownEvent, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, Size, Stateful,
@@ -15,6 +15,9 @@ use crate::canvas::{Canvas, card_bounds};
 use crate::pty::{BatchedReader, PtySession};
 use crate::theme::*;
 
+
+/// At most one terminal repaint per display frame while dragging.
+const DRAG_NOTIFY_INTERVAL: Duration = Duration::from_millis(16);
 /// Columns and rows that fit a monospace grid in the given pixel rectangle.
 pub fn grid_size(width_px: f32, height_px: f32, font_px: f32, line_height: f32) -> (u16, u16) {
     let cell_width = 0.6 * font_px;
@@ -104,6 +107,7 @@ pub struct TerminalCard {
     root: PathBuf,
     pty: PtySession,
     drag: Option<DragStart>,
+    last_drag_notify: Option<Instant>,
     view_zoom: f32,
     view_offset_x: f32,
     view_offset_y: f32,
@@ -173,6 +177,7 @@ impl TerminalCard {
             terminal,
             canvas,
             pty,
+            last_drag_notify: None,
             drag: None,
             root,
             view_zoom: 1.0,
@@ -246,14 +251,17 @@ impl TerminalCard {
 
     /// Apply the canvas zoom/pan to this card and its terminal font.
     pub fn set_view(&mut self, zoom: f32, offset_x: f32, offset_y: f32, cx: &mut Context<Self>) {
+        let zoom_changed = (self.view_zoom - zoom).abs() > 0.005;
         self.view_zoom = zoom;
         self.view_offset_x = offset_x;
         self.view_offset_y = offset_y;
-        self.terminal.update(cx, |terminal, cx| {
-            let mut config = terminal.config().clone();
-            config.font_size = px(FONT_TERMINAL * zoom);
-            terminal.update_config(config, cx);
-        });
+        if zoom_changed {
+            self.terminal.update(cx, |terminal, cx| {
+                let mut config = terminal.config().clone();
+                config.font_size = px(FONT_TERMINAL * zoom);
+                terminal.update_config(config, cx);
+            });
+        }
         cx.notify();
     }
 
@@ -264,6 +272,7 @@ impl TerminalCard {
             position,
             bounds: self.bounds,
         });
+        self.last_drag_notify = None;
     }
 
     fn apply_drag(
@@ -334,7 +343,14 @@ impl TerminalCard {
             self.terminal
                 .update(cx, |terminal, _| terminal.resize(cols as usize, rows as usize));
         }
-        cx.notify(entity_id);
+        let now = Instant::now();
+        let due = self
+            .last_drag_notify
+            .map_or(true, |last| now.duration_since(last) >= DRAG_NOTIFY_INTERVAL);
+        if due {
+            self.last_drag_notify = Some(now);
+            cx.notify(entity_id);
+        }
     }
 
     fn resize_handle(
@@ -384,6 +400,7 @@ impl TerminalCard {
     /// End any active move/resize gesture and restore the terminal body.
     pub fn end_drag(&mut self, cx: &mut Context<Self>) {
         if self.drag.take().is_some() {
+            self.last_drag_notify = None;
             cx.notify();
         }
     }
@@ -410,7 +427,6 @@ impl Render for TerminalCard {
         let entity_id = cx.entity_id();
         let scroll_canvas = self.canvas.clone();
         let zoom = self.view_zoom;
-        let dragging = self.drag.is_some();
         let agent = self.agent();
         let left = f32::from(self.bounds.origin.x) * zoom + self.view_offset_x;
         let top = f32::from(self.bounds.origin.y) * zoom + self.view_offset_y;
@@ -551,11 +567,7 @@ impl Render for TerminalCard {
                         }),
                     ),
             )
-            .child(if dragging {
-                div().flex_1().min_h_0().bg(rgb(COLOR_BASE))
-            } else {
-                div().flex_1().min_h_0().child(self.terminal.clone())
-            })
+            .child(div().flex_1().min_h_0().child(self.terminal.clone()))
             .child(
                 div()
                     .flex()
