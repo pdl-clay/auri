@@ -1192,11 +1192,27 @@ impl Canvas {
         self.ensure_custom_inputs(window, cx);
         self.sync_custom_inputs(window, cx);
         self.error = None;
+        let name_input = self.custom_name_input.clone();
+        let command_input = self.custom_command_input.clone();
+        let error = self.error.clone();
+        let icon = self
+            .custom_dialog
+            .as_ref()
+            .map(|form| form.icon)
+            .unwrap_or_default();
         let canvas = cx.weak_entity();
         window.open_dialog(cx, move |dialog, window, cx| {
-            custom_agent_dialog(dialog, window, cx, &canvas)
+            custom_agent_dialog(
+                dialog,
+                window,
+                cx,
+                &canvas,
+                name_input.clone(),
+                command_input.clone(),
+                error.clone(),
+                icon,
+            )
         });
-        cx.notify();
     }
 
     fn ensure_custom_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1764,21 +1780,13 @@ fn zoom_at(
 fn custom_agent_dialog(
     dialog: Dialog,
     window: &mut Window,
-    cx: &mut App,
+    _cx: &mut App,
     canvas: &WeakEntity<Canvas>,
+    name_input: Option<Entity<InputState>>,
+    command_input: Option<Entity<InputState>>,
+    error: Option<String>,
+    icon: AgentIcon,
 ) -> Dialog {
-    let Some(entity) = canvas.upgrade() else {
-        return dialog;
-    };
-    let (name_input, command_input, error, icon) = {
-        let state = entity.read(cx);
-        (
-            state.custom_name_input.clone(),
-            state.custom_command_input.clone(),
-            state.error.clone(),
-            state.custom_dialog.as_ref().map(|form| form.icon).unwrap_or_default(),
-        )
-    };
     let ok_canvas = canvas.clone();
     let cancel_canvas = canvas.clone();
     let close_canvas = canvas.clone();
