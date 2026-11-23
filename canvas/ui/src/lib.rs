@@ -4,6 +4,7 @@ pub mod canvas;
 pub mod card;
 pub mod config;
 pub mod pty;
+pub mod permissions;
 pub mod theme;
 pub mod text_card;
 pub mod workspaces;
