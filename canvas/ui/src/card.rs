@@ -71,7 +71,15 @@ fn resize_axis(
     from_start: bool,
 ) -> (f32, f32) {
     if from_start {
-        let step = delta.clamp(min_origin - origin, size - min_size);
+        let max_step = size - min_size;
+        let min_step = min_origin - origin;
+        // When the origin is already left of `min_origin`, the two limits cannot
+        // both hold: preserve the minimum size and let pan handle the origin.
+        let step = if min_step > max_step {
+            delta.min(max_step)
+        } else {
+            delta.clamp(min_step, max_step)
+        };
         (origin + step, size - step)
     } else {
         (origin, (size + delta).max(min_size))
@@ -710,5 +718,10 @@ mod tests {
         assert_eq!((origin, size), (8.0, 492.0));
         let (_, size) = resize_axis(100.0, 640.0, -40.0, 320.0, 8.0, false);
         assert_eq!(size, 600.0);
+    }
+    #[test]
+    fn resize_axis_tolerates_inverted_constraint_bounds() {
+        let (_, size) = resize_axis(-672.0, 935.0, -50.0, 320.0, 8.0, true);
+        assert!(size >= 320.0);
     }
 }
