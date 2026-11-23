@@ -474,10 +474,13 @@ impl Canvas {
                     .px(px(SPACE_NORMAL))
                     .rounded(px(RADIUS_CHIP))
                     .hover(|style| style.bg(rgb(COLOR_BORDER)))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.begin_agent_placement(kind, cx);
-                    }))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.begin_agent_placement(kind, cx);
+                        }),
+                    )
                     .child(
                         svg()
                             .path(agent_icon_path(icon))
@@ -504,10 +507,13 @@ impl Canvas {
                 .px(px(SPACE_NORMAL))
                 .rounded(px(RADIUS_CHIP))
                 .hover(|style| style.bg(rgb(COLOR_BORDER)))
-                .on_click(cx.listener(|this, _, window, cx| {
-                    cx.stop_propagation();
-                    this.open_custom_dialog(window, cx);
-                }))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.open_custom_dialog(window, cx);
+                    }),
+                )
                 .child(
                     svg()
                         .path("plus.svg")
