@@ -53,6 +53,7 @@ pub fn run() {
             let view = cx.new(|cx| canvas::Canvas::new(store.clone(), load.clone(), handle, cx));
             view.update(cx, |canvas, cx| canvas.bind_actions(cx));
             view.update(cx, |canvas, cx| canvas.prepare_workspaces(cx));
+            view.update(cx, |canvas, cx| canvas.start_fps_probe(window, cx));
             cx.new(|cx| gpui_component::Root::new(view, window, cx))
         })
         .run();

@@ -401,6 +401,7 @@ pub struct Canvas {
     drawer: Entity<WorkspaceDrawer>,
     cards: CardGroups,
     notes: NoteGroups,
+    fps: f32,
     error: Option<String>,
     placing: bool,
     /// Survives menu dismissal so an agent choice is never downgraded to a terminal.
@@ -432,6 +433,7 @@ impl Canvas {
             drawer,
             cards: HashMap::new(),
             notes: HashMap::new(),
+            fps: 0.0,
             error: None,
             placing: false,
             pending_agent: None,
@@ -450,6 +452,44 @@ impl Canvas {
             custom_name_subscription: None,
             custom_command_subscription: None,
         }
+    }
+
+    /// Start a frame counter that repaints the badge once per second.
+    pub fn start_fps_probe(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let weak = cx.entity().downgrade();
+        let frames = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let last = std::rc::Rc::new(std::cell::RefCell::new(std::time::Instant::now()));
+        window.on_next_frame(move |window, _| {
+            let weak = weak.clone();
+            window.on_next_frame(move |window, _| {
+                Self::schedule_fps_probe(window, weak, frames, last);
+            });
+        });
+    }
+
+    fn schedule_fps_probe(
+        window: &mut Window,
+        canvas: WeakEntity<Self>,
+        frames: std::rc::Rc<std::cell::Cell<usize>>,
+        last: std::rc::Rc<std::cell::RefCell<std::time::Instant>>,
+    ) {
+        window.on_next_frame(move |window, app| {
+            frames.set(frames.get() + 1);
+            let now = std::time::Instant::now();
+            let elapsed = now.duration_since(*last.borrow());
+            if elapsed >= std::time::Duration::from_secs(1) {
+                let fps = frames.get() as f32 / elapsed.as_secs_f32();
+                if let Some(entity) = canvas.upgrade() {
+                    entity.update(app, |this, cx| {
+                        this.fps = fps;
+                        cx.notify();
+                    });
+                }
+                frames.set(0);
+                *last.borrow_mut() = now;
+            }
+            Self::schedule_fps_probe(window, canvas.clone(), frames.clone(), last.clone());
+        });
     }
 
     /// Resolve the label, command and icon actually used by an agent kind.
@@ -1933,6 +1973,7 @@ impl Render for Canvas {
         let offset_x = self.offset_x;
         let offset_y = self.offset_y;
         let placing_text = self.placing_text;
+        let fps = self.fps;
         let submenu = self.menu.submenu;
         let agent_list = self.menu.agent_list;
         let agent_list_anchor = self.menu.agent_list_anchor;
@@ -2116,6 +2157,30 @@ impl Render for Canvas {
                             )
                             .children(cards)
                             .children(notes)
+                            .child(
+                                div()
+                                    .absolute()
+                                    .left(px(SPACE_PANEL))
+                                    .top(px(SPACE_PANEL))
+                                    .w(px(FPS_BADGE_WIDTH))
+                                    .rounded(px(RADIUS_CHIP))
+                                    .border_1()
+                                    .border_color(rgb(COLOR_BORDER))
+                                    .bg(rgb(COLOR_ELEVATED))
+                                    .px_2()
+                                    .py_1()
+                                    .text_xs()
+                                    .text_color(rgb(COLOR_MUTED))
+                                    .child(format!("{fps:.0} FPS"))
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        |_, _, cx| cx.stop_propagation(),
+                                    )
+                                    .on_mouse_down(
+                                        MouseButton::Right,
+                                        |_, _, cx| cx.stop_propagation(),
+                                    ),
+                            )
                             .when(self.placing || self.placing_text, |area| {
                                 area.child(
                                     div()
