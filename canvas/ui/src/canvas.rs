@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use auro::gpui::{
-    AnyWindowHandle, Bounds, Context, CursorStyle, Entity, MouseButton, MouseDownEvent, Pixels, Point, Render,
+    AnyElement, AnyWindowHandle, Bounds, ClickEvent, Context, CursorStyle, Entity, MouseButton, MouseDownEvent, Pixels, Point, Render,
     ScrollWheelEvent, Size, Subscription, Window, canvas, fill, px, rgb, svg,
 };
 use auro::prelude::*;
@@ -13,7 +13,7 @@ use gpui_component::{
     button::{Button as ComponentButton, ButtonVariant, ButtonVariants as _},
 };
 use gpui_component::input::{Input, InputEvent, InputState};
-use canvas_types::{AgentKind, AgentState, CardBounds, NoteState, TerminalId, TerminalState, WorkspaceColor, WorkspaceIcon, WorkspaceId, WorkspaceState, WorkspaceStore};
+use canvas_types::{AgentIcon, AgentKind, AgentState, CardBounds, NoteState, TerminalId, TerminalState, WorkspaceColor, WorkspaceIcon, WorkspaceId, WorkspaceState, WorkspaceStore};
 
 use crate::card::{TerminalCard, scroll_delta, terminal_grid};
 use crate::text_card::TextCard;
@@ -34,6 +34,9 @@ struct MenuState {
     context_menu: Option<Point<Pixels>>,
     submenu: bool,
     agent_list: bool,
+    /// Canvas-local top-left of the agent list when opened from the island;
+    /// `None` means the list is anchored to the context menu's `Adicionar`.
+    agent_list_anchor: Option<Point<Pixels>>,
     placing_agent: Option<AgentKind>,
 }
 
@@ -45,6 +48,13 @@ impl MenuState {
     fn open_context_menu(&mut self, position: Point<Pixels>) {
         self.close();
         self.context_menu = Some(position);
+    }
+
+    /// Open the same agent list from the right-side island button.
+    fn open_island_agent_list(&mut self, anchor: Point<Pixels>) {
+        self.close();
+        self.agent_list = true;
+        self.agent_list_anchor = Some(anchor);
     }
 
     fn begin_placement(&mut self, kind: Option<AgentKind>) {
@@ -94,6 +104,60 @@ struct AgentMenu {
     kind: AgentKind,
     original_name: String,
     original_kind: AgentKind,
+}
+
+/// Items of the empty-canvas `Adicionar` submenu, in display order.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum AddOption {
+    Agent,
+    Terminal,
+    Note,
+}
+
+const ADD_OPTIONS: [AddOption; 3] = [AddOption::Agent, AddOption::Terminal, AddOption::Note];
+
+impl AddOption {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Agent => "Agente",
+            Self::Terminal => "Terminal",
+            Self::Note => "Bloco de texto",
+        }
+    }
+
+    fn icon(self) -> &'static str {
+        match self {
+            Self::Agent => agent_icon_path(AgentIcon::Claude),
+            Self::Terminal => "terminal.svg",
+            Self::Note => "note.svg",
+        }
+    }
+}
+
+/// Transient state of the "Adicionar agente" dialog opened from an agent list.
+#[derive(Clone, Debug)]
+struct CustomAgentDialog {
+    position: Point<Pixels>,
+    name: String,
+    command: String,
+    icon: AgentIcon,
+}
+
+/// Agent-list order: the five built-ins, then user-defined agents.
+fn all_agent_kinds(store: &WorkspaceStore) -> Vec<AgentKind> {
+    AgentKind::ALL
+        .into_iter()
+        .chain(store.custom_agents().iter().map(|agent| agent.kind()))
+        .collect()
+}
+
+fn new_custom_dialog(position: Point<Pixels>) -> CustomAgentDialog {
+    CustomAgentDialog {
+        position,
+        name: String::new(),
+        command: String::new(),
+        icon: AgentIcon::Claude,
+    }
 }
 
 /// The store is the persisted state: cards and notes stay in it, and the
@@ -271,6 +335,7 @@ fn active_spawn_target(
 /// Allocate an agent card from the same id space as terminals and notes.
 fn active_agent_target(
     store: &mut WorkspaceStore,
+    name: String,
     kind: AgentKind,
     bounds: CardBounds,
 ) -> Result<(WorkspaceId, TerminalId, PathBuf), SpawnTargetError> {
@@ -279,7 +344,7 @@ fn active_agent_target(
         .workspace_mut(workspace_id)
         .expect("active workspace")
         .canvas
-        .add_agent(kind, bounds)
+        .add_agent_named(name, kind, bounds)
         .id;
     Ok((workspace_id, id, root))
 }
@@ -325,6 +390,11 @@ pub struct Canvas {
     agent_menu: Option<AgentMenu>,
     agent_name_input: Option<Entity<InputState>>,
     agent_name_subscription: Option<Subscription>,
+    custom_dialog: Option<CustomAgentDialog>,
+    custom_name_input: Option<Entity<InputState>>,
+    custom_command_input: Option<Entity<InputState>>,
+    custom_name_subscription: Option<Subscription>,
+    custom_command_subscription: Option<Subscription>,
 }
 impl Canvas {
     /// `load` is authoritative for the drawer banner; the store was already
@@ -349,7 +419,105 @@ impl Canvas {
             agent_menu: None,
             agent_name_input: None,
             agent_name_subscription: None,
+            custom_dialog: None,
+            custom_name_input: None,
+            custom_command_input: None,
+            custom_name_subscription: None,
+            custom_command_subscription: None,
         }
+    }
+
+    /// Resolve the label, command and icon actually used by an agent kind.
+    /// Built-ins are self-contained; custom agents live in the store.
+    fn agent_details(&self, kind: AgentKind) -> (String, String, AgentIcon) {
+        if let AgentKind::Custom(id) = kind {
+            if let Some(agent) = self.store.custom_agent(id) {
+                return (agent.name.clone(), agent.command.clone(), agent.icon);
+            }
+        }
+        (kind.label(), kind.command(), kind.icon())
+    }
+
+    /// Hierarchical agent list used by both the island and `Adicionar`.
+    fn agent_picker(&self, x: f32, y: f32, cx: &mut Context<Self>) -> impl IntoElement {
+        let kinds = all_agent_kinds(&self.store);
+        let mut options: Vec<AnyElement> = kinds
+            .into_iter()
+            .map(|kind| {
+                let (label, _, icon) = self.agent_details(kind);
+                div()
+                    .id(("agent-list-option", kind.id()))
+                    .h(px(CONTEXT_MENU_ITEM_HEIGHT))
+                    .flex()
+                    .items_center()
+                    .gap(px(SPACE_NORMAL))
+                    .px(px(SPACE_NORMAL))
+                    .rounded(px(RADIUS_CHIP))
+                    .hover(|style| style.bg(rgb(COLOR_BORDER)))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| this.begin_agent_placement(kind, cx)),
+                    )
+                    .child(
+                        svg()
+                            .path(agent_icon_path(icon))
+                            .w(px(ICON_SIZE))
+                            .h(px(ICON_SIZE))
+                            .text_color(rgb(agent_color(icon))),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(COLOR_FOREGROUND))
+                            .child(label),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        options.push(
+            div()
+                .id("agent-list-add-custom")
+                .h(px(CONTEXT_MENU_ITEM_HEIGHT))
+                .flex()
+                .items_center()
+                .gap(px(SPACE_NORMAL))
+                .px(px(SPACE_NORMAL))
+                .rounded(px(RADIUS_CHIP))
+                .hover(|style| style.bg(rgb(COLOR_BORDER)))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                        this.open_custom_dialog(event.position, window, cx);
+                    }),
+                )
+                .child(
+                    svg()
+                        .path("plus.svg")
+                        .w(px(ICON_SIZE))
+                        .h(px(ICON_SIZE))
+                        .text_color(rgb(COLOR_FOREGROUND)),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(COLOR_FOREGROUND))
+                        .child("Adicionar agente"),
+                )
+                .into_any_element(),
+        );
+        div()
+            .absolute()
+            .left(px(x))
+            .top(px(y))
+            .w(px(CONTEXT_MENU_WIDTH))
+            .flex()
+            .flex_col()
+            .p(px(SPACE_TIGHT))
+            .rounded(px(RADIUS_CONTROL))
+            .bg(rgb(COLOR_ELEVATED))
+            .border_1()
+            .border_color(rgb(COLOR_BORDER))
+            .children(options)
     }
 
     /// Wire drawer actions back to this canvas without creating a strong cycle.
@@ -551,6 +719,7 @@ impl Canvas {
         self.menu.begin_placement(None);
         self.error = None;
         self.agent_menu = None;
+        self.custom_dialog = None;
         cx.notify();
     }
 
@@ -561,6 +730,7 @@ impl Canvas {
         self.menu.begin_placement(None);
         self.error = None;
         self.agent_menu = None;
+        self.custom_dialog = None;
         cx.notify();
     }
 
@@ -568,6 +738,7 @@ impl Canvas {
         self.placing = false;
         self.placing_text = false;
         self.menu.close();
+        self.custom_dialog = None;
         cx.notify();
     }
     fn place_terminal(
@@ -712,13 +883,14 @@ impl Canvas {
         self.finish_store_change(cx);
     }
 
-    /// Enter placement mode for one of the five CLI agents.
+    /// Enter placement mode for one of the CLI agents, built-in or custom.
     pub fn begin_agent_placement(&mut self, kind: AgentKind, cx: &mut Context<Self>) {
         self.placing = true;
         self.placing_text = false;
         self.menu.begin_placement(Some(kind));
         self.error = None;
         self.agent_menu = None;
+        self.custom_dialog = None;
         cx.notify();
     }
 
@@ -731,6 +903,7 @@ impl Canvas {
         cx: &mut Context<Self>,
     ) {
         self.clear_note_selection(cx);
+        let (name, command, icon) = self.agent_details(kind);
         let origin = origin.unwrap_or_else(|| {
             self.cards
                 .get(&self.store.active().unwrap_or_default())
@@ -740,7 +913,7 @@ impl Canvas {
         });
         let bounds = Bounds::new(origin, Size::new(px(CARD_WIDTH), px(CARD_HEIGHT)));
         let saved = card_bounds(&bounds);
-        let (workspace_id, id, root) = match active_agent_target(&mut self.store, kind, saved) {
+        let (workspace_id, id, root) = match active_agent_target(&mut self.store, name.clone(), kind, saved) {
             Ok(target) => target,
             Err(error) => {
                 self.error = Some(error.message());
@@ -755,16 +928,16 @@ impl Canvas {
                 if let Some(workspace) = self.store.workspace_mut(workspace_id) {
                     workspace.canvas.remove_agent(id);
                 }
-                self.error = Some(format!("Agente {} não iniciou: {error}", kind.label()));
+                self.error = Some(format!("Agente {name} não iniciou: {error}"));
                 self.finish_store_change(cx);
                 return;
             }
         };
-        if let Err(error) = pty.send_line(kind.command()) {
+        if let Err(error) = pty.send_line(&command) {
             if let Some(workspace) = self.store.workspace_mut(workspace_id) {
                 workspace.canvas.remove_agent(id);
             }
-            self.error = Some(format!("Agente {} não iniciou: {error}", kind.label()));
+            self.error = Some(format!("Agente {name} não iniciou: {error}"));
             self.finish_store_change(cx);
             return;
         }
@@ -772,17 +945,11 @@ impl Canvas {
             workspace.mark_loaded();
         }
         self.error = None;
-        let name = self
-            .store
-            .workspace_mut(workspace_id)
-            .and_then(|workspace| workspace.canvas.agent(id))
-            .map(|agent| agent.name.clone())
-            .unwrap_or_else(|| kind.label().to_owned());
         let canvas = cx.entity().downgrade();
         let card = cx.new(|cx| {
             TerminalCard::new(id, workspace_id, bounds, canvas.clone(), root.clone(), pty, (cols, rows), cx)
         });
-        card.update(cx, |card, cx| card.set_agent(kind, name, cx));
+        card.update(cx, |card, cx| card.set_agent(kind, name, icon, cx));
         card.read(cx).terminal.read(cx).focus_handle().focus(window);
         let (zoom, offset_x, offset_y) = (self.zoom, self.offset_x, self.offset_y);
         card.update(cx, |card, cx| card.set_view(zoom, offset_x, offset_y, cx));
@@ -881,13 +1048,14 @@ impl Canvas {
         name: String,
         cx: &mut Context<Self>,
     ) {
+        let icon = self.agent_details(kind).2;
         if let Some(card) = self
             .cards
             .get(&workspace_id)
             .and_then(|group| group.iter().find(|(id, _)| *id == card_id))
             .map(|(_, card)| card)
         {
-            card.update(cx, |card, cx| card.set_agent(kind, name, cx));
+            card.update(cx, |card, cx| card.set_agent(kind, name, icon, cx));
         }
     }
 
@@ -924,6 +1092,116 @@ impl Canvas {
         self.agent_menu = None;
         self.error = None;
         self.finish_store_change(cx);
+    }
+
+    /// Open the "Adicionar agente" form at the point that was clicked.
+    fn open_custom_dialog(
+        &mut self,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.menu.close();
+        self.agent_menu = None;
+        self.custom_dialog = Some(new_custom_dialog(position));
+        self.ensure_custom_inputs(window, cx);
+        self.sync_custom_inputs(window, cx);
+        self.error = None;
+        cx.notify();
+    }
+
+    fn ensure_custom_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.custom_name_input.is_none() {
+            let state = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .default_value(String::new())
+                    .placeholder("Nome do agente")
+            });
+            self.custom_name_subscription = Some(cx.subscribe_in(
+                &state,
+                window,
+                |this, state, event: &InputEvent, _, cx| {
+                    if matches!(event, InputEvent::Change)
+                        && let Some(dialog) = this.custom_dialog.as_mut()
+                    {
+                        dialog.name = state.read(cx).value().to_string();
+                        cx.notify();
+                    }
+                },
+            ));
+            self.custom_name_input = Some(state);
+        }
+        if self.custom_command_input.is_none() {
+            let state = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .default_value(String::new())
+                    .placeholder("Comando para executar")
+            });
+            self.custom_command_subscription = Some(cx.subscribe_in(
+                &state,
+                window,
+                |this, state, event: &InputEvent, _, cx| {
+                    if matches!(event, InputEvent::Change)
+                        && let Some(dialog) = this.custom_dialog.as_mut()
+                    {
+                        dialog.command = state.read(cx).value().to_string();
+                        cx.notify();
+                    }
+                },
+            ));
+            self.custom_command_input = Some(state);
+        }
+    }
+
+    fn sync_custom_inputs(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(dialog) = self.custom_dialog.as_ref() else {
+            return;
+        };
+        for (state, value) in [
+            (&self.custom_name_input, dialog.name.as_str()),
+            (&self.custom_command_input, dialog.command.as_str()),
+        ] {
+            let Some(state) = state.clone() else {
+                continue;
+            };
+            if state.read(cx).value().as_str() != value {
+                let value = value.to_owned();
+                state.update(cx, |state, cx| state.set_value(value, window, cx));
+            }
+        }
+    }
+
+    fn select_custom_icon(&mut self, icon: AgentIcon, cx: &mut Context<Self>) {
+        if let Some(dialog) = self.custom_dialog.as_mut() {
+            dialog.icon = icon;
+            cx.notify();
+        }
+    }
+
+    fn close_custom_dialog(&mut self, cx: &mut Context<Self>) {
+        self.custom_dialog = None;
+        self.error = None;
+        cx.notify();
+    }
+
+    /// Save the reusable agent and immediately open its card in the active
+    /// workspace, using that workspace's root as the shell's working directory.
+    fn submit_custom_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(dialog) = self.custom_dialog.clone() else {
+            return;
+        };
+        let name = dialog.name.trim().to_owned();
+        let command = dialog.command.trim().to_owned();
+        if name.is_empty() || command.is_empty() {
+            self.error = Some("Informe o nome e o comando do agente.".into());
+            cx.notify();
+            return;
+        }
+        let custom = self
+            .store
+            .add_custom_agent(name, command, dialog.icon);
+        self.custom_dialog = None;
+        self.spawn_agent(custom.kind(), None, window, cx);
     }
 
     /// Commit geometry to the right persisted card type after a drag.
@@ -1287,20 +1565,21 @@ impl Canvas {
 
         for agent in agents {
             let bounds = pixel_bounds(agent.bounds);
+            let (_, command, icon) = self.agent_details(agent.kind);
             let (cols, rows) = terminal_grid(&bounds);
             let mut pty = if root_ok {
                 match PtySession::spawn_shell_in(cols, rows, Some(&root)) {
                     Ok(pty) => pty,
                     Err(error) => {
-                        self.error = Some(format!("Agente {} não iniciou: {error}", agent.kind.label()));
+                        self.error = Some(format!("Agente {} não iniciou: {error}", agent.name));
                         continue;
                     }
                 }
             } else {
                 continue;
             };
-            if let Err(error) = pty.send_line(agent.kind.command()) {
-                self.error = Some(format!("Agente {} não iniciou: {error}", agent.kind.label()));
+            if let Err(error) = pty.send_line(&command) {
+                self.error = Some(format!("Agente {} não iniciou: {error}", agent.name));
                 continue;
             }
             let card = cx.new(|cx| {
@@ -1316,7 +1595,7 @@ impl Canvas {
                 )
             });
             card.update(cx, |card, cx| {
-                card.set_agent(agent.kind, agent.name.clone(), cx);
+                card.set_agent(agent.kind, agent.name.clone(), icon, cx);
                 card.set_view(zoom, offset_x, offset_y, cx);
             });
             self.cards.entry(id).or_default().push((agent.id, card));
@@ -1389,6 +1668,10 @@ impl Render for Canvas {
         let placing_text = self.placing_text;
         let submenu = self.menu.submenu;
         let agent_list = self.menu.agent_list;
+        let agent_list_anchor = self.menu.agent_list_anchor;
+        let custom_dialog = self.custom_dialog.clone();
+        let custom_name_input = self.custom_name_input.clone();
+        let custom_command_input = self.custom_command_input.clone();
         let agent_menu = self.agent_menu.clone();
         let agent_name_input = self.agent_name_input.clone();
         let dialog_error = self.error.clone();
@@ -1403,6 +1686,12 @@ impl Render for Canvas {
             })
             .map(|workspace| workspace.root.to_string_lossy().into_owned())
             .unwrap_or_default();
+        let agent_kinds = all_agent_kinds(&self.store);
+        let edit_command = self
+            .agent_menu
+            .as_ref()
+            .map(|menu| self.agent_details(menu.kind).1)
+            .unwrap_or_default();
         let drawer_width = self.drawer.read(cx).drawer_width();
         let context_menu = self.menu.context_menu.map(|position| {
             (
@@ -1410,6 +1699,28 @@ impl Render for Canvas {
                 f32::from(position.y).max(SPACE_NORMAL),
             )
         });
+        let add_agent = ComponentButton::new("add-agent")
+            .tooltip("Adicionar agente")
+            .child(canvas_icon(agent_icon_path(AgentIcon::Claude)))
+            .w(px(28.0))
+            .h(px(28.0))
+            .p_0()
+            .rounded(px(8.0))
+            .with_variant(ButtonVariant::Ghost);
+        let add_agent = if active.is_some() {
+            add_agent.on_click(cx.listener(|this, event: &ClickEvent, _, cx| {
+                let drawer_width = this.drawer.read(cx).drawer_width();
+                let x = (f32::from(event.position().x) - drawer_width
+                    - CONTEXT_MENU_WIDTH - SUBMENU_GAP)
+                    .max(SPACE_NORMAL);
+                let y = f32::from(event.position().y).max(SPACE_NORMAL);
+                this.menu.open_island_agent_list(Point::new(px(x), px(y)));
+                this.custom_dialog = None;
+                cx.notify();
+            }))
+        } else {
+            add_agent.disabled(true)
+        };
         let add = ComponentButton::new("add-terminal")
             .tooltip("Adicionar terminal")
             .child(canvas_icon("terminal.svg"))
@@ -1496,6 +1807,7 @@ impl Render for Canvas {
                                     this.placing = false;
                                     this.placing_text = false;
                                     this.close_agent_menu(cx);
+                                    this.custom_dialog = None;
                                     this.menu.open_context_menu(event.position);
                                     cx.stop_propagation();
                                     cx.notify();
@@ -1622,6 +1934,7 @@ impl Render for Canvas {
                                             MouseButton::Left,
                                             cx.listener(|this, _, _, cx| {
                                                 this.menu.close();
+                                                this.custom_dialog = None;
                                                 cx.notify();
                                             }),
                                         ),
@@ -1691,9 +2004,9 @@ impl Render for Canvas {
                                             .bg(rgb(COLOR_ELEVATED))
                                             .border_1()
                                             .border_color(rgb(COLOR_BORDER))
-                                            .child(
+                                            .children(ADD_OPTIONS.into_iter().map(|option| {
                                                 div()
-                                                    .id("context-add-terminal-option")
+                                                    .id(("context-add-option", option as u64))
                                                     .h(px(CONTEXT_MENU_ITEM_HEIGHT))
                                                     .flex()
                                                     .items_center()
@@ -1701,15 +2014,28 @@ impl Render for Canvas {
                                                     .px(px(SPACE_NORMAL))
                                                     .rounded(px(RADIUS_CHIP))
                                                     .hover(|style| style.bg(rgb(COLOR_BORDER)))
+                                                    .when(option == AddOption::Agent, |item| {
+                                                        item.on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                                                            if *hovered {
+                                                                this.menu.agent_list = true;
+                                                                cx.notify();
+                                                            }
+                                                        }))
+                                                    })
                                                     .on_mouse_down(
                                                         MouseButton::Left,
-                                                        cx.listener(|this, _, _, cx| {
-                                                            this.begin_placement(cx);
+                                                        cx.listener(move |this, _, _, cx| match option {
+                                                            AddOption::Agent => {
+                                                                this.menu.agent_list = true;
+                                                                cx.notify();
+                                                            }
+                                                            AddOption::Terminal => this.begin_placement(cx),
+                                                            AddOption::Note => this.begin_text_placement(cx),
                                                         }),
                                                     )
                                                     .child(
                                                         svg()
-                                                            .path("terminal.svg")
+                                                            .path(option.icon())
                                                             .w(px(ICON_SIZE))
                                                             .h(px(ICON_SIZE))
                                                             .text_color(rgb(COLOR_FOREGROUND)),
@@ -1718,125 +2044,43 @@ impl Render for Canvas {
                                                         div()
                                                             .text_sm()
                                                             .text_color(rgb(COLOR_FOREGROUND))
-                                                            .child("Terminal"),
-                                                    ),
-                                            )
-                                            .child(
-                                                div()
-                                                    .id("context-add-text-option")
-                                                    .h(px(CONTEXT_MENU_ITEM_HEIGHT))
-                                                    .flex()
-                                                    .items_center()
-                                                    .gap(px(SPACE_NORMAL))
-                                                    .px(px(SPACE_NORMAL))
-                                                    .rounded(px(RADIUS_CHIP))
-                                                    .hover(|style| style.bg(rgb(COLOR_BORDER)))
-                                                    .on_mouse_down(
-                                                        MouseButton::Left,
-                                                        cx.listener(|this, _, _, cx| {
-                                                            this.begin_text_placement(cx);
-                                                        }),
+                                                            .child(option.label()),
                                                     )
-                                                    .child(
-                                                        svg()
-                                                            .path("note.svg")
-                                                            .w(px(ICON_SIZE))
-                                                            .h(px(ICON_SIZE))
-                                                            .text_color(rgb(COLOR_FOREGROUND)),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .text_sm()
-                                                            .text_color(rgb(COLOR_FOREGROUND))
-                                                            .child("Bloco de texto"),
-                                                    ),
-                                            )
-                                            .child(
-                                                div()
-                                                    .id("context-add-agent-option")
-                                                    .h(px(CONTEXT_MENU_ITEM_HEIGHT))
-                                                    .flex()
-                                                    .items_center()
-                                                    .gap(px(SPACE_NORMAL))
-                                                    .px(px(SPACE_NORMAL))
-                                                    .rounded(px(RADIUS_CHIP))
-                                                    .hover(|style| style.bg(rgb(COLOR_BORDER)))
-                                                    .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                                                        if *hovered {
-                                                            this.menu.agent_list = true;
-                                                            cx.notify();
-                                                        }
-                                                    }))
-                                                    .on_mouse_down(
-                                                        MouseButton::Left,
-                                                        cx.listener(|this, _, _, cx| {
-                                                            this.menu.agent_list = true;
-                                                            cx.notify();
-                                                        }),
-                                                    )
-                                                    .child(
-                                                        svg()
-                                                            .path(agent_icon_path(AgentKind::Claude))
-                                                            .w(px(ICON_SIZE))
-                                                            .h(px(ICON_SIZE))
-                                                            .text_color(rgb(COLOR_FOREGROUND)),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .text_sm()
-                                                            .text_color(rgb(COLOR_FOREGROUND))
-                                                            .child("Agente"),
-                                                    ),
-                                            ),
+                                            }))
                                     )
                                 })
                             })
+                            .when(agent_list && agent_list_anchor.is_some(), |area| {
+                                area.child(
+                                    div()
+                                        .absolute()
+                                        .left(px(0.0))
+                                        .top(px(0.0))
+                                        .size_full()
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(|this, _, _, cx| {
+                                                this.menu.close();
+                                                cx.notify();
+                                            }),
+                                        ),
+                                )
+                            })
                             .when(agent_list, |area| {
-                                area.when_some(context_menu, |area, (x, y)| {
-                                    area.child(
-                                        div()
-                                            .absolute()
-                                            .left(px(x + 2.0 * (CONTEXT_MENU_WIDTH + SUBMENU_GAP)))
-                                            .top(px(y))
-                                            .w(px(CONTEXT_MENU_WIDTH))
-                                            .flex()
-                                            .flex_col()
-                                            .p(px(SPACE_TIGHT))
-                                            .rounded(px(RADIUS_CONTROL))
-                                            .bg(rgb(COLOR_ELEVATED))
-                                            .border_1()
-                                            .border_color(rgb(COLOR_BORDER))
-                                            .children(AgentKind::ALL.into_iter().map(|kind| {
-                                                div()
-                                                    .id(("context-agent-option", kind as u64))
-                                                    .h(px(CONTEXT_MENU_ITEM_HEIGHT))
-                                                    .flex()
-                                                    .items_center()
-                                                    .gap(px(SPACE_NORMAL))
-                                                    .px(px(SPACE_NORMAL))
-                                                    .rounded(px(RADIUS_CHIP))
-                                                    .hover(|style| style.bg(rgb(COLOR_BORDER)))
-                                                    .on_mouse_down(
-                                                        MouseButton::Left,
-                                                        cx.listener(move |this, _, _, cx| {
-                                                            this.begin_agent_placement(kind, cx);
-                                                        }),
-                                                    )
-                                                    .child(
-                                                        svg()
-                                                            .path(agent_icon_path(kind))
-                                                            .w(px(ICON_SIZE))
-                                                            .h(px(ICON_SIZE))
-                                                            .text_color(rgb(agent_color(kind))),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .text_sm()
-                                                            .text_color(rgb(COLOR_FOREGROUND))
-                                                            .child(kind.label()),
-                                                    )
-                                            })),
-                                    )
+                                let anchor = agent_list_anchor.or_else(|| {
+                                    context_menu.map(|(x, y)| {
+                                        Point::new(
+                                            px(x + 2.0 * (CONTEXT_MENU_WIDTH + SUBMENU_GAP)),
+                                            px(y),
+                                        )
+                                    })
+                                });
+                                area.when_some(anchor, |area, anchor| {
+                                    area.child(self.agent_picker(
+                                        f32::from(anchor.x),
+                                        f32::from(anchor.y),
+                                        cx,
+                                    ))
                                 })
                             })
                             .when_some(agent_menu.clone(), |area, menu| {
@@ -1906,15 +2150,16 @@ impl Render for Canvas {
                                         )
                                         .child(
                                             div().flex().gap_2().children(
-                                                AgentKind::ALL.into_iter().map(|kind| {
+                                                agent_kinds.iter().copied().map(|kind| {
                                                     let selected = kind == menu.kind;
-                                                    ComponentButton::new(("agent-kind", kind as u64))
+                                                    let icon = self.agent_details(kind).2;
+                                                    ComponentButton::new(("agent-kind", kind.id()))
                                                         .child(
                                                             svg()
-                                                                .path(agent_icon_path(kind))
+                                                                .path(agent_icon_path(icon))
                                                                 .w(px(ICON_SIZE))
                                                                 .h(px(ICON_SIZE))
-                                                                .text_color(rgb(agent_color(kind))),
+                                                                .text_color(rgb(agent_color(icon))),
                                                         )
                                                         .w(px(AGENT_TILE_SIZE))
                                                         .h(px(AGENT_TILE_SIZE))
@@ -1922,7 +2167,7 @@ impl Render for Canvas {
                                                         .rounded(px(RADIUS_CONTROL))
                                                         .border_1()
                                                         .border_color(rgb(if selected {
-                                                            agent_color(kind)
+                                                            agent_color(icon)
                                                         } else {
                                                             COLOR_BORDER
                                                         }))
@@ -1956,7 +2201,7 @@ impl Render for Canvas {
                                             div()
                                                 .text_sm()
                                                 .text_color(rgb(COLOR_FOREGROUND))
-                                                .child(menu.kind.command()),
+                                                .child(edit_command.clone()),
                                         )
                                         .child(
                                             div()
@@ -2031,7 +2276,136 @@ impl Render for Canvas {
                                                 ),
                                         )
                                 })
-                            }),
+                            })
+                            .when_some(custom_dialog.clone(), |area, dialog| {
+                                let x = (f32::from(dialog.position.x) - drawer_width).max(SPACE_NORMAL);
+                                let y = f32::from(dialog.position.y).max(SPACE_NORMAL);
+                                let cancel = ComponentButton::new("custom-agent-cancel")
+                                    .label("Cancelar")
+                                    .with_variant(ButtonVariant::Ghost)
+                                    .on_click(cx.listener(|this, _, _, cx| this.close_custom_dialog(cx)));
+                                let submit = ComponentButton::new("custom-agent-submit")
+                                    .label("Adicionar")
+                                    .with_variant(ButtonVariant::Primary)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.submit_custom_agent(window, cx);
+                                    }));
+                                area.child(
+                                    div()
+                                        .absolute()
+                                        .left(px(0.0))
+                                        .top(px(0.0))
+                                        .size_full()
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(|this, _, _, cx| this.close_custom_dialog(cx)),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .left(px(x))
+                                        .top(px(y))
+                                        .w(px(AGENT_DIALOG_WIDTH))
+                                        .flex()
+                                        .flex_col()
+                                        .gap_3()
+                                        .p(px(SPACE_PANEL))
+                                        .rounded(px(RADIUS_DIALOG))
+                                        .border_1()
+                                        .border_color(rgb(COLOR_BORDER))
+                                        .bg(rgb(COLOR_PANEL))
+                                        .text_color(rgb(COLOR_FOREGROUND))
+                                        .child(
+                                            div()
+                                                .text_lg()
+                                                .text_color(rgb(COLOR_FOREGROUND))
+                                                .child("Adicionar agente"),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(rgb(COLOR_MUTED))
+                                                .child("Nome"),
+                                        )
+                                        .children(custom_name_input.iter().map(|state| {
+                                            Input::new(state)
+                                                .w_full()
+                                                .rounded(px(RADIUS_CONTROL))
+                                                .bg(rgb(COLOR_ELEVATED))
+                                                .border_color(rgb(COLOR_BORDER))
+                                        }))
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(rgb(COLOR_MUTED))
+                                                .child("Comando para executar"),
+                                        )
+                                        .children(custom_command_input.iter().map(|state| {
+                                            Input::new(state)
+                                                .w_full()
+                                                .rounded(px(RADIUS_CONTROL))
+                                                .bg(rgb(COLOR_ELEVATED))
+                                                .border_color(rgb(COLOR_BORDER))
+                                        }))
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(rgb(COLOR_MUTED))
+                                                .child("Ícone"),
+                                        )
+                                        .child(
+                                            div().flex().gap_2().children(
+                                                AgentIcon::ALL.into_iter().map(|icon| {
+                                                    let selected = icon == dialog.icon;
+                                                    ComponentButton::new(("custom-agent-icon", icon.kind().id()))
+                                                        .child(
+                                                            svg()
+                                                                .path(agent_icon_path(icon))
+                                                                .w(px(ICON_SIZE))
+                                                                .h(px(ICON_SIZE))
+                                                                .text_color(rgb(agent_color(icon))),
+                                                        )
+                                                        .w(px(AGENT_TILE_SIZE))
+                                                        .h(px(AGENT_TILE_SIZE))
+                                                        .p_0()
+                                                        .rounded(px(RADIUS_CONTROL))
+                                                        .border_1()
+                                                        .border_color(rgb(if selected {
+                                                            agent_color(icon)
+                                                        } else {
+                                                            COLOR_BORDER
+                                                        }))
+                                                        .bg(rgb(if selected {
+                                                            COLOR_ELEVATED
+                                                        } else {
+                                                            COLOR_PANEL
+                                                        }))
+                                                        .with_variant(ButtonVariant::Ghost)
+                                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                                            this.select_custom_icon(icon, cx);
+                                                        }))
+                                                }),
+                                            ),
+                                        )
+                                        .when_some(dialog_error.clone(), |form, error| {
+                                            form.child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(rgb(COLOR_DANGER))
+                                                    .child(error),
+                                            )
+                                        })
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .justify_end()
+                                                .gap_2()
+                                                .child(cancel)
+                                                .child(submit),
+                                        ),
+                                )
+                            })
                     ),
             )
             .child(
@@ -2055,6 +2429,7 @@ impl Render for Canvas {
                             .bg(rgb(COLOR_ELEVATED))
                             .border_1()
                             .border_color(rgb(COLOR_BORDER))
+                            .child(add_agent)
                             .child(add)
                             .child(add_note)
                             .child(remove),
@@ -2149,6 +2524,53 @@ mod tests {
         assert!(!menu.submenu);
         assert!(!menu.agent_list);
         assert_eq!(menu.placing_agent, Some(AgentKind::Codex));
+    }
+
+    #[test]
+    fn add_submenu_lists_agent_before_terminal_and_note() {
+        let labels: Vec<_> = ADD_OPTIONS.into_iter().map(AddOption::label).collect();
+        assert_eq!(labels, ["Agente", "Terminal", "Bloco de texto"]);
+        assert_eq!(ADD_OPTIONS[0], AddOption::Agent);
+        assert_eq!(ADD_OPTIONS[0].icon(), "agent-claude.svg");
+    }
+
+    #[test]
+    fn island_agent_list_uses_its_anchor_and_closes_with_the_menu() {
+        let mut menu = MenuState::default();
+        let anchor = Point::new(px(120.0), px(48.0));
+        menu.open_island_agent_list(anchor);
+
+        assert!(menu.agent_list);
+        assert_eq!(menu.agent_list_anchor, Some(anchor));
+        assert_eq!(menu.context_menu, None);
+
+        menu.open_context_menu(Point::new(px(12.0), px(24.0)));
+        assert_eq!(menu, MenuState {
+            context_menu: Some(Point::new(px(12.0), px(24.0))),
+            ..Default::default()
+        });
+    }
+
+    #[test]
+    fn custom_agents_are_appended_to_both_agent_lists() {
+        let mut store = WorkspaceStore::new();
+        let first = store.add_custom_agent("Primeiro".into(), "pi".into(), AgentIcon::Pi);
+        let second = store.add_custom_agent("Segundo".into(), "codex".into(), AgentIcon::Codex);
+
+        let kinds = all_agent_kinds(&store);
+        assert_eq!(kinds.len(), 7);
+        assert_eq!(&kinds[..5], &AgentKind::ALL);
+        assert_eq!(kinds[5], first.kind());
+        assert_eq!(kinds[6], second.kind());
+    }
+
+    #[test]
+    fn custom_dialog_starts_empty_with_the_default_icon() {
+        let dialog = new_custom_dialog(Point::new(px(10.0), px(20.0)));
+        assert_eq!(dialog.position, Point::new(px(10.0), px(20.0)));
+        assert!(dialog.name.is_empty());
+        assert!(dialog.command.is_empty());
+        assert_eq!(dialog.icon, AgentIcon::Claude);
     }
 
     #[test]
@@ -2369,7 +2791,7 @@ mod tests {
         let mut groups = groups_for(&store);
 
         let (workspace_id, id, root) =
-            active_agent_target(&mut store, AgentKind::Pi, bounds).unwrap();
+            active_agent_target(&mut store, AgentKind::Pi.label(), AgentKind::Pi, bounds).unwrap();
         assert_eq!(workspace_id, workspace.id);
         assert_eq!(root, workspace.root);
         assert_eq!(id, 1);
@@ -2381,7 +2803,7 @@ mod tests {
         assert!(remove_terminal_state(&mut store, &mut groups, workspace_id, id));
         assert!(store.workspace_mut(workspace_id).unwrap().canvas.agents().is_empty());
         assert_eq!(
-            active_agent_target(&mut store, AgentKind::Omp, bounds).unwrap().1,
+            active_agent_target(&mut store, AgentKind::Omp.label(), AgentKind::Omp, bounds).unwrap().1,
             2
         );
     }

@@ -5,7 +5,7 @@
 //! therefore cannot prevent the complete entries around it from being read.
 
 use anyhow::Context as _;
-use canvas_types::{WorkspaceId, WorkspaceIcon, WorkspaceState, WorkspaceStore};
+use canvas_types::{CustomAgent, WorkspaceId, WorkspaceIcon, WorkspaceState, WorkspaceStore};
 use serde::Deserialize;
 use serde_json::json;
 use std::ffi::OsString;
@@ -57,9 +57,17 @@ struct Header {
     active: Option<WorkspaceId>,
     #[serde(default = "default_next_id")]
     next_id: WorkspaceId,
+    #[serde(default)]
+    custom_agents: Vec<CustomAgent>,
+    #[serde(default = "default_next_custom_id")]
+    next_custom_id: u64,
 }
 
 fn default_next_id() -> WorkspaceId {
+    1
+}
+
+fn default_next_custom_id() -> u64 {
     1
 }
 
@@ -172,10 +180,32 @@ fn build_store(parsed: &Parsed) -> Result<WorkspaceStore, String> {
         .as_ref()
         .and_then(|header| header.active)
         .filter(|id| parsed.workspaces.iter().any(|workspace| workspace.id == *id));
+    let (custom_agents, next_custom_id) = parsed
+        .header
+        .as_ref()
+        .map(|header| (header.custom_agents.clone(), header.next_custom_id))
+        .unwrap_or_default();
+    let custom_floor = next_id.max(
+        parsed
+            .workspaces
+            .iter()
+            .map(|workspace| workspace.canvas.next_id())
+            .max()
+            .unwrap_or(1),
+    );
+    let next_custom_id = custom_agents
+        .iter()
+        .map(|agent| agent.id.saturating_add(1))
+        .max()
+        .unwrap_or(1)
+        .max(custom_floor)
+        .max(next_custom_id);
 
     let value = json!({
         "active": active,
         "next_id": next_id,
+        "custom_agents": custom_agents,
+        "next_custom_id": next_custom_id,
         "workspaces": &parsed.workspaces,
     });
     serde_json::from_value(value).map_err(|error| format!("invalid workspace entries: {error}"))
@@ -251,6 +281,8 @@ fn write_store(path: &Path, store: &WorkspaceStore) -> anyhow::Result<()> {
     let header = json!({
         "active": value["active"],
         "next_id": value["next_id"],
+        "custom_agents": value["custom_agents"],
+        "next_custom_id": value["next_custom_id"],
     });
     let workspaces = value["workspaces"]
         .as_array()
@@ -307,7 +339,7 @@ fn restart_at(store: &mut WorkspaceStore, path: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use canvas_types::{AgentKind, CardBounds, WorkspaceIcon, WorkspaceStore};
+    use canvas_types::{AgentIcon, AgentKind, CardBounds, WorkspaceIcon, WorkspaceStore};
     use std::fs;
     use std::path::{Path, PathBuf};
 
@@ -705,5 +737,39 @@ mod tests {
         });
         assert_eq!(note.id, 2);
         save_at(&loaded, &path).unwrap();
+    }
+
+    #[test]
+    fn save_then_load_preserves_custom_agents_and_allocator() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = config_file(dir.path());
+        let root = dir.path().join("root");
+        fs::create_dir_all(&root).unwrap();
+
+        let mut store = WorkspaceStore::new();
+        store.add("Canvas".into(), WorkspaceIcon::Star, root);
+        let agent = store.add_custom_agent(
+            "Meu agente".into(),
+            "opencode --model x".into(),
+            AgentIcon::Codex,
+        );
+        let bounds = CardBounds { x: 0.0, y: 0.0, width: 10.0, height: 10.0 };
+        store.active_mut().unwrap().canvas.add_agent_named(
+            agent.name.clone(),
+            agent.kind(),
+            bounds,
+        );
+
+        save_at(&store, &path).unwrap();
+
+        let mut loaded = WorkspaceStore::new();
+        assert_eq!(load_at(&mut loaded, &path), LoadOutcome::Loaded);
+        assert_eq!(loaded.custom_agents(), &[agent.clone()]);
+        assert_eq!(loaded.custom_agent(agent.id).unwrap().command, "opencode --model x");
+        assert_eq!(loaded.custom_agent(agent.id).unwrap().icon, AgentIcon::Codex);
+        assert_eq!(loaded.workspaces()[0].canvas.agents()[0].kind, agent.kind());
+
+        let next = loaded.add_custom_agent("Outro".into(), "pi".into(), AgentIcon::Pi);
+        assert!(next.id > agent.id);
     }
 }

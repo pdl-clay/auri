@@ -33,7 +33,45 @@ pub struct NoteState {
     pub bounds: CardBounds,
 }
 
-/// CLI agents that can own a canvas card.
+/// One of the five SVGs bundled with the app. Custom agents pick one of these.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AgentIcon {
+    Claude,
+    Codex,
+    Pi,
+    Omp,
+    OpenCode,
+}
+
+impl AgentIcon {
+    pub const ALL: [Self; 5] = [
+        Self::Claude,
+        Self::Codex,
+        Self::Pi,
+        Self::Omp,
+        Self::OpenCode,
+    ];
+
+    /// The built-in agent whose colours and mark this icon belongs to.
+    pub fn kind(self) -> AgentKind {
+        match self {
+            Self::Claude => AgentKind::Claude,
+            Self::Codex => AgentKind::Codex,
+            Self::Pi => AgentKind::Pi,
+            Self::Omp => AgentKind::Omp,
+            Self::OpenCode => AgentKind::OpenCode,
+        }
+    }
+}
+
+impl Default for AgentIcon {
+    fn default() -> Self {
+        Self::Claude
+    }
+}
+
+/// CLI agents that can own a canvas card. Custom agents are resolved by id
+/// through the workspace store, where their name, command and icon live.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AgentKind {
     Claude,
@@ -41,6 +79,7 @@ pub enum AgentKind {
     Pi,
     Omp,
     OpenCode,
+    Custom(u64),
 }
 
 impl AgentKind {
@@ -52,25 +91,53 @@ impl AgentKind {
         Self::OpenCode,
     ];
 
-    /// Label shown in menus, cards and the edit dialog.
-    pub fn label(self) -> &'static str {
+    /// Label shown in menus, cards and the edit dialog. Custom agents use
+    /// their saved name when resolved through the store.
+    pub fn label(self) -> String {
         match self {
-            Self::Claude => "Claude",
-            Self::Codex => "Codex",
-            Self::Pi => "Pi",
-            Self::Omp => "OMP",
-            Self::OpenCode => "Open Code",
+            Self::Claude => "Claude".into(),
+            Self::Codex => "Codex".into(),
+            Self::Pi => "Pi".into(),
+            Self::Omp => "OMP".into(),
+            Self::OpenCode => "Open Code".into(),
+            Self::Custom(id) => format!("Agente {id}"),
         }
     }
 
     /// Exact CLI command written to the PTY when the card is created.
-    pub fn command(self) -> &'static str {
+    /// Custom agents use their saved command when resolved through the store.
+    pub fn command(self) -> String {
         match self {
-            Self::Claude => "claude",
-            Self::Codex => "codex",
-            Self::Pi => "pi",
-            Self::Omp => "omp",
-            Self::OpenCode => "opencode",
+            Self::Claude => "claude".into(),
+            Self::Codex => "codex".into(),
+            Self::Pi => "pi".into(),
+            Self::Omp => "omp".into(),
+            Self::OpenCode => "opencode".into(),
+            Self::Custom(_) => String::new(),
+        }
+    }
+
+    /// Default mark; custom agents use the icon saved in the store.
+    pub fn icon(self) -> AgentIcon {
+        match self {
+            Self::Claude => AgentIcon::Claude,
+            Self::Codex => AgentIcon::Codex,
+            Self::Pi => AgentIcon::Pi,
+            Self::Omp => AgentIcon::Omp,
+            Self::OpenCode => AgentIcon::OpenCode,
+            Self::Custom(_) => AgentIcon::Claude,
+        }
+    }
+
+    /// Stable id for UI element keys, including custom agents.
+    pub fn id(self) -> u64 {
+        match self {
+            Self::Claude => 1,
+            Self::Codex => 2,
+            Self::Pi => 3,
+            Self::Omp => 4,
+            Self::OpenCode => 5,
+            Self::Custom(id) => id.saturating_add(16),
         }
     }
 }
@@ -78,6 +145,21 @@ impl AgentKind {
 impl Default for AgentKind {
     fn default() -> Self {
         Self::Claude
+    }
+}
+
+/// A user-defined agent, persisted once and reusable in every workspace.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CustomAgent {
+    pub id: u64,
+    pub name: String,
+    pub command: String,
+    pub icon: AgentIcon,
+}
+
+impl CustomAgent {
+    pub fn kind(&self) -> AgentKind {
+        AgentKind::Custom(self.id)
     }
 }
 
@@ -236,12 +318,22 @@ impl CanvasState {
 
     /// Allocate an agent from the same id space as terminals and notes.
     pub fn add_agent(&mut self, kind: AgentKind, bounds: CardBounds) -> AgentState {
+        self.add_agent_named(format!("{} {}", kind.label(), self.next_id), kind, bounds)
+    }
+
+    /// Allocate a card whose title comes from a custom agent's saved name.
+    pub fn add_agent_named(
+        &mut self,
+        name: String,
+        kind: AgentKind,
+        bounds: CardBounds,
+    ) -> AgentState {
         let id = self.next_id;
         self.next_id += 1;
         let agent = AgentState {
             id,
             kind,
-            name: format!("{} {id}", kind.label()),
+            name,
             bounds,
         };
         self.agents.push(agent.clone());
@@ -392,7 +484,7 @@ impl WorkspaceState {
     }
 }
 
-/// All workspaces plus the current selection and the id allocator.
+/// All workspaces plus the current selection and the id allocators.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceStore {
     #[serde(default)]
@@ -401,6 +493,14 @@ pub struct WorkspaceStore {
     active: Option<WorkspaceId>,
     #[serde(default = "default_next_id")]
     next_id: WorkspaceId,
+    #[serde(default)]
+    custom_agents: Vec<CustomAgent>,
+    #[serde(default = "default_next_custom_id")]
+    next_custom_id: u64,
+}
+
+fn default_next_custom_id() -> u64 {
+    1
 }
 
 impl WorkspaceStore {
@@ -409,6 +509,8 @@ impl WorkspaceStore {
             workspaces: Vec::new(),
             active: None,
             next_id: 1,
+            custom_agents: Vec::new(),
+            next_custom_id: 1,
         }
     }
 
@@ -478,6 +580,50 @@ impl WorkspaceStore {
 
     pub fn workspaces(&self) -> &[WorkspaceState] {
         &self.workspaces
+    }
+
+    pub fn custom_agents(&self) -> &[CustomAgent] {
+        &self.custom_agents
+    }
+
+    pub fn custom_agent(&self, id: u64) -> Option<&CustomAgent> {
+        self.custom_agents.iter().find(|agent| agent.id == id)
+    }
+
+    pub fn next_custom_id(&self) -> u64 {
+        self.next_custom_id
+    }
+
+    /// Keep custom ids above workspace ids and every card allocator, so a
+    /// custom agent can never be confused with a workspace, terminal or note.
+    pub fn reserve_custom_id_above(&mut self, id: u64) {
+        self.next_custom_id = self.next_custom_id.max(id.saturating_add(1));
+    }
+
+    /// Persist a reusable agent; its id comes from the dedicated allocator.
+    pub fn add_custom_agent(
+        &mut self,
+        name: String,
+        command: String,
+        icon: AgentIcon,
+    ) -> CustomAgent {
+        let floor = self
+            .workspaces
+            .iter()
+            .map(|workspace| workspace.canvas.next_id())
+            .max()
+            .unwrap_or(1)
+            .max(self.next_id);
+        let id = self.next_custom_id.max(floor);
+        self.reserve_custom_id_above(id);
+        let agent = CustomAgent {
+            id,
+            name,
+            command,
+            icon,
+        };
+        self.custom_agents.push(agent.clone());
+        agent
     }
 }
 
@@ -822,5 +968,53 @@ mod workspace_tests {
         assert_eq!(workspace.color, WorkspaceColor::Green);
         assert_eq!(workspace.root, PathBuf::from("/b"));
         assert!(!workspace.invalid_root);
+    }
+
+    #[test]
+    fn custom_agents_default_to_empty_and_round_trip() {
+        let old = r#"{"workspaces":[],"active":null,"next_id":3}"#;
+        let store: WorkspaceStore = serde_json::from_str(old).unwrap();
+        assert!(store.custom_agents().is_empty());
+        assert_eq!(store.next_custom_id(), 1);
+
+        let mut store = WorkspaceStore::new();
+        let agent = store.add_custom_agent(
+            "Meu agente".into(),
+            "opencode --model x".into(),
+            AgentIcon::Pi,
+        );
+        let encoded = serde_json::to_string(&store).unwrap();
+        let decoded: WorkspaceStore = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.custom_agents(), &[agent.clone()]);
+        assert_eq!(decoded.custom_agent(agent.id).unwrap().icon, AgentIcon::Pi);
+        assert_eq!(decoded.custom_agent(agent.id).unwrap().kind(), AgentKind::Custom(agent.id));
+    }
+
+    #[test]
+    fn custom_ids_never_collide_with_workspaces_or_cards() {
+        let mut store = WorkspaceStore::new();
+        let workspace = store.add("A".into(), WorkspaceIcon::Star, PathBuf::from("/a"));
+        let terminal = store.active_mut().unwrap().canvas.add();
+        let note = store.active_mut().unwrap().canvas.add_note("n".into(), CardBounds {
+            x: 0.0,
+            y: 0.0,
+            width: 10.0,
+            height: 10.0,
+        });
+
+        let first = store.add_custom_agent("A".into(), "a".into(), AgentIcon::Claude);
+        let second = store.add_custom_agent("B".into(), "b".into(), AgentIcon::Omp);
+        assert_ne!(first.id, second.id);
+        assert!(first.id > workspace.id);
+        assert!(first.id > store.active().unwrap_or_default());
+        for assigned in [terminal.id, note.id] {
+            assert_ne!(first.id, assigned);
+        }
+        assert!(first.id >= store.workspaces()[0].canvas.next_id());
+        assert_ne!(AgentKind::Custom(first.id).id(), AgentKind::Claude.id());
+
+        let mut restored = WorkspaceStore::new();
+        restored.reserve_custom_id_above(second.id);
+        assert_eq!(restored.add_custom_agent("C".into(), "c".into(), AgentIcon::Pi).id, second.id + 1);
     }
 }

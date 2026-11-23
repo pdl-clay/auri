@@ -9,7 +9,7 @@ use auro::gpui::{
 use auro::prelude::*;
 use portable_pty::PtySize;
 use gpui_terminal::{TerminalConfig, TerminalView};
-use canvas_types::{AgentKind, TerminalId, WorkspaceId};
+use canvas_types::{AgentIcon, AgentKind, TerminalId, WorkspaceId};
 
 use crate::canvas::{Canvas, card_bounds};
 use crate::pty::PtySession;
@@ -96,7 +96,7 @@ pub struct TerminalCard {
     pub workspace_id: WorkspaceId,
     pub bounds: Bounds<Pixels>,
     pub exited: bool,
-    agent: Option<(AgentKind, String)>,
+    agent: Option<(AgentKind, String, AgentIcon)>,
     pub selected: bool,
     pub terminal: Entity<TerminalView>,
     canvas: WeakEntity<Canvas>,
@@ -191,12 +191,18 @@ impl TerminalCard {
     }
 
     /// Attach or replace the agent shown in the card header.
-    pub fn set_agent(&mut self, kind: AgentKind, name: String, cx: &mut Context<Self>) {
-        self.agent = Some((kind, name));
+    pub fn set_agent(
+        &mut self,
+        kind: AgentKind,
+        name: String,
+        icon: AgentIcon,
+        cx: &mut Context<Self>,
+    ) {
+        self.agent = Some((kind, name, icon));
         cx.notify();
     }
 
-    pub fn agent(&self) -> Option<(AgentKind, String)> {
+    pub fn agent(&self) -> Option<(AgentKind, String, AgentIcon)> {
         self.agent.clone()
     }
 
@@ -441,14 +447,14 @@ impl Render for TerminalCard {
                             .flex()
                             .items_center()
                             .gap_2()
-                            .when_some(agent.clone(), |title, (kind, name)| {
+                            .when_some(agent.clone(), |title, (_kind, name, icon)| {
                                 title
                                     .child(
                                         svg()
-                                            .path(agent_icon_path(kind))
+                                            .path(agent_icon_path(icon))
                                             .w(px(ICON_SIZE))
                                             .h(px(ICON_SIZE))
-                                            .text_color(rgb(agent_color(kind))),
+                                            .text_color(rgb(agent_color(icon))),
                                     )
                                     .child(div().text_sm().child(name))
                             })

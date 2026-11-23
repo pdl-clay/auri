@@ -73,7 +73,7 @@ pub const TEXT_CARD_PADDING: f32 = 12.;
 pub const AGENT_DIALOG_WIDTH: f32 = 340.;
 pub const AGENT_TILE_SIZE: f32 = 32.;
 
-use canvas_types::{AgentKind, WorkspaceColor};
+use canvas_types::{AgentIcon, WorkspaceColor};
 
 /// Map a workspace's persisted color choice to a concrete swatch.
 pub fn workspace_color(color: WorkspaceColor) -> u32 {
@@ -86,23 +86,23 @@ pub fn workspace_color(color: WorkspaceColor) -> u32 {
 }
 
 /// Accent used for an agent's icon and menu tile.
-pub fn agent_color(kind: AgentKind) -> u32 {
-    match kind {
-        AgentKind::Claude => COLOR_AGENT_CLAUDE,
-        AgentKind::Codex => COLOR_AGENT_CODEX,
-        AgentKind::Pi => COLOR_AGENT_PI,
-        AgentKind::Omp => COLOR_AGENT_OMP,
-        AgentKind::OpenCode => COLOR_AGENT_OPEN_CODE,
+pub fn agent_color(icon: AgentIcon) -> u32 {
+    match icon {
+        AgentIcon::Claude => COLOR_AGENT_CLAUDE,
+        AgentIcon::Codex => COLOR_AGENT_CODEX,
+        AgentIcon::Pi => COLOR_AGENT_PI,
+        AgentIcon::Omp => COLOR_AGENT_OMP,
+        AgentIcon::OpenCode => COLOR_AGENT_OPEN_CODE,
     }
 }
 
 /// Embedded SVG matching the agent's mark.
-pub fn agent_icon_path(kind: AgentKind) -> &'static str {
-    match kind {
-        AgentKind::Claude => "agent-claude.svg",
-        AgentKind::Codex => "agent-codex.svg",
-        AgentKind::Pi => "agent-pi.svg",
-        AgentKind::Omp => "agent-omp.svg",
-        AgentKind::OpenCode => "agent-open-code.svg",
+pub fn agent_icon_path(icon: AgentIcon) -> &'static str {
+    match icon {
+        AgentIcon::Claude => "agent-claude.svg",
+        AgentIcon::Codex => "agent-codex.svg",
+        AgentIcon::Pi => "agent-pi.svg",
+        AgentIcon::Omp => "agent-omp.svg",
+        AgentIcon::OpenCode => "agent-open-code.svg",
     }
 }
