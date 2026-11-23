@@ -1,8 +1,8 @@
 //! Workspace drawer: filter, creation dialog and native directory picker.
 
 use auro::gpui::{
-    App, Context, Entity, MouseButton, PathPromptOptions, Render, Subscription, WeakEntity, Window,
-    div, px, rgb, svg,
+    App, Context, Entity, MouseButton, MouseDownEvent, PathPromptOptions, Pixels, Point, Render,
+    Subscription, WeakEntity, Window, div, px, rgb, svg,
 };
 use auro::prelude::*;
 use canvas_types::{WorkspaceIcon, WorkspaceId, WorkspaceState, WorkspaceStore};
@@ -63,7 +63,7 @@ pub struct WorkspaceDrawer {
     form_error: Option<String>,
     action_handler: Option<Box<dyn Fn(DrawerAction, &mut App)>>,
     restart_handler: Option<Box<dyn Fn(&WorkspaceStore, &mut App)>>,
-    context_menu: bool,
+    context_menu: Option<Point<Pixels>>,
 }
 
 impl WorkspaceDrawer {
@@ -86,7 +86,7 @@ impl WorkspaceDrawer {
             form_error: None,
             action_handler: None,
             restart_handler: None,
-            context_menu: false,
+            context_menu: None,
         }
     }
 
@@ -580,11 +580,24 @@ fn workspace_dialog(
         )
 }
 
+/// Keep the context menu inside the drawer and above the window bottom.
+fn menu_origin(position: Point<Pixels>, viewport_height: f32) -> (f32, f32) {
+    let max_x = DRAWER_WIDTH - CONTEXT_MENU_WIDTH - SPACE_TIGHT;
+    let max_y = viewport_height - CONTEXT_MENU_ITEM_HEIGHT - SPACE_WIDE - 2.0 * SPACE_TIGHT;
+    (
+        f32::from(position.x).clamp(SPACE_TIGHT, max_x),
+        f32::from(position.y).clamp(SPACE_TIGHT, max_y),
+    )
+}
+
 impl Render for WorkspaceDrawer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_inputs(window, cx);
         let active = self.store.active();
         let filter = self.filter.clone();
+        let context_menu = self
+            .context_menu
+            .map(|position| menu_origin(position, f32::from(window.viewport_size().height)));
         let rows: Vec<WorkspaceState> = self
             .store
             .workspaces()
@@ -611,9 +624,9 @@ impl Render for WorkspaceDrawer {
             .relative()
             .on_mouse_down(
                 MouseButton::Right,
-                cx.listener(|this, _, window, cx| {
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
                     window.prevent_default();
-                    this.context_menu = true;
+                    this.context_menu = Some(event.position);
                     cx.notify();
                 }),
             )
@@ -758,7 +771,7 @@ impl Render for WorkspaceDrawer {
                             ),
                     )
             }))
-            .when(self.context_menu, |this| {
+            .when_some(context_menu, |this, (x, y)| {
                 this.child(
                     div()
                         .absolute()
@@ -768,7 +781,7 @@ impl Render for WorkspaceDrawer {
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, _, _, cx| {
-                                this.context_menu = false;
+                                this.context_menu = None;
                                 cx.notify();
                             }),
                         ),
@@ -776,9 +789,9 @@ impl Render for WorkspaceDrawer {
                 .child(
                     div()
                         .absolute()
-                        .top(px(DRAWER_MENU_TOP))
-                        .left(px(SPACE_WIDE))
-                        .w(px(CONTEXT_MENU_WIDTH_WIDE))
+                        .top(px(y))
+                        .left(px(x))
+                        .w(px(CONTEXT_MENU_WIDTH))
                         .flex()
                         .flex_col()
                         .p(px(SPACE_TIGHT))
@@ -799,14 +812,14 @@ impl Render for WorkspaceDrawer {
                                 .on_mouse_down(
                                     MouseButton::Left,
                                     cx.listener(|this, _, window, cx| {
-                                        this.context_menu = false;
+                                        this.context_menu = None;
                                         this.open_create_dialog(window, cx);
                                     }),
                                 )
                                 .child(asset_icon("plus.svg", COLOR_FOREGROUND))
                                 .child(
                                     div()
-                                        .text_sm()
+                                        .text_xs()
                                         .text_color(rgb(COLOR_FOREGROUND))
                                         .child("Novo espaço de trabalho"),
                                 ),
@@ -821,12 +834,22 @@ mod tests {
     use canvas_types::{WorkspaceIcon, WorkspaceStore};
     use std::path::PathBuf;
 
-    use super::{LoadOutcome, apply_restart_result, filter_matches};
+    use super::{LoadOutcome, apply_restart_result, filter_matches, menu_origin};
+    use auro::gpui::{Point, px};
 
     #[test]
     fn empty_query_matches_every_name() {
         assert!(filter_matches("AURI", ""));
         assert!(filter_matches("", ""));
+    }
+
+    #[test]
+    fn drawer_menu_follows_click_and_stays_inside_drawer() {
+        assert_eq!(menu_origin(Point::new(px(30.0), px(140.0)), 900.0), (30.0, 140.0));
+        assert_eq!(
+            menu_origin(Point::new(px(900.0), px(890.0)), 900.0),
+            (224.0 - 180.0 - 4.0, 900.0 - 32.0 - 12.0 - 8.0)
+        );
     }
 
     #[test]
