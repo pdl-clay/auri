@@ -44,9 +44,10 @@ pub fn run() {
             theme.radius_lg = auro::gpui::px(crate::theme::RADIUS_DIALOG);
         })
         .root_with("main", move |window, cx| {
-            let view = cx.new(|cx| canvas::Canvas::new(store.clone(), load.clone(), cx));
+            let handle = window.window_handle();
+            let view = cx.new(|cx| canvas::Canvas::new(store.clone(), load.clone(), handle, cx));
             view.update(cx, |canvas, cx| canvas.bind_actions(cx));
-            view.update(cx, |canvas, cx| canvas.restore_cards(window, cx));
+            view.update(cx, |canvas, cx| canvas.prepare_workspaces(cx));
             cx.new(|cx| gpui_component::Root::new(view, window, cx))
         })
         .run();

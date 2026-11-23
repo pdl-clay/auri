@@ -169,11 +169,9 @@ impl CanvasState {
         &self.notes
     }
 
-    /// Drop every persisted card while keeping the id allocator ahead of old ids,
-    /// so a later reload never reuses an id from a previous session.
+    /// Forget the live selection without discarding the saved layout: unloading
+    /// ends the running shells, but clicking the workspace restores its cards.
     pub fn unload(&mut self) {
-        self.terminals.clear();
-        self.notes.clear();
         self.selected = None;
     }
 
@@ -226,15 +224,20 @@ pub struct WorkspaceState {
     pub invalid_root: bool,
     #[serde(default)]
     pub canvas: CanvasState,
-    /// True after "Descarregar": cards are gone and stay gone across restarts.
+    /// True while saved cards have no live entities (startup or after "Descarregar").
     #[serde(default)]
     pub unloaded: bool,
 }
 
 impl WorkspaceState {
-    /// End this workspace's cards and remember the unloaded state on disk.
+    /// Mark the workspace unloaded, keeping its saved cards for the next click.
     pub fn unload(&mut self) {
         self.canvas.unload();
+        self.unloaded = true;
+    }
+
+    /// Used at startup: the saved cards exist, but no live entity has been created.
+    pub fn mark_unloaded(&mut self) {
         self.unloaded = true;
     }
 
@@ -300,7 +303,7 @@ impl WorkspaceStore {
             invalid_root: false,
             color,
             canvas: CanvasState::new(),
-            unloaded: false,
+            unloaded: true,
         };
         self.workspaces.push(workspace.clone());
         self.active = Some(id);
@@ -319,6 +322,13 @@ impl WorkspaceStore {
     pub fn select(&mut self, id: WorkspaceId) {
         if self.workspaces.iter().any(|workspace| workspace.id == id) {
             self.active = Some(id);
+        }
+    }
+
+    /// Startup keeps every saved layout but drops all live cards.
+    pub fn mark_all_unloaded(&mut self) {
+        for workspace in &mut self.workspaces {
+            workspace.mark_unloaded();
         }
     }
 
@@ -461,6 +471,7 @@ mod workspace_tests {
         assert_eq!(a.icon, WorkspaceIcon::Star);
         assert_eq!(b.root, PathBuf::from("/tmp/repo"));
         assert!(!a.invalid_root);
+        assert!(a.unloaded);
         assert!(a.canvas.terminals().is_empty());
     }
 
@@ -514,27 +525,69 @@ mod workspace_tests {
     }
 
     #[test]
-    fn unloading_clears_cards_and_marking_loaded_clears_the_flag() {
+    fn unloading_keeps_saved_layout_and_marking_loaded_clears_the_flag() {
         let mut store = WorkspaceStore::new();
         let mut workspace = store.add("A".into(), WorkspaceIcon::Star, PathBuf::from("/a"));
-        workspace.canvas.add();
-        workspace.canvas.add_note("nota".into(), CardBounds {
-            x: 0.0,
-            y: 0.0,
+        workspace.mark_loaded();
+        let terminal = workspace.canvas.add();
+        let bounds = CardBounds {
+            x: 5.0,
+            y: 6.0,
             width: 10.0,
             height: 10.0,
-        });
+        };
+        workspace.canvas.set_terminal_bounds(terminal.id, bounds);
+        let note = workspace.canvas.add_note("nota".into(), bounds);
         let next_id = workspace.canvas.next_id();
 
         workspace.unload();
 
         assert!(workspace.unloaded);
-        assert!(workspace.canvas.terminals().is_empty());
-        assert!(workspace.canvas.notes().is_empty());
+        assert_eq!(workspace.canvas.selected(), None);
+        assert_eq!(workspace.canvas.terminals()[0].bounds, Some(bounds));
+        assert_eq!(workspace.canvas.notes()[0].text, "nota");
         assert_eq!(workspace.canvas.next_id(), next_id);
 
         workspace.mark_loaded();
         assert!(!workspace.unloaded);
+        assert_eq!(note.bounds, bounds);
+    }
+
+    #[test]
+    fn new_workspaces_start_unloaded_and_startup_marks_them_unloaded() {
+        let mut store = WorkspaceStore::new();
+        let first = store.add("A".into(), WorkspaceIcon::Star, PathBuf::from("/a"));
+        let second = store.add("B".into(), WorkspaceIcon::Bolt, PathBuf::from("/b"));
+        assert!(first.unloaded);
+        assert!(store.workspaces()[1].unloaded);
+
+        store.workspace_mut(second.id).unwrap().mark_loaded();
+        assert!(!store.workspaces()[1].unloaded);
+
+        store.mark_all_unloaded();
+
+        assert!(store.workspaces().iter().all(|workspace| workspace.unloaded));
+        assert_eq!(store.active(), Some(second.id));
+    }
+
+    #[test]
+    fn mark_all_unloaded_preserves_saved_layout() {
+        let mut store = WorkspaceStore::new();
+        let workspace = store.add("A".into(), WorkspaceIcon::Star, PathBuf::from("/a"));
+        let canvas = &mut store.workspace_mut(workspace.id).unwrap().canvas;
+        canvas.add();
+        canvas.add_note("nota".into(), CardBounds {
+            x: 0.0,
+            y: 0.0,
+            width: 10.0,
+            height: 10.0,
+        });
+
+        store.mark_all_unloaded();
+
+        let saved = &store.workspaces()[0].canvas;
+        assert_eq!(saved.terminals().len(), 1);
+        assert_eq!(saved.notes()[0].text, "nota");
     }
 
     #[test]

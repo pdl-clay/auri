@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use auro::gpui::{
-    Bounds, Context, CursorStyle, Entity, MouseButton, MouseDownEvent, Pixels, Point, Render,
+    AnyWindowHandle, Bounds, Context, CursorStyle, Entity, MouseButton, MouseDownEvent, Pixels, Point, Render,
     ScrollWheelEvent, Size, Window, canvas, fill, px, rgb, svg,
 };
 use auro::prelude::*;
@@ -12,7 +12,7 @@ use gpui_component::{
     Disableable,
     button::{Button as ComponentButton, ButtonVariant, ButtonVariants as _},
 };
-use canvas_types::{CardBounds, TerminalId, WorkspaceColor, WorkspaceIcon, WorkspaceId, WorkspaceState, WorkspaceStore};
+use canvas_types::{CardBounds, NoteState, TerminalId, TerminalState, WorkspaceColor, WorkspaceIcon, WorkspaceId, WorkspaceState, WorkspaceStore};
 
 use crate::card::{TerminalCard, scroll_delta, terminal_grid};
 use crate::text_card::TextCard;
@@ -119,6 +119,34 @@ fn unload_workspace(store: &mut WorkspaceStore, id: WorkspaceId) -> bool {
     true
 }
 
+/// Saved data needed to rebuild a workspace's live cards after a click.
+struct WorkspaceLayout {
+    root: PathBuf,
+    root_ok: bool,
+    terminals: Vec<TerminalState>,
+    notes: Vec<NoteState>,
+}
+
+/// Select a workspace and clear its unloaded flag, returning the saved layout
+/// the GPUI side must rebuild. Already-loaded workspaces need no rebuild.
+fn begin_workspace_load(store: &mut WorkspaceStore, id: WorkspaceId) -> Option<WorkspaceLayout> {
+    let workspace = store.workspace_mut(id)?;
+    if !workspace.unloaded {
+        return None;
+    }
+    workspace.mark_loaded();
+    store.select(id);
+    let workspace = store.workspace_mut(id)?;
+    Some(WorkspaceLayout {
+        root: workspace.root.clone(),
+        root_ok: !workspace.invalid_root
+            && !workspace.root.as_os_str().is_empty()
+            && workspace.root.is_dir(),
+        terminals: workspace.canvas.terminals().to_vec(),
+        notes: workspace.canvas.notes().to_vec(),
+    })
+}
+
 /// Remove one workspace's state and card group, leaving every other group alone.
 fn remove_workspace(
     store: &mut WorkspaceStore,
@@ -168,6 +196,7 @@ fn remove_terminal_state(
 
 /// Owns the workspace store, its drawer and every workspace' terminal cards.
 pub struct Canvas {
+    window: AnyWindowHandle,
     store: WorkspaceStore,
     drawer: Entity<WorkspaceDrawer>,
     cards: CardGroups,
@@ -184,10 +213,11 @@ pub struct Canvas {
 impl Canvas {
     /// `load` is authoritative for the drawer banner; the store was already
     /// loaded by the caller and is pushed back into the drawer explicitly.
-    pub fn new(store: WorkspaceStore, load: LoadOutcome, cx: &mut Context<Self>) -> Self {
+    pub fn new(store: WorkspaceStore, load: LoadOutcome, window: AnyWindowHandle, cx: &mut Context<Self>) -> Self {
         let drawer = cx.new(|_| WorkspaceDrawer::new(load));
         drawer.update(cx, |drawer, _| drawer.set_store(store.clone()));
         Self {
+            window,
             store,
             drawer,
             cards: HashMap::new(),
@@ -207,12 +237,25 @@ impl Canvas {
     pub fn bind_actions(&mut self, cx: &mut Context<Self>) {
         let weak = cx.entity().downgrade();
         let restart_weak = weak.clone();
+        let window = self.window;
         self.drawer.update(cx, |drawer, _| {
-            drawer.on_action(move |action, cx| {
-                if let Some(canvas) = weak.upgrade() {
-                    canvas
-                        .update(cx, |canvas, cx| canvas.handle_action(action, cx))
-
+            drawer.on_action(move |action, app| {
+                let Some(canvas) = weak.upgrade() else {
+                    return;
+                };
+                match action {
+                    DrawerAction::Select(id) => {
+                        // The row click is dispatched while its window is borrowed;
+                        // rebuild the cards once dispatch has finished.
+                        app.defer(move |app| {
+                            let _ = app.update_window(window, |_, window, app| {
+                                canvas.update(app, |canvas, cx| canvas.handle_select(id, window, cx));
+                            });
+                        });
+                    }
+                    other => {
+                        canvas.update(app, |canvas, cx| canvas.handle_action(other, cx));
+                    }
                 }
             });
             drawer.on_restart(move |store, cx| {
@@ -225,6 +268,16 @@ impl Canvas {
                 }
             });
         });
+    }
+
+    /// A row click always activates its workspace and loads its saved cards.
+    fn handle_select(&mut self, id: WorkspaceId, window: &mut Window, cx: &mut Context<Self>) {
+        if self.store.workspace_mut(id).is_some_and(|workspace| !workspace.unloaded) {
+            self.store.select(id);
+            self.finish_store_change(cx);
+            return;
+        }
+        self.load_workspace(id, window, cx);
     }
 
     fn handle_action(&mut self, action: DrawerAction, cx: &mut Context<Self>) {
@@ -273,10 +326,8 @@ impl Canvas {
                 }
             }
             DrawerAction::Select(id) => {
-                if self.store.active() != Some(id) {
-                    self.store.select(id);
-                    self.finish_store_change(cx);
-                }
+                self.store.select(id);
+                self.finish_store_change(cx);
             }
         }
     }
@@ -304,11 +355,14 @@ impl Canvas {
     }
 
     /// `config::restart` already replaced the file and the drawer's store.
-    fn adopt_restarted_store(&mut self, store: WorkspaceStore, cx: &mut Context<Self>) {
+    fn adopt_restarted_store(&mut self, mut store: WorkspaceStore, cx: &mut Context<Self>) {
+        store.mark_all_unloaded();
         self.store = store;
         self.cards.clear();
         self.notes.clear();
         self.error = None;
+        self.persist_store(cx);
+        self.sync_drawer(cx);
         cx.notify();
     }
 
@@ -695,107 +749,115 @@ impl Canvas {
         }
     }
 
-    /// Rebuild every saved card. Shell processes cannot survive a restart, so
-    /// each restored terminal gets a fresh shell in its workspace root; a
-    /// terminal whose shell cannot start stays marked exited and is not shown.
-    pub fn restore_cards(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let workspace_ids: Vec<WorkspaceId> =
-            self.store.workspaces().iter().map(|workspace| workspace.id).collect();
+    /// Startup keeps the saved layouts but creates no live cards: each workspace
+    /// is loaded when its row is clicked.
+    pub fn prepare_workspaces(&mut self, cx: &mut Context<Self>) {
+        self.store.mark_all_unloaded();
+        self.persist_store(cx);
+        self.sync_drawer(cx);
+        cx.notify();
+    }
+
+    /// Recreate a workspace's saved cards with fresh shells after a row click.
+    /// Shell processes cannot survive a reload, so each terminal gets a new
+    /// shell in the saved root and keeps its saved bounds; notes keep their text.
+    pub fn load_workspace(
+        &mut self,
+        id: WorkspaceId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(WorkspaceLayout { root, root_ok, terminals, notes }) =
+            begin_workspace_load(&mut self.store, id)
+        else {
+            return;
+        };
+        // An unloaded workspace has no live cards; drop any stale entities.
+        let dropped = self.cards.remove(&id).unwrap_or_default();
+        let dropped_notes = self.notes.remove(&id).unwrap_or_default();
+        drop(dropped);
+        drop(dropped_notes);
+
         let canvas = cx.entity().downgrade();
         let (zoom, offset_x, offset_y) = (self.zoom, self.offset_x, self.offset_y);
-
-        for workspace_id in workspace_ids {
-            let (root, root_ok, terminals, notes) = {
-                let Some(workspace) = self.store.workspace_mut(workspace_id) else {
-                    continue;
-                };
-                (
-                    workspace.root.clone(),
-                    !workspace.invalid_root && !workspace.root.as_os_str().is_empty() && workspace.root.is_dir(),
-                    workspace.canvas.terminals().to_vec(),
-                    workspace.canvas.notes().to_vec(),
-                )
-            };
-            let ids = terminals
-                .iter()
-                .map(|terminal| terminal.id)
-                .chain(notes.iter().map(|note| note.id));
-            if let Some(workspace) = self.store.workspace_mut(workspace_id) {
-                for id in ids {
-                    workspace.canvas.reserve_id_above(id);
-                }
-            }
-
-            for (index, terminal) in terminals.into_iter().enumerate() {
-                let saved = terminal.bounds.unwrap_or_else(|| {
-                    let offset = GRID_STEP * (index % 8) as f32;
-                    CardBounds {
-                        x: SPACE_PANEL + offset,
-                        y: SPACE_PANEL + offset,
-                        width: CARD_WIDTH,
-                        height: CARD_HEIGHT,
-                    }
-                });
-                let bounds = pixel_bounds(saved);
-                let (cols, rows) = terminal_grid(&bounds);
-                let pty = if root_ok {
-                    match PtySession::spawn_shell_in(cols, rows, Some(&root)) {
-                        Ok(pty) => Some(pty),
-                        Err(error) => {
-                            self.error = Some(format!("Terminal {} não iniciou: {error}", terminal.id));
-                            None
-                        }
-                    }
-                } else {
-                    None
-                };
-                let Some(pty) = pty else {
-                    if let Some(workspace) = self.store.workspace_mut(workspace_id) {
-                        workspace.canvas.mark_exited(terminal.id);
-                    }
-                    continue;
-                };
-                // The new shell is alive: a stale `exited` flag must not hide it.
-                if let Some(workspace) = self.store.workspace_mut(workspace_id) {
-                    workspace.canvas.set_terminal_bounds(terminal.id, saved);
-                    workspace.canvas.set_terminal_exited(terminal.id, false);
-                }
-                let card = cx.new(|cx| {
-                    TerminalCard::new(
-                        terminal.id,
-                        workspace_id,
-                        bounds,
-                        canvas.clone(),
-                        root.clone(),
-                        pty,
-                        (cols, rows),
-                        cx,
-                    )
-                });
-                card.update(cx, |card, cx| card.set_view(zoom, offset_x, offset_y, cx));
-                self.cards.entry(workspace_id).or_default().push((terminal.id, card));
-            }
-
-            for note in notes {
-                let bounds = pixel_bounds(note.bounds);
-                let note_entity = cx.new(|cx| {
-                    TextCard::new(
-                        note.id,
-                        workspace_id,
-                        bounds,
-                        note.text.clone(),
-                        canvas.clone(),
-                        window,
-                        cx,
-                    )
-                });
-                note_entity.update(cx, |note, cx| note.set_view(zoom, offset_x, offset_y, cx));
-                self.notes.entry(workspace_id).or_default().push((note.id, note_entity));
+        let ids = terminals
+            .iter()
+            .map(|terminal| terminal.id)
+            .chain(notes.iter().map(|note| note.id));
+        if let Some(workspace) = self.store.workspace_mut(id) {
+            for saved_id in ids {
+                workspace.canvas.reserve_id_above(saved_id);
             }
         }
 
-        self.persist_store(cx);
-        self.sync_drawer(cx);
+        for (index, terminal) in terminals.into_iter().enumerate() {
+            let saved = terminal.bounds.unwrap_or_else(|| {
+                let offset = GRID_STEP * (index % 8) as f32;
+                CardBounds {
+                    x: SPACE_PANEL + offset,
+                    y: SPACE_PANEL + offset,
+                    width: CARD_WIDTH,
+                    height: CARD_HEIGHT,
+                }
+            });
+            let bounds = pixel_bounds(saved);
+            let (cols, rows) = terminal_grid(&bounds);
+            let pty = if root_ok {
+                match PtySession::spawn_shell_in(cols, rows, Some(&root)) {
+                    Ok(pty) => Some(pty),
+                    Err(error) => {
+                        self.error = Some(format!("Terminal {} não iniciou: {error}", terminal.id));
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            let Some(pty) = pty else {
+                if let Some(workspace) = self.store.workspace_mut(id) {
+                    workspace.canvas.mark_exited(terminal.id);
+                }
+                continue;
+            };
+            // The new shell is alive: a stale `exited` flag must not hide it.
+            if let Some(workspace) = self.store.workspace_mut(id) {
+                workspace.canvas.set_terminal_bounds(terminal.id, saved);
+                workspace.canvas.set_terminal_exited(terminal.id, false);
+            }
+            let card = cx.new(|cx| {
+                TerminalCard::new(
+                    terminal.id,
+                    id,
+                    bounds,
+                    canvas.clone(),
+                    root.clone(),
+                    pty,
+                    (cols, rows),
+                    cx,
+                )
+            });
+            card.update(cx, |card, cx| card.set_view(zoom, offset_x, offset_y, cx));
+            self.cards.entry(id).or_default().push((terminal.id, card));
+        }
+
+        for note in notes {
+            let bounds = pixel_bounds(note.bounds);
+            let note_entity = cx.new(|cx| {
+                TextCard::new(
+                    note.id,
+                    id,
+                    bounds,
+                    note.text.clone(),
+                    canvas.clone(),
+                    window,
+                    cx,
+                )
+            });
+            note_entity.update(cx, |note, cx| note.set_view(zoom, offset_x, offset_y, cx));
+            self.notes.entry(id).or_default().push((note.id, note_entity));
+        }
+
+        self.finish_store_change(cx);
         cx.notify();
     }
 }
@@ -1445,7 +1507,7 @@ mod tests {
     }
 
     #[test]
-    fn unload_workspace_keeps_row_and_clears_cards() {
+    fn unload_workspace_keeps_row_and_saved_cards() {
         let mut store = WorkspaceStore::new();
         let first = store.add("A".into(), WorkspaceIcon::Star, PathBuf::from("/a"));
         let second = store.add("B".into(), WorkspaceIcon::Bolt, PathBuf::from("/b"));
@@ -1462,14 +1524,76 @@ mod tests {
         assert!(unload_workspace(&mut store, first.id));
 
         assert_eq!(store.workspaces().len(), 2);
-        assert!(store.workspace_mut(first.id).unwrap().unloaded);
-        let unloaded = &store.workspace_mut(first.id).unwrap().canvas;
-        assert!(unloaded.terminals().is_empty());
-        assert!(unloaded.notes().is_empty());
-        let other = &store.workspace_mut(second.id).unwrap();
-        assert!(!other.unloaded);
+        let unloaded = store.workspace_mut(first.id).unwrap();
+        assert!(unloaded.unloaded);
+        assert_eq!(unloaded.canvas.selected(), None);
+        assert_eq!(unloaded.canvas.terminals().len(), 1);
+        assert_eq!(unloaded.canvas.notes()[0].text, "nota");
+        let other = store.workspace_mut(second.id).unwrap();
+        assert!(other.unloaded);
         assert_eq!(other.canvas.terminals().len(), 1);
         assert!(!unload_workspace(&mut store, 999));
+    }
+
+    #[test]
+    fn clicking_unloaded_workspace_loads_saved_layout_and_reselects_it() {
+        let mut store = WorkspaceStore::new();
+        let first = store.add("A".into(), WorkspaceIcon::Star, std::env::current_dir().unwrap());
+        let second = store.add("B".into(), WorkspaceIcon::Bolt, PathBuf::from("/b"));
+        let bounds = CardBounds {
+            x: 12.0,
+            y: 34.0,
+            width: 640.0,
+            height: 400.0,
+        };
+        {
+            let canvas = &mut store.workspace_mut(first.id).unwrap().canvas;
+            let terminal = canvas.add();
+            canvas.set_terminal_bounds(terminal.id, bounds);
+            canvas.add_note("nota".into(), bounds);
+        }
+        store.workspace_mut(first.id).unwrap().unload();
+        store.select(second.id);
+
+        let layout = begin_workspace_load(&mut store, first.id).expect("unloaded workspace");
+
+        assert!(layout.root_ok);
+        assert_eq!(layout.terminals.len(), 1);
+        assert_eq!(layout.terminals[0].bounds, Some(bounds));
+        assert_eq!(layout.notes[0].text, "nota");
+        assert_eq!(store.active(), Some(first.id));
+        assert!(!store.workspaces()[0].unloaded);
+        assert!(store.workspaces()[1].unloaded);
+
+        // Clicking an already-loaded workspace must not rebuild or duplicate cards.
+        assert!(begin_workspace_load(&mut store, first.id).is_none());
+        store.select(first.id);
+        assert!(!store.workspaces()[0].unloaded);
+        assert_eq!(store.workspaces()[0].canvas.terminals().len(), 1);
+    }
+
+    #[test]
+    fn startup_marks_all_workspaces_unloaded_without_dropping_saved_cards() {
+        let mut store = WorkspaceStore::new();
+        let workspace = store.add("A".into(), WorkspaceIcon::Star, PathBuf::from("/a"));
+        store.workspace_mut(workspace.id).unwrap().mark_loaded();
+        store.workspace_mut(workspace.id).unwrap().canvas.add();
+
+        store.mark_all_unloaded();
+
+        assert!(store.workspaces()[0].unloaded);
+        assert_eq!(store.workspaces()[0].canvas.terminals().len(), 1);
+    }
+
+    #[test]
+    fn serde_accepts_saved_configs_without_unloaded_field() {
+        let json = r#"{"id":1,"name":"Antigo","icon":"Folder","root":"/a","color":"Brass","invalid_root":false,"canvas":{"terminals":[{"id":3,"title":"Terminal 3","exited":false}],"notes":[{"id":4,"text":"nota","bounds":{"x":1.0,"y":2.0,"width":3.0,"height":4.0}}],"selected":3,"next_id":5}}"#;
+        let workspace: WorkspaceState = serde_json::from_str(json).unwrap();
+
+        assert!(!workspace.unloaded);
+        assert_eq!(workspace.canvas.terminals().len(), 1);
+        assert_eq!(workspace.canvas.notes()[0].text, "nota");
+        assert!(serde_json::to_string(&workspace).unwrap().contains("\"unloaded\":false"));
     }
 
     #[test]

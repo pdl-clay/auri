@@ -917,7 +917,7 @@ impl Render for WorkspaceDrawer {
                                     .right_0()
                                     .text_xs()
                                     .text_color(rgb(COLOR_MUTED))
-                                    .child(format!("{}", workspace.canvas.terminals().len())),
+                                    .child(format!("{}", if unloaded { 0 } else { workspace.canvas.terminals().len() })),
                             ),
                     )
                     .child(

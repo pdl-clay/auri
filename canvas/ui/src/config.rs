@@ -355,6 +355,7 @@ mod tests {
         assert_eq!(store.workspaces()[0].icon, WorkspaceIcon::Star);
         assert_eq!(store.workspaces()[0].root, std::env::current_dir().unwrap());
         assert_eq!(store.active(), Some(1));
+        assert!(store.workspaces()[0].unloaded);
     }
 
     #[test]
@@ -377,7 +378,7 @@ mod tests {
         assert_eq!(got.icon, WorkspaceIcon::Bolt);
         assert_eq!(got.root, root);
         assert!(!got.invalid_root, "an existing root is valid after load");
-        assert!(!got.unloaded);
+        assert!(got.unloaded, "new workspaces start unloaded");
         assert_eq!(loaded.active(), Some(ws.id));
     }
 
