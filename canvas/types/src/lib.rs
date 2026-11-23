@@ -16,6 +16,26 @@ pub type TerminalId = u64;
 /// Identifier of a workspace on the canvas.
 pub type WorkspaceId = u64;
 
+/// A user-drawn edge endpoint: a card (terminal or agent) or a note.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConnectionTarget {
+    Card(TerminalId),
+    Note(u64),
+}
+
+/// One stored edge. Edges are bidirectional; permission checks read both ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Connection {
+    pub from: TerminalId,
+    pub to: ConnectionTarget,
+}
+
+fn edge_links(edge: &Connection, a: TerminalId, b: ConnectionTarget) -> bool {
+    (edge.from == a && edge.to == b)
+        || (edge.to == ConnectionTarget::Card(a)
+            && matches!(b, ConnectionTarget::Card(id) if edge.from == id))
+}
+
 /// Saved pixel geometry of a canvas card, independent of the UI framework.
 #[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CardBounds {
@@ -170,6 +190,9 @@ pub struct AgentState {
     pub kind: AgentKind,
     pub name: String,
     pub bounds: CardBounds,
+    /// Administrator cards can manage workspace cards through the CLI.
+    #[serde(default)]
+    pub admin: bool,
 }
 
 /// Logical state of a single terminal card.
@@ -192,6 +215,8 @@ pub struct CanvasState {
     notes: Vec<NoteState>,
     #[serde(default)]
     agents: Vec<AgentState>,
+    #[serde(default)]
+    connections: Vec<Connection>,
     #[serde(default)]
     selected: Option<TerminalId>,
     #[serde(default = "default_next_id")]
@@ -219,6 +244,7 @@ impl CanvasState {
             terminals: Vec::new(),
             notes: Vec::new(),
             agents: Vec::new(),
+            connections: Vec::new(),
             selected: None,
             next_id: 1,
         }
@@ -241,6 +267,7 @@ impl CanvasState {
     pub fn remove(&mut self, id: TerminalId) -> Option<TerminalState> {
         let index = self.terminals.iter().position(|terminal| terminal.id == id)?;
         let removed = self.terminals.remove(index);
+        self.remove_connections_for(ConnectionTarget::Card(id));
         self.reindex_titles();
         if self.selected == Some(id) {
             self.selected = None;
@@ -320,7 +347,9 @@ impl CanvasState {
 
     pub fn remove_note(&mut self, id: u64) -> Option<NoteState> {
         let index = self.notes.iter().position(|note| note.id == id)?;
-        Some(self.notes.remove(index))
+        let removed = self.notes.remove(index);
+        self.remove_connections_for(ConnectionTarget::Note(id));
+        Some(removed)
     }
 
     pub fn notes(&self) -> &[NoteState] {
@@ -352,6 +381,7 @@ impl CanvasState {
             kind,
             name,
             bounds,
+            admin: false,
         };
         self.agents.push(agent.clone());
         self.reindex_titles();
@@ -362,6 +392,7 @@ impl CanvasState {
     pub fn remove_agent(&mut self, id: TerminalId) -> Option<AgentState> {
         let index = self.agents.iter().position(|agent| agent.id == id)?;
         let removed = self.agents.remove(index);
+        self.remove_connections_for(ConnectionTarget::Card(id));
         self.reindex_titles();
         if self.selected == Some(id) {
             self.selected = None;
@@ -439,6 +470,53 @@ impl CanvasState {
 
     pub fn next_id(&self) -> u64 {
         self.next_id
+    }
+
+    /// The stored edges, in insertion order.
+    pub fn connections(&self) -> &[Connection] {
+        &self.connections
+    }
+
+    /// Add one edge between a card and another card or note. Self edges and
+    /// duplicates (including the reverse direction) are ignored.
+    pub fn connect(&mut self, from: TerminalId, to: ConnectionTarget) -> bool {
+        if to == ConnectionTarget::Card(from) || self.connected(from, to) {
+            return false;
+        }
+        self.connections.push(Connection { from, to });
+        true
+    }
+
+    /// Remove an edge in either direction; false when no such edge existed.
+    pub fn disconnect(&mut self, from: TerminalId, to: ConnectionTarget) -> bool {
+        let before = self.connections.len();
+        self.connections.retain(|edge| !edge_links(edge, from, to));
+        self.connections.len() != before
+    }
+
+    /// True when an edge joins the two endpoints, regardless of its direction.
+    pub fn connected(&self, a: TerminalId, b: ConnectionTarget) -> bool {
+        self.connections.iter().any(|edge| edge_links(edge, a, b))
+    }
+
+    /// Drop every edge touching a card or note being removed.
+    pub fn remove_connections_for(&mut self, target: ConnectionTarget) {
+        self.connections.retain(|edge| match target {
+            ConnectionTarget::Card(id) => edge.from != id && edge.to != target,
+            ConnectionTarget::Note(_) => edge.to != target,
+        });
+    }
+
+    /// Change a card's role; the next CLI request observes the new value.
+    pub fn set_agent_admin(&mut self, id: TerminalId, admin: bool) -> bool {
+        let Some(agent) = self.agents.iter_mut().find(|agent| agent.id == id) else {
+            return false;
+        };
+        if agent.admin == admin {
+            return false;
+        }
+        agent.admin = admin;
+        true
     }
 }
 
@@ -896,6 +974,96 @@ mod tests {
         assert_eq!(decoded.agents()[0], agent);
         assert_eq!(decoded.agents()[0].kind, AgentKind::Omp);
         assert_eq!(decoded.next_id(), 9);
+    }
+
+    #[test]
+    fn connections_are_bidirectional_and_reject_duplicates_and_self_edges() {
+        let mut state = CanvasState::new();
+        let bounds = CardBounds { x: 0.0, y: 0.0, width: 640.0, height: 400.0 };
+        let a = state.add_agent(AgentKind::Claude, bounds);
+        let b = state.add_agent(AgentKind::Codex, bounds);
+        let note = state.add_note("oi".into(), bounds);
+
+        assert!(state.connect(a.id, ConnectionTarget::Card(b.id)));
+        assert!(!state.connect(a.id, ConnectionTarget::Card(b.id)), "duplicate edge");
+        assert!(
+            !state.connect(b.id, ConnectionTarget::Card(a.id)),
+            "reverse edge is the same edge"
+        );
+        assert!(state.connected(a.id, ConnectionTarget::Card(b.id)));
+        assert!(state.connected(b.id, ConnectionTarget::Card(a.id)));
+        assert!(!state.connect(a.id, ConnectionTarget::Card(a.id)), "self edge");
+
+        assert!(state.connect(a.id, ConnectionTarget::Note(note.id)));
+        assert!(state.connected(a.id, ConnectionTarget::Note(note.id)));
+        assert!(!state.connect(a.id, ConnectionTarget::Note(note.id)), "duplicate note edge");
+        assert_eq!(state.connections().len(), 2);
+
+        assert!(state.disconnect(b.id, ConnectionTarget::Card(a.id)), "reverse disconnect");
+        assert!(!state.connected(a.id, ConnectionTarget::Card(b.id)));
+        assert!(!state.disconnect(a.id, ConnectionTarget::Card(b.id)));
+    }
+
+    #[test]
+    fn removing_cards_and_notes_removes_all_touching_edges() {
+        let mut state = CanvasState::new();
+        let bounds = CardBounds { x: 0.0, y: 0.0, width: 640.0, height: 400.0 };
+        let a = state.add_agent(AgentKind::Claude, bounds);
+        let b = state.add_agent(AgentKind::Codex, bounds);
+        let terminal = state.add();
+        let note = state.add_note("oi".into(), bounds);
+
+        assert!(state.connect(a.id, ConnectionTarget::Card(b.id)));
+        assert!(state.connect(terminal.id, ConnectionTarget::Card(a.id)));
+        assert!(state.connect(a.id, ConnectionTarget::Note(note.id)));
+        assert!(state.connect(b.id, ConnectionTarget::Note(note.id)));
+        assert!(state.connect(terminal.id, ConnectionTarget::Note(note.id)));
+        assert_eq!(state.connections().len(), 5);
+
+        assert!(state.remove_agent(a.id).is_some());
+        assert_eq!(
+            state.connections(),
+            &[
+                Connection { from: b.id, to: ConnectionTarget::Note(note.id) },
+                Connection { from: terminal.id, to: ConnectionTarget::Note(note.id) },
+            ]
+        );
+
+        assert!(state.remove(terminal.id).is_some());
+        assert_eq!(
+            state.connections(),
+            &[Connection { from: b.id, to: ConnectionTarget::Note(note.id) }]
+        );
+
+        assert!(state.remove_note(note.id).is_some());
+        assert!(state.connections().is_empty());
+    }
+
+    #[test]
+    fn connections_and_admin_survive_serde_round_trip() {
+        let mut state = CanvasState::new();
+        let bounds = CardBounds { x: 1.0, y: 2.0, width: 640.0, height: 400.0 };
+        let agent = state.add_agent(AgentKind::Omp, bounds);
+        let note = state.add_note("texto".into(), bounds);
+        assert!(state.set_agent_admin(agent.id, true));
+        assert!(state.connect(agent.id, ConnectionTarget::Note(note.id)));
+
+        let encoded = serde_json::to_string(&state).unwrap();
+        let decoded: CanvasState = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.connections(), state.connections());
+        assert!(decoded.agent(agent.id).unwrap().admin);
+        assert_eq!(decoded.next_id(), state.next_id());
+        assert_eq!(decoded.selected(), state.selected());
+    }
+
+    #[test]
+    fn old_canvas_json_without_connections_or_admin_still_loads() {
+        let json = r#"{"terminals":[],"notes":[],"agents":[{"id":3,"kind":"Claude","name":"Claude 1","bounds":{"x":0.0,"y":0.0,"width":640.0,"height":400.0}}],"selected":3,"next_id":4}"#;
+        let state: CanvasState = serde_json::from_str(json).unwrap();
+        assert!(state.connections().is_empty());
+        assert_eq!(state.agents().len(), 1);
+        assert!(!state.agent(3).unwrap().admin);
+        assert_eq!(state.next_id(), 4);
     }
 }
 

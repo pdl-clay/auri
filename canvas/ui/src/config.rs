@@ -772,4 +772,40 @@ mod tests {
         let next = loaded.add_custom_agent("Outro".into(), "pi".into(), AgentIcon::Pi);
         assert!(next.id > agent.id);
     }
+
+    #[test]
+    fn old_workspace_line_without_connections_or_admin_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = config_file(dir.path());
+        let root = dir.path().join("root");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let legacy = json!({
+            "id": 1,
+            "name": "Antigo",
+            "icon": "Star",
+            "root": root,
+            "canvas": {
+                "terminals": [],
+                "notes": [],
+                "agents": [{
+                    "id": 2,
+                    "kind": "Claude",
+                    "name": "Claude 1",
+                    "bounds": {"x": 0.0, "y": 0.0, "width": 640.0, "height": 400.0}
+                }],
+                "selected": 2,
+                "next_id": 3
+            }
+        });
+        fs::write(&path, format!("{{\"active\":1,\"next_id\":3}}\n{legacy}\n")).unwrap();
+
+        let mut loaded = WorkspaceStore::new();
+        assert_eq!(load_at(&mut loaded, &path), LoadOutcome::Loaded);
+        let canvas = &loaded.workspaces()[0].canvas;
+        assert!(canvas.connections().is_empty());
+        assert_eq!(canvas.agents().len(), 1);
+        assert!(!canvas.agents()[0].admin);
+        assert_eq!(canvas.next_id(), 3);
+    }
 }
