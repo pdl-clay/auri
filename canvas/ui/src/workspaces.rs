@@ -744,22 +744,7 @@ impl Render for WorkspaceDrawer {
                         MouseButton::Right,
                         cx.listener(|_, _, _, cx| cx.stop_propagation()),
                     )
-                    .child(
-                        div()
-                            .relative()
-                            .w(px(ICON_SIZE + COUNT_BADGE_RESERVE))
-                            .flex_none()
-                            .child(icon_svg(workspace.icon, color))
-                            .child(
-                                div()
-                                    .absolute()
-                                    .top(px(COUNT_BADGE_OFFSET))
-                                    .right_0()
-                                    .text_xs()
-                                    .text_color(rgb(COLOR_MUTED))
-                                    .child(format!("{}", workspace.canvas.terminals().len())),
-                            ),
-                    )
+                    .child(icon_svg(workspace.icon, color))
                     .child(
                         div()
                             .flex_1()
@@ -772,6 +757,22 @@ impl Render for WorkspaceDrawer {
                                         .child("!"),
                                 )
                             }),
+                    )
+                    .child(
+                        div()
+                            .relative()
+                            .w(px(ICON_SIZE + COUNT_BADGE_RESERVE))
+                            .flex_none()
+                            .child(asset_icon("terminal.svg", COLOR_MUTED))
+                            .child(
+                                div()
+                                    .absolute()
+                                    .top(px(COUNT_BADGE_OFFSET))
+                                    .right_0()
+                                    .text_xs()
+                                    .text_color(rgb(COLOR_MUTED))
+                                    .child(format!("{}", workspace.canvas.terminals().len())),
+                            ),
                     )
                     .child(
                         div()

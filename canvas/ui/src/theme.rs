@@ -20,7 +20,7 @@ pub const RADIUS_CONTROL: f32 = 8.;
 pub const RADIUS_DIALOG: f32 = 14.;
 pub const ICON_SIZE: f32 = 16.;
 pub const COLOR_SWATCH_SIZE: f32 = 20.;
-pub const COUNT_BADGE_OFFSET: f32 = -2.;
+pub const COUNT_BADGE_OFFSET: f32 = -6.;
 pub const COUNT_BADGE_RESERVE: f32 = 8.;
 
 // Spacing scale.

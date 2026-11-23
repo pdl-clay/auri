@@ -276,7 +276,7 @@ mod tests {
         let mut script = CommandBuilder::new("/bin/sh");
         script.arg("-c");
         script.arg(format!(
-            "(trap '' HUP; sleep 30) & echo $! > {}",
+            "(trap '' HUP; exec sleep 30) & echo $! > {}; sleep 0.2",
             marker.path().display()
         ));
         let mut pty = PtySession::spawn_command(script, 80, 24).unwrap();
@@ -287,7 +287,7 @@ mod tests {
             "background child should be alive before the leader exits"
         );
 
-        // No `wait` in the script: the leader exits on its own, leaving the
+        // The leader lingers briefly, then exits on its own, leaving the
         // background sleep in the same process group.
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
