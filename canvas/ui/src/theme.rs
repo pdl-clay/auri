@@ -63,6 +63,9 @@ pub const CARD_HEIGHT: f32 = 400.;
 pub const GRID_STEP: f32 = 24.;
 pub const CARD_GAP: f32 = 1.;
 
+/// Empty-canvas notice shown when no workspace has been loaded.
+pub const WORKSPACE_NOTICE_WIDTH: f32 = 400.;
+
 // Context menu.
 pub const FPS_BADGE_WIDTH: f32 = 72.;
 pub const CONTEXT_MENU_WIDTH: f32 = 180.;

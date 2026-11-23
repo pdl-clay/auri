@@ -340,6 +340,18 @@ fn active_workspace_root(store: &WorkspaceStore) -> Result<(WorkspaceId, PathBuf
     Ok((workspace.id, workspace.root.clone()))
 }
 
+/// The canvas is empty until a workspace is loaded from the drawer.
+fn needs_workspace_notice(store: &WorkspaceStore) -> bool {
+    let Some(active) = store.active() else {
+        return true;
+    };
+    store
+        .workspaces()
+        .iter()
+        .find(|workspace| workspace.id == active)
+        .is_none_or(|workspace| workspace.unloaded)
+}
+
 /// Allocate a terminal in the active workspace and return its spawn target.
 fn active_spawn_target(
     store: &mut WorkspaceStore,
@@ -2171,6 +2183,7 @@ fn agent_edit_dialog(
 impl Render for Canvas {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let active = self.store.active();
+        let show_workspace_notice = needs_workspace_notice(&self.store);
         let zoom = self.zoom;
         let offset_x = self.offset_x;
         let offset_y = self.offset_y;
@@ -2338,6 +2351,52 @@ impl Render for Canvas {
                                 .top(px(0.0))
                                 .size_full(),
                             )
+                            .when(show_workspace_notice, |area| {
+                                area.child(
+                                    div()
+                                        .absolute()
+                                        .left(px(0.0))
+                                        .top(px(0.0))
+                                        .size_full()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .child(
+                                            div()
+                                                .w(px(WORKSPACE_NOTICE_WIDTH))
+                                                .flex()
+                                                .flex_col()
+                                                .items_center()
+                                                .gap_3()
+                                                .p(px(SPACE_PANEL * 2.0))
+                                                .rounded(px(RADIUS_DIALOG))
+                                                .border_1()
+                                                .border_color(rgb(COLOR_BORDER))
+                                                .bg(rgb(COLOR_PANEL))
+                                                .child(
+                                                    svg()
+                                                        .path("folder.svg")
+                                                        .w(px(ICON_SIZE * 1.5))
+                                                        .h(px(ICON_SIZE * 1.5))
+                                                        .text_color(rgb(COLOR_ACCENT)),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_lg()
+                                                        .text_center()
+                                                        .text_color(rgb(COLOR_FOREGROUND))
+                                                        .child("Nenhum espaço de trabalho carregado"),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_center()
+                                                        .text_color(rgb(COLOR_MUTED))
+                                                        .child("Selecione um espaço de trabalho na barra lateral para carregar seus terminais e blocos."),
+                                                ),
+                                        ),
+                                )
+                            })
                             .children(cards)
                             .children(notes)
                             .child(
@@ -2672,14 +2731,6 @@ impl Render for Canvas {
                             .child(add)
                             .child(add_note),
                     )
-                    .when(active.is_none(), |column| {
-                        column.child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(COLOR_MUTED))
-                                .child("Crie um espaço de trabalho para adicionar terminais."),
-                        )
-                    })
                     .children(self.error.iter().map(|message| {
                         div()
                             .rounded(px(8.0))
@@ -3109,6 +3160,19 @@ mod tests {
         assert!(other.unloaded);
         assert_eq!(other.canvas.terminals().len(), 1);
         assert!(!unload_workspace(&mut store, 999));
+    }
+
+    #[test]
+    fn workspace_notice_appears_until_a_workspace_is_loaded() {
+        let mut store = WorkspaceStore::new();
+        assert!(needs_workspace_notice(&store));
+
+        let id = store.add("A".into(), WorkspaceIcon::Star, PathBuf::from("/a")).id;
+        store.workspace_mut(id).unwrap().unloaded = true;
+        assert!(needs_workspace_notice(&store));
+
+        store.workspace_mut(id).unwrap().unloaded = false;
+        assert!(!needs_workspace_notice(&store));
     }
 
     #[test]
