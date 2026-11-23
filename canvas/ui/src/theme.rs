@@ -81,7 +81,7 @@ pub const TEXT_CARD_WIDTH: f32 = 320.;
 pub const TEXT_CARD_HEIGHT: f32 = 220.;
 pub const TEXT_CARD_PADDING: f32 = 12.;
 pub const AGENT_DIALOG_WIDTH: f32 = 340.;
-pub const AGENT_DIALOG_HEIGHT: f32 = 320.;
+pub const AGENT_DIALOG_HEIGHT: f32 = 508.;
 pub const AGENT_TILE_SIZE: f32 = 32.;
 
 use canvas_types::{AgentIcon, WorkspaceColor};

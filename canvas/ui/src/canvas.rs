@@ -684,7 +684,7 @@ fn dispatch(
 /// Transient menu state. Grouping these flags makes every close path clear the
 /// nested panels together, including the agent list.
 #[derive(Clone, Debug, Default, PartialEq)]
-struct MenuState {
+pub(crate) struct MenuState {
     context_menu: Option<Point<Pixels>>,
     submenu: bool,
     agent_list: bool,
@@ -730,6 +730,12 @@ fn select_agent_placement(menu: &mut MenuState, pending: &mut Option<AgentKind>,
     menu.close();
 }
 
+/// Clicking `Editar` activates the form and removes the menu's dismiss layer.
+fn open_agent_edit(menu: &mut AgentMenu, shell: &mut MenuState) {
+    shell.close();
+    menu.editing = true;
+}
+
 /// UI-only sticky-note selection; never written to the workspace store.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct NoteSelection(Option<(WorkspaceId, u64)>);
@@ -762,7 +768,7 @@ impl NoteSelection {
 
 /// Transient UI state for the header menu and its edit dialog.
 #[derive(Clone, Debug)]
-struct AgentMenu {
+pub(crate) struct AgentMenu {
     workspace_id: WorkspaceId,
     card_id: TerminalId,
     position: Point<Pixels>,
@@ -2137,7 +2143,7 @@ impl Canvas {
 
     fn begin_agent_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(menu) = self.agent_menu.as_mut() {
-            menu.editing = true;
+            open_agent_edit(menu, &mut self.menu);
         }
         self.ensure_agent_name_input(window, cx);
         self.sync_agent_name_input(window, cx);
@@ -5080,5 +5086,126 @@ mod admin_toggle_tests {
         demote.select_admin(false);
         write_agent_edits(&demote, &mut workspace).expect("valid name");
         assert_eq!(authorize(&workspace, Some(&principal), &Action::AgentNew), Err(Denied::NotAdmin));
+    }
+}
+
+/// Test-only bridge from `regressions.rs` into the private view state. It
+/// exposes no application API: every function delegates to a helper the real
+/// UI also calls, so the assertions follow production transitions.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+
+    pub(crate) fn agent_menu_and_shell() -> (AgentMenu, MenuState) {
+        let position = Point::new(px(120.0), px(200.0));
+        let mut shell = MenuState::default();
+        shell.open_context_menu(position);
+        let menu = AgentMenu {
+            workspace_id: 1,
+            card_id: 1,
+            position,
+            editing: false,
+            name: "Claude 1".into(),
+            kind: AgentKind::Claude,
+            admin: false,
+            original_name: "Claude 1".into(),
+            original_kind: AgentKind::Claude,
+            original_admin: false,
+        };
+        (menu, shell)
+    }
+
+    pub(crate) fn is_editing(menu: &AgentMenu) -> bool {
+        menu.editing
+    }
+
+    pub(crate) fn has_dismiss_overlay(shell: &MenuState) -> bool {
+        shell.context_menu.is_some() || shell.submenu || shell.agent_list
+    }
+
+    pub(crate) fn click_edit(menu: &mut AgentMenu, shell: &mut MenuState) {
+        open_agent_edit(menu, shell);
+    }
+
+    pub(crate) fn needs_workspace_notice(store: &WorkspaceStore) -> bool {
+        super::needs_workspace_notice(store)
+    }
+
+    /// State-derived labels plus a render-source guard in `regressions.rs`:
+    /// together they catch an FPS badge returning to the visible canvas.
+    pub(crate) fn render_state_labels(store: &WorkspaceStore) -> Vec<String> {
+        let mut labels = Vec::new();
+        for workspace in store.workspaces() {
+            labels.push(workspace.name.clone());
+            for agent in workspace.canvas.agents() {
+                labels.push(agent.name.clone());
+            }
+            for terminal in workspace.canvas.terminals() {
+                labels.push(terminal.title.clone());
+            }
+            for note in workspace.canvas.notes() {
+                labels.push(note.text.clone());
+            }
+        }
+        if needs_workspace_notice(store) {
+            labels.push("Nenhum espaço de trabalho carregado".into());
+            labels.push(
+                "Selecione um espaço de trabalho na barra lateral para carregar seus terminais e blocos.".into(),
+            );
+        }
+        labels
+    }
+
+    /// Real dispatch through the same authorization path as the host socket.
+    pub(crate) struct AdminHarness {
+        store: WorkspaceStore,
+        registry: AgentRegistry,
+        workspace: WorkspaceId,
+        caller: TerminalId,
+        token: String,
+    }
+
+    impl AdminHarness {
+        pub(crate) fn new(admin: bool) -> Self {
+            let mut store = WorkspaceStore::new();
+            let workspace = store.add("Demo".into(), WorkspaceIcon::Folder, std::env::temp_dir());
+            let caller = store
+                .workspace_mut(workspace.id)
+                .unwrap()
+                .canvas
+                .add_agent(
+                    AgentKind::Claude,
+                    CardBounds { x: 0.0, y: 0.0, width: 100.0, height: 100.0 },
+                )
+                .id;
+            store.workspace_mut(workspace.id).unwrap().canvas.set_agent_admin(caller, admin);
+            let mut registry = AgentRegistry::default();
+            let token = registry.issue(workspace.id, caller);
+            Self { store, registry, workspace: workspace.id, caller, token }
+        }
+
+        pub(crate) fn run(&mut self, request: Request) -> Response {
+            dispatch_authorized(&mut self.store, &mut self.registry, &self.token, request).response
+        }
+
+        pub(crate) fn agent_admin(&self, id: TerminalId) -> bool {
+            self.workspace().canvas.agent(id).is_some_and(|agent| agent.admin)
+        }
+
+        pub(crate) fn creator_is_admin(&self) -> bool {
+            self.agent_admin(self.caller)
+        }
+
+        pub(crate) fn creator_connected_to(&self, id: TerminalId) -> bool {
+            self.workspace().canvas.connected(self.caller, ConnectionTarget::Card(id))
+        }
+
+        fn workspace(&self) -> &WorkspaceState {
+            self.store
+                .workspaces()
+                .iter()
+                .find(|workspace| workspace.id == self.workspace)
+                .expect("harness workspace")
+        }
     }
 }

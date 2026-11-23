@@ -9,6 +9,9 @@ pub mod theme;
 pub mod text_card;
 pub mod workspaces;
 
+#[cfg(test)]
+mod regressions;
+
 use auro::{App, assets::EmbeddedAssets, gpui::AppContext};
 use canvas_types::WorkspaceStore;
 
