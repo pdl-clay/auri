@@ -1,13 +1,104 @@
 //! PTY lifecycle for canvas terminals: spawn a command into a pseudo-terminal,
 //! expose its streams and tear down the whole process group.
 
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
+use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
+use std::thread;
 use std::time::{Duration, Instant};
 use std::path::Path;
-
 use portable_pty::{CommandBuilder, PtySize};
 
+
+/// One frame at 60 fps: output produced inside this window is delivered as a
+/// single read, so the terminal view notifies the UI once per frame instead of
+/// once per 4 KB PTY chunk.
+const OUTPUT_BATCH_INTERVAL: Duration = Duration::from_millis(16);
+
+enum BatchEvent {
+    Data(Vec<u8>),
+    Flush,
+    Done,
+}
+
+/// Coalesces PTY output before it reaches `TerminalView`.
+pub struct BatchedReader {
+    events: Receiver<BatchEvent>,
+    pending: Vec<u8>,
+    ready: bool,
+}
+
+impl BatchedReader {
+    pub fn new(mut inner: Box<dyn Read + Send>) -> Self {
+        let (tx, rx) = mpsc::sync_channel(4);
+
+        let producer = tx.clone();
+        thread::spawn(move || {
+            let mut buffer = [0u8; 4096];
+            loop {
+                match inner.read(&mut buffer) {
+                    Ok(0) => {
+                        let _ = producer.send(BatchEvent::Done);
+                        break;
+                    }
+                    Ok(size) => {
+                        if producer
+                            .send(BatchEvent::Data(buffer[..size].to_vec()))
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(_) => {
+                        let _ = producer.send(BatchEvent::Done);
+                        break;
+                    }
+                }
+            }
+        });
+
+        thread::spawn(move || loop {
+            thread::sleep(OUTPUT_BATCH_INTERVAL);
+            if tx.send(BatchEvent::Flush).is_err() {
+                break;
+            }
+        });
+
+        Self {
+            events: rx,
+            pending: Vec::new(),
+            ready: false,
+        }
+    }
+}
+
+impl Read for BatchedReader {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        loop {
+            if self.ready && !self.pending.is_empty() {
+                let size = output.len().min(self.pending.len());
+                output[..size].copy_from_slice(&self.pending[..size]);
+                self.pending.drain(..size);
+                if self.pending.is_empty() {
+                    self.ready = false;
+                }
+                return Ok(size);
+            }
+            match self.events.recv() {
+                Ok(BatchEvent::Data(bytes)) => self.pending.extend_from_slice(&bytes),
+                Ok(BatchEvent::Flush) if !self.pending.is_empty() => self.ready = true,
+                Ok(BatchEvent::Flush) => {}
+                Ok(BatchEvent::Done) => {
+                    if self.pending.is_empty() {
+                        return Ok(0);
+                    }
+                    self.ready = true;
+                }
+                Err(_) => return Ok(0),
+            }
+        }
+    }
+}
 
 /// Resolve a POSIX login shell; GUI sessions often have no `$SHELL`.
 /// fish's login startup does not drive portable-pty correctly here, so bash is used.
@@ -393,5 +484,30 @@ mod tests {
         let mut baseline = PtySession::spawn_shell(80, 24).unwrap();
         let mut pty = PtySession::spawn_shell_in(80, 24, None).unwrap();
         assert_eq!(shell_cwd(&mut pty), shell_cwd(&mut baseline));
+    }
+}
+
+#[cfg(test)]
+mod batch_tests {
+    use super::*;
+
+    #[test]
+    fn output_is_coalesced_until_flush() {
+        let (tx, rx) = mpsc::channel();
+        let mut reader = BatchedReader {
+            events: rx,
+            pending: Vec::new(),
+            ready: false,
+        };
+        tx.send(BatchEvent::Data(b"ab".to_vec())).unwrap();
+        tx.send(BatchEvent::Data(b"cd".to_vec())).unwrap();
+        tx.send(BatchEvent::Flush).unwrap();
+
+        let mut output = [0u8; 8];
+        let size = reader.read(&mut output).unwrap();
+        assert_eq!(&output[..size], b"abcd");
+
+        tx.send(BatchEvent::Done).unwrap();
+        assert_eq!(reader.read(&mut output).unwrap(), 0);
     }
 }

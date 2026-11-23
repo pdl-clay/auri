@@ -12,7 +12,7 @@ use gpui_terminal::{TerminalConfig, TerminalView};
 use canvas_types::{AgentIcon, AgentKind, TerminalId, WorkspaceId};
 
 use crate::canvas::{Canvas, card_bounds};
-use crate::pty::PtySession;
+use crate::pty::{BatchedReader, PtySession};
 use crate::theme::*;
 
 /// Columns and rows that fit a monospace grid in the given pixel rectangle.
@@ -124,7 +124,10 @@ impl TerminalCard {
         let resize_master = pty.master.clone();
         // PtySession implements Drop, so its streams cannot be moved out directly.
         let writer = std::mem::replace(&mut pty.writer, Box::new(std::io::sink()));
-        let reader = std::mem::replace(&mut pty.reader, Box::new(std::io::empty()));
+        let reader = BatchedReader::new(std::mem::replace(
+            &mut pty.reader,
+            Box::new(std::io::empty()),
+        ));
         let this = cx.weak_entity();
         let exit_canvas = canvas.clone();
         let exit_workspace = workspace_id;
