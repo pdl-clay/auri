@@ -916,7 +916,7 @@ impl Render for WorkspaceDrawer {
                                     .top(px(COUNT_BADGE_OFFSET))
                                     .right_0()
                                     .text_xs()
-                                    .text_color(rgb(COLOR_MUTED))
+                                    .text_color(rgb(terminal_color))
                                     .child(format!("{}", if unloaded { 0 } else { workspace.canvas.terminals().len() })),
                             ),
                     )
