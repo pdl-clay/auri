@@ -12,12 +12,15 @@ pub const COLOR_DANGER: u32 = 0xE06C63;
 pub const COLOR_SELECTION: u32 = 0x7E96AE;
 pub const COLOR_GRID: u32 = 0x2D2F32;
 pub const COLOR_SUBTLE: u32 = 0x424446;
+pub const COLOR_SUCCESS: u32 = 0x6F9E7A;
 
 // Radii and icons.
 pub const RADIUS_CHIP: f32 = 4.;
 pub const RADIUS_CONTROL: f32 = 8.;
 pub const RADIUS_DIALOG: f32 = 14.;
 pub const ICON_SIZE: f32 = 16.;
+pub const COLOR_SWATCH_SIZE: f32 = 20.;
+pub const COUNT_BADGE_OFFSET: f32 = -2.;
 
 // Spacing scale.
 pub const SPACE_TIGHT: f32 = 4.;
@@ -41,3 +44,15 @@ pub const GRID_STEP: f32 = 24.;
 // Context menu.
 pub const CONTEXT_MENU_WIDTH: f32 = 180.;
 pub const CONTEXT_MENU_ITEM_HEIGHT: f32 = 32.;
+
+use canvas_types::WorkspaceColor;
+
+/// Map a workspace's persisted color choice to a concrete swatch.
+pub fn workspace_color(color: WorkspaceColor) -> u32 {
+    match color {
+        WorkspaceColor::Brass => COLOR_ACCENT,
+        WorkspaceColor::Steel => COLOR_SELECTION,
+        WorkspaceColor::Red => COLOR_DANGER,
+        WorkspaceColor::Green => COLOR_SUCCESS,
+    }
+}

@@ -5,7 +5,7 @@ use auro::gpui::{
     Subscription, WeakEntity, Window, div, px, rgb, svg,
 };
 use auro::prelude::*;
-use canvas_types::{WorkspaceIcon, WorkspaceId, WorkspaceState, WorkspaceStore};
+use canvas_types::{WorkspaceColor, WorkspaceIcon, WorkspaceId, WorkspaceState, WorkspaceStore};
 use gpui_component::{
     WindowExt,
     button::{Button, ButtonVariant, ButtonVariants as _},
@@ -25,12 +25,20 @@ const PALETTE: [WorkspaceIcon; 5] = [
     WorkspaceIcon::Globe,
 ];
 
+const COLOR_SWATCHES: [WorkspaceColor; 4] = [
+    WorkspaceColor::Brass,
+    WorkspaceColor::Steel,
+    WorkspaceColor::Red,
+    WorkspaceColor::Green,
+];
+
 /// What the drawer asks its owner to do. The owner owns the store and persistence.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DrawerAction {
     Create {
         name: String,
         icon: WorkspaceIcon,
+        color: WorkspaceColor,
         root: PathBuf,
     },
     Delete(WorkspaceId),
@@ -62,6 +70,7 @@ pub struct WorkspaceDrawer {
     form_icon: WorkspaceIcon,
     form_error: Option<String>,
     action_handler: Option<Box<dyn Fn(DrawerAction, &mut App)>>,
+    form_color: WorkspaceColor,
     restart_handler: Option<Box<dyn Fn(&WorkspaceStore, &mut App)>>,
     context_menu: Option<Point<Pixels>>,
 }
@@ -87,6 +96,7 @@ impl WorkspaceDrawer {
             action_handler: None,
             restart_handler: None,
             context_menu: None,
+            form_color: WorkspaceColor::Brass,
         }
     }
 
@@ -138,6 +148,7 @@ impl WorkspaceDrawer {
         self.form_error = None;
         self.form_name.clear();
         self.form_root = None;
+        self.form_color = WorkspaceColor::Brass;
         self.sync_inputs(window, cx);
     }
 
@@ -147,6 +158,10 @@ impl WorkspaceDrawer {
 
     pub fn set_form_icon(&mut self, icon: WorkspaceIcon) {
         self.form_icon = icon;
+    }
+
+    pub fn set_form_color(&mut self, color: WorkspaceColor) {
+        self.form_color = color;
     }
 
     pub fn set_form_root(&mut self, root: Option<PathBuf>) {
@@ -312,6 +327,7 @@ impl WorkspaceDrawer {
             DrawerAction::Create {
                 name,
                 icon: self.form_icon,
+                color: self.form_color,
                 root,
             },
             cx,
@@ -386,36 +402,6 @@ fn field_label(text: &'static str) -> impl IntoElement {
     div().text_sm().text_color(rgb(COLOR_MUTED)).child(text)
 }
 
-fn monitor(count: usize) -> impl IntoElement {
-    div()
-        .flex()
-        .items_center()
-        .gap_1()
-        .px_1()
-        .rounded(px(RADIUS_CHIP))
-        .border_1()
-        .border_color(rgb(COLOR_BORDER))
-        .bg(rgb(COLOR_BASE))
-        .text_xs()
-        .text_color(rgb(COLOR_MUTED))
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .items_center()
-                .gap(px(1.))
-                .child(
-                    div()
-                        .w(px(10.))
-                        .h(px(7.))
-                        .border_1()
-                        .border_color(rgb(COLOR_MUTED)),
-                )
-                .child(div().w(px(4.)).h(px(1.)).bg(rgb(COLOR_MUTED))),
-        )
-        .child(format!("{count}"))
-}
-
 /// Root calls this builder on every frame; read the drawer snapshot instead of
 /// caching form state here. The input states are reused, never recreated.
 fn workspace_dialog(
@@ -427,11 +413,12 @@ fn workspace_dialog(
     let Some(entity) = drawer.upgrade() else {
         return dialog;
     };
-    let (_form_name, icon, _form_root, error, name_input, root_input) = {
+    let (_form_name, icon, color, _form_root, error, name_input, root_input) = {
         let state = entity.read(cx);
         (
             state.form_name.clone(),
             state.form_icon,
+            state.form_color,
             state.root_text(),
             state.form_error.clone(),
             state.name_input.clone(),
@@ -532,6 +519,34 @@ fn workspace_dialog(
                                 if let Some(entity) = tile_drawer.upgrade() {
                                     entity.update(cx, |this, cx| {
                                         this.set_form_icon(choice);
+                                        cx.notify();
+                                    });
+                                }
+                            })
+                    })),
+                )
+                .child(field_label("Cor"))
+                .child(
+                    div().flex().gap_2().children(COLOR_SWATCHES.map(|choice| {
+                        let swatch_drawer = drawer.clone();
+                        let selected = choice == color;
+                        Button::new(("new-workspace-color", choice as u64))
+                            .w(px(COLOR_SWATCH_SIZE))
+                            .h(px(COLOR_SWATCH_SIZE))
+                            .p_0()
+                            .rounded(px(RADIUS_CHIP))
+                            .border_1()
+                            .border_color(rgb(if selected {
+                                COLOR_FOREGROUND
+                            } else {
+                                COLOR_BORDER
+                            }))
+                            .bg(rgb(workspace_color(choice)))
+                            .with_variant(ButtonVariant::Ghost)
+                            .on_click(move |_, _, cx| {
+                                if let Some(entity) = swatch_drawer.upgrade() {
+                                    entity.update(cx, |this, cx| {
+                                        this.set_form_color(choice);
                                         cx.notify();
                                     });
                                 }
@@ -701,6 +716,7 @@ impl Render for WorkspaceDrawer {
                 let id = workspace.id;
                 let is_active = active == Some(id);
                 let invalid = workspace.invalid_root;
+                let color = workspace_color(workspace.color);
                 div()
                     .id(("workspace-row", id))
                     .flex()
@@ -714,7 +730,7 @@ impl Render for WorkspaceDrawer {
                         COLOR_PANEL
                     }))
                     .when(is_active, |this| {
-                        this.border_1().border_color(rgb(COLOR_ACCENT))
+                        this.border_1().border_color(rgb(color))
                     })
                     .hover(|this| this.bg(rgb(COLOR_ELEVATED)))
                     .on_mouse_down(
@@ -728,10 +744,20 @@ impl Render for WorkspaceDrawer {
                         MouseButton::Right,
                         cx.listener(|_, _, _, cx| cx.stop_propagation()),
                     )
-                    .child(icon_svg(
-                        workspace.icon,
-                        if is_active { COLOR_ACCENT } else { COLOR_MUTED },
-                    ))
+                    .child(
+                        div()
+                            .relative()
+                            .child(icon_svg(workspace.icon, color))
+                            .child(
+                                div()
+                                    .absolute()
+                                    .top(px(COUNT_BADGE_OFFSET))
+                                    .right(px(COUNT_BADGE_OFFSET))
+                                    .text_xs()
+                                    .text_color(rgb(COLOR_MUTED))
+                                    .child(format!("{}", workspace.canvas.terminals().len())),
+                            ),
+                    )
                     .child(
                         div()
                             .flex_1()
@@ -745,7 +771,6 @@ impl Render for WorkspaceDrawer {
                                 )
                             }),
                     )
-                    .child(monitor(workspace.canvas.terminals().len()))
                     .child(
                         div()
                             .id(("workspace-delete-guard", id))

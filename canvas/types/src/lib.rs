@@ -101,6 +101,21 @@ pub enum WorkspaceIcon {
     Globe,
 }
 
+/// Accent chosen for a workspace; kept framework-free and persisted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorkspaceColor {
+    Brass,
+    Steel,
+    Red,
+    Green,
+}
+
+impl Default for WorkspaceColor {
+    fn default() -> Self {
+        Self::Brass
+    }
+}
+
 /// Persisted state of one workspace, including its own canvas.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceState {
@@ -108,6 +123,8 @@ pub struct WorkspaceState {
     pub name: String,
     pub icon: WorkspaceIcon,
     pub root: PathBuf,
+    #[serde(default)]
+    pub color: WorkspaceColor,
     #[serde(default)]
     pub invalid_root: bool,
     #[serde(default)]
@@ -135,6 +152,16 @@ impl WorkspaceStore {
     }
 
     pub fn add(&mut self, name: String, icon: WorkspaceIcon, root: PathBuf) -> WorkspaceState {
+        self.add_with_color(name, icon, WorkspaceColor::Brass, root)
+    }
+
+    pub fn add_with_color(
+        &mut self,
+        name: String,
+        icon: WorkspaceIcon,
+        color: WorkspaceColor,
+        root: PathBuf,
+    ) -> WorkspaceState {
         let id = self.next_id;
         self.next_id += 1;
         let workspace = WorkspaceState {
@@ -143,6 +170,7 @@ impl WorkspaceStore {
             icon,
             root,
             invalid_root: false,
+            color,
             canvas: CanvasState::new(),
         };
         self.workspaces.push(workspace.clone());
@@ -282,6 +310,7 @@ mod workspace_tests {
             name: "Quebrado".into(),
             icon: WorkspaceIcon::Folder,
             root: PathBuf::from("/nao/existe"),
+            color: WorkspaceColor::Red,
             invalid_root: true,
             canvas: CanvasState::new(),
         };

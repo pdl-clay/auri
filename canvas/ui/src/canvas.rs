@@ -12,7 +12,7 @@ use gpui_component::{
     Disableable,
     button::{Button as ComponentButton, ButtonVariant, ButtonVariants as _},
 };
-use canvas_types::{CanvasState, TerminalId, WorkspaceIcon, WorkspaceId, WorkspaceState, WorkspaceStore};
+use canvas_types::{CanvasState, TerminalId, WorkspaceColor, WorkspaceIcon, WorkspaceId, WorkspaceState, WorkspaceStore};
 
 use crate::card::{TerminalCard, scroll_delta, terminal_grid};
 use crate::workspaces::{DrawerAction, WorkspaceDrawer};
@@ -60,6 +60,7 @@ fn create_workspace(
     store: &mut WorkspaceStore,
     name: String,
     icon: WorkspaceIcon,
+    color: WorkspaceColor,
     root: PathBuf,
 ) -> Result<WorkspaceId, String> {
     let name = name.trim().to_owned();
@@ -72,7 +73,7 @@ fn create_workspace(
     if !root.is_dir() {
         return Err(format!("A raiz {} não é um diretório.", root.display()));
     }
-    Ok(store.add(name, icon, root).id)
+    Ok(store.add_with_color(name, icon, color, root).id)
 }
 
 /// Remove one workspace's state and card group, leaving every other group alone.
@@ -180,8 +181,8 @@ impl Canvas {
 
     fn handle_action(&mut self, action: DrawerAction, cx: &mut Context<Self>) {
         match action {
-            DrawerAction::Create { name, icon, root } => {
-                match create_workspace(&mut self.store, name, icon, root) {
+            DrawerAction::Create { name, icon, color, root } => {
+                match create_workspace(&mut self.store, name, icon, color, root) {
                     Ok(id) => {
                         self.cards.entry(id).or_default();
                         self.finish_store_change(cx);
@@ -865,6 +866,7 @@ mod tests {
             &mut store,
             "Vazia".into(),
             WorkspaceIcon::Star,
+            WorkspaceColor::Brass,
             PathBuf::new(),
         );
 
