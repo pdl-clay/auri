@@ -128,6 +128,14 @@ impl Drop for HostListener {
 
 /// Runs the app with the terminal canvas as the `main` window's root view.
 pub fn run() {
+    // Install before the first window (and therefore the first agent PTY).
+    let skill = match canvas::install_skill() {
+        Ok(path) => Some(path),
+        Err(error) => {
+            eprintln!("auri skill unavailable: {error}");
+            None
+        }
+    };
     let mut store = WorkspaceStore::new();
     let load: LoadOutcome = config::load(&mut store);
     App::new()
@@ -163,7 +171,7 @@ pub fn run() {
         })
         .root_with("main", move |window, cx| {
             let handle = window.window_handle();
-            let view = cx.new(|cx| canvas::Canvas::new(store.clone(), load.clone(), handle, cx));
+            let view = cx.new(|cx| canvas::Canvas::new(store.clone(), load.clone(), handle, skill.clone(), cx));
             view.update(cx, |canvas, cx| canvas.bind_actions(cx));
             view.update(cx, |canvas, cx| canvas.prepare_workspaces(cx));
 
