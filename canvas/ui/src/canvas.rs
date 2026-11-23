@@ -1,7 +1,11 @@
 //! Canvas view: drawer, workspace groups and the lifecycle of PTY-backed cards.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+use auri_protocol::{Request, Response};
 
 use auro::gpui::{
     AnyElement, AnyWindowHandle, App, Bounds, ClickEvent, Context, CursorStyle, Entity, MouseButton, MouseDownEvent, Pixels, Point, Render,
@@ -14,7 +18,7 @@ use gpui_component::{
     dialog::{Dialog, DialogButtonProps},
 };
 use gpui_component::input::{Input, InputEvent, InputState};
-use canvas_types::{AgentIcon, AgentKind, AgentState, CardBounds, NoteState, TerminalId, TerminalState, WorkspaceColor, WorkspaceIcon, WorkspaceId, WorkspaceState, WorkspaceStore};
+use canvas_types::{AgentIcon, AgentKind, AgentState, CardBounds, ConnectionTarget, NoteState, TerminalId, TerminalState, WorkspaceColor, WorkspaceIcon, WorkspaceId, WorkspaceState, WorkspaceStore};
 
 use crate::card::{TerminalCard, scroll_delta, terminal_grid};
 use crate::text_card::TextCard;
@@ -22,11 +26,181 @@ use crate::workspaces::{DrawerAction, WorkspaceDrawer};
 use crate::theme::*;
 use crate::config::{self, LoadOutcome};
 use crate::pty::PtySession;
+use crate::permissions::{authorize, Action, Denied, Principal};
 
 type CardGroups = HashMap<WorkspaceId, Vec<(TerminalId, Entity<TerminalCard>)>>;
 
 type NoteGroups = HashMap<WorkspaceId, Vec<(u64, Entity<TextCard>)>>;
 
+
+/// 256 bits of randomness from the OS-backed generator, hex encoded. The token
+/// never lives in the config, logs or canvas state — only in one PTY's env and
+/// in this in-memory registry.
+fn random_token() -> String {
+    use rand::RngCore;
+
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut bytes = [0u8; 32];
+    rand::rng().fill_bytes(&mut bytes);
+    let mut token = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        token.push(HEX[(byte >> 4) as usize] as char);
+        token.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    token
+}
+
+/// Live identity for the host listener. `tokens` maps a one-time token to the
+/// workspace-local card id; `homes` remembers its workspace so an id reused in
+/// another workspace cannot borrow its authority. `writers` holds the shared
+/// PTY input handle used by `ask` dispatch.
+#[derive(Default)]
+struct AgentRegistry {
+    tokens: HashMap<String, TerminalId>,
+    homes: HashMap<String, WorkspaceId>,
+    writers: HashMap<TerminalId, Arc<Mutex<Box<dyn Write + Send>>>>,
+}
+
+impl AgentRegistry {
+    /// Issue a fresh token for one card in `workspace`.
+    fn issue(&mut self, workspace: WorkspaceId, id: TerminalId) -> String {
+        let token = random_token();
+        self.tokens.insert(token.clone(), id);
+        self.homes.insert(token.clone(), workspace);
+        token
+    }
+
+    /// Retain a shared handle to a card's PTY input for later `ask` dispatch.
+    fn register(&mut self, id: TerminalId, writer: Arc<Mutex<Box<dyn Write + Send>>>) {
+        self.writers.insert(id, writer);
+    }
+
+    /// Forget one card's credentials; ids are workspace-local, so a card with
+    /// the same id in a different workspace keeps its token.
+    fn revoke_agent(&mut self, workspace: WorkspaceId, id: TerminalId) {
+        let stale: Vec<String> = self
+            .tokens
+            .iter()
+            .filter(|(token, card)| {
+                **card == id && self.homes.get(*token) == Some(&workspace)
+            })
+            .map(|(token, _)| token.clone())
+            .collect();
+        for token in stale {
+            self.tokens.remove(&token);
+            self.homes.remove(&token);
+        }
+        if !self.tokens.values().any(|card| *card == id) {
+            self.writers.remove(&id);
+        }
+    }
+
+    /// Invalidate every token issued by one workspace (unload or delete).
+    fn revoke_workspace(&mut self, workspace: WorkspaceId) {
+        let stale: Vec<String> = self
+            .homes
+            .iter()
+            .filter(|(_, home)| **home == workspace)
+            .map(|(token, _)| token.clone())
+            .collect();
+        for token in stale {
+            self.tokens.remove(&token);
+            self.homes.remove(&token);
+        }
+        let live: HashSet<TerminalId> = self.tokens.values().copied().collect();
+        self.writers.retain(|id, _| live.contains(id));
+    }
+
+    /// Drop every credential when the whole store is replaced.
+    fn clear(&mut self) {
+        self.tokens.clear();
+        self.homes.clear();
+        self.writers.clear();
+    }
+
+    /// Resolve a token to the workspace and card it was issued for. The card
+    /// must still exist in that workspace's state.
+    fn resolve(&self, store: &WorkspaceStore, token: &str) -> Option<(WorkspaceId, TerminalId)> {
+        let id = *self.tokens.get(token)?;
+        let home = *self.homes.get(token)?;
+        let workspace = store.workspaces().iter().find(|item| item.id == home)?;
+        let live = workspace.canvas.agents().iter().any(|agent| agent.id == id)
+            || workspace.canvas.terminals().iter().any(|terminal| terminal.id == id);
+        live.then_some((home, id))
+    }
+}
+
+/// Resolve a CLI address to a card: canonical workspace-local id first, then
+/// the exact display name printed by `list`. Unresolvable names become an
+/// unreachable id so authorization refuses them like any other missing edge.
+fn card_target(workspace: &WorkspaceState, target: &str) -> ConnectionTarget {
+    let id = target.parse::<TerminalId>().ok().or_else(|| {
+        workspace
+            .canvas
+            .agents()
+            .iter()
+            .find(|agent| agent.name == target)
+            .map(|agent| agent.id)
+            .or_else(|| {
+                workspace
+                    .canvas
+                    .terminals()
+                    .iter()
+                    .find(|terminal| terminal.title == target)
+                    .map(|terminal| terminal.id)
+            })
+    });
+    ConnectionTarget::Card(id.unwrap_or(u64::MAX))
+}
+
+/// Note ids are already canonical; there is no display name to resolve.
+fn note_target(target: &str) -> u64 {
+    target.parse::<u64>().unwrap_or(u64::MAX)
+}
+
+fn action_for_request(workspace: &WorkspaceState, request: &Request) -> Action {
+    match request {
+        Request::List | Request::Skill => Action::List,
+        Request::Ask { target, raw } => Action::Ask { target: card_target(workspace, target), raw: raw.clone() },
+        Request::Check { target, .. } => Action::Check { target: card_target(workspace, target) },
+        Request::NoteRead { note, .. } => Action::NoteRead { note: note_target(note) },
+        Request::NoteWrite { note, .. } | Request::NoteEdit { note, .. } => {
+            Action::NoteWrite { note: note_target(note) }
+        }
+        Request::NoteCreate { .. } => Action::NoteCreate,
+        Request::NoteDelete { note } => Action::NoteDelete { note: note_target(note) },
+        Request::TerminalNew { .. } => Action::TerminalNew,
+        Request::TerminalRemove { target } => Action::TerminalRemove { target: card_target(workspace, target) },
+        Request::AgentNew { .. } => Action::AgentNew,
+        Request::AgentRemove { target } => Action::AgentRemove { target: card_target(workspace, target) },
+        Request::AgentRole { target, .. } => Action::AgentRole { target: card_target(workspace, target) },
+    }
+}
+
+/// The host's permission gate. An unknown or revoked token is deliberately
+/// indistinguishable from a refused request; the plain-terminal case resolves
+/// to no agent identity and is reported as such. Command dispatch is layered
+/// on top of this gate by the next task.
+fn authorize_request(
+    registry: &AgentRegistry,
+    store: &WorkspaceStore,
+    token: &str,
+    request: &Request,
+) -> Response {
+    let Some((workspace_id, id)) = registry.resolve(store, token) else {
+        return Response::Err("permission_denied".into());
+    };
+    let Some(workspace) = store.workspaces().iter().find(|item| item.id == workspace_id) else {
+        return Response::Err("permission_denied".into());
+    };
+    // Built from the live card, never from a name or a cached snapshot.
+    let principal = workspace.canvas.agent(id).map(Principal::from);
+    match authorize(workspace, principal.as_ref(), &action_for_request(workspace, request)) {
+        Ok(()) => Response::Ok(String::new()),
+        Err(Denied::NoIdentity) => Response::Err("no_identity".into()),
+        Err(Denied::NotAdmin | Denied::NotConnected) => Response::Err("permission_denied".into()),
+    }
+}
 
 /// Transient menu state. Grouping these flags makes every close path clear the
 /// nested panels together, including the agent list.
@@ -431,6 +605,10 @@ pub struct Canvas {
     custom_command_input: Option<Entity<InputState>>,
     custom_name_subscription: Option<Subscription>,
     custom_command_subscription: Option<Subscription>,
+    /// Live CLI credentials and PTY handles; never persisted to disk.
+    registry: AgentRegistry,
+    /// Owns the host socket; dropped with the canvas at app shutdown.
+    listener: Option<crate::HostListener>,
 }
 impl Canvas {
     /// `load` is authoritative for the drawer banner; the store was already
@@ -461,7 +639,26 @@ impl Canvas {
             custom_command_input: None,
             custom_name_subscription: None,
             custom_command_subscription: None,
+            registry: AgentRegistry::default(),
+            listener: None,
         }
+    }
+
+    /// Keep the shared PTY input handle for one agent card. This handle and the
+    /// terminal view drive the same pty, so a host `ask` reaches the shell.
+    pub fn register_agent_pty(&mut self, id: TerminalId, writer: Arc<Mutex<Box<dyn Write + Send>>>) {
+        self.registry.register(id, writer);
+    }
+
+    /// Authenticate one host request before any command is dispatched.
+    pub fn handle_request(&self, token: &str, request: Request) -> Response {
+        authorize_request(&self.registry, &self.store, token, &request)
+    }
+
+    /// Own the host socket for the canvas' lifetime; dropping it stops the
+    /// listener and unlinks the socket.
+    pub fn set_listener(&mut self, listener: crate::HostListener) {
+        self.listener = Some(listener);
     }
 
     /// Resolve the label, command and icon actually used by an agent kind.
@@ -635,6 +832,7 @@ impl Canvas {
                 self.selected_note.clear_workspace(id);
                 self.repaint_note_selection(cx);
                 if unload_workspace(&mut self.store, id) {
+                    self.registry.revoke_workspace(id);
                     let dropped = self.cards.remove(&id).unwrap_or_default();
                     let dropped_notes = self.notes.remove(&id).unwrap_or_default();
                     self.finish_store_change(cx);
@@ -647,6 +845,7 @@ impl Canvas {
                 self.selected_note.clear_workspace(id);
                 self.repaint_note_selection(cx);
                 if let Some((_, dropped)) = remove_workspace(&mut self.store, &mut self.cards, id) {
+                    self.registry.revoke_workspace(id);
                     let dropped_notes = self.notes.remove(&id).unwrap_or_default();
                     self.finish_store_change(cx);
                     // Dropping the card handles terminates that workspace's shells.
@@ -758,6 +957,7 @@ impl Canvas {
         self.clear_note_selection(cx);
         store.mark_all_unloaded();
         self.store = store;
+        self.registry.clear();
         self.cards.clear();
         self.notes.clear();
         self.error = None;
@@ -1030,9 +1230,17 @@ impl Canvas {
             }
         };
         let (cols, rows) = terminal_grid(&bounds);
-        let mut pty = match PtySession::spawn_shell_in(cols, rows, Some(&root)) {
+        // Only agent cards receive a CLI identity. The token travels in this
+        // PTY's environment alone; the shell and its agent command inherit it.
+        let token = self.registry.issue(workspace_id, id);
+        let env = [
+            ("AURI_SOCKET".to_owned(), crate::socket_path().to_string_lossy().into_owned()),
+            ("AURI_TOKEN".to_owned(), token),
+        ];
+        let mut pty = match PtySession::spawn_shell_in_with_env(cols, rows, Some(&root), &env) {
             Ok(pty) => pty,
             Err(error) => {
+                self.registry.revoke_agent(workspace_id, id);
                 if let Some(workspace) = self.store.workspace_mut(workspace_id) {
                     workspace.canvas.remove_agent(id);
                 }
@@ -1042,6 +1250,7 @@ impl Canvas {
             }
         };
         if let Err(error) = pty.send_line(&command) {
+            self.registry.revoke_agent(workspace_id, id);
             if let Some(workspace) = self.store.workspace_mut(workspace_id) {
                 workspace.canvas.remove_agent(id);
             }
@@ -1408,7 +1617,9 @@ impl Canvas {
         {
             self.agent_menu = None;
         }
-        remove_terminal_state(&mut self.store, &mut self.cards, workspace_id, id);
+        if remove_terminal_state(&mut self.store, &mut self.cards, workspace_id, id) {
+            self.registry.revoke_agent(workspace_id, id);
+        }
         self.finish_store_change(cx);
     }
 
@@ -3223,5 +3434,139 @@ mod card_gap_tests {
         );
         let next = adjacent_origin(last);
         assert_eq!((f32::from(next.x), f32::from(next.y)), (10.0 + CARD_WIDTH + 1.0, 20.0));
+    }
+}
+
+#[cfg(test)]
+mod registry_tests {
+    use super::*;
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    use auri_protocol::{Request, Response};
+    use crate::permissions::{Action, Denied, authorize};
+
+    fn card_bounds() -> CardBounds {
+        CardBounds { x: 0.0, y: 0.0, width: 100.0, height: 100.0 }
+    }
+
+    fn sink_writer() -> Arc<Mutex<Box<dyn Write + Send>>> {
+        Arc::new(Mutex::new(Box::new(std::io::sink())))
+    }
+
+    fn workspace_with_cards() -> (WorkspaceStore, WorkspaceId, TerminalId, TerminalId) {
+        let mut store = WorkspaceStore::new();
+        let workspace = store.add("Demo".into(), WorkspaceIcon::Folder, PathBuf::from("/tmp/auri-demo"));
+        let id = workspace.id;
+        let agent = store.workspace_mut(id).unwrap().canvas.add_agent(AgentKind::Claude, card_bounds());
+        let terminal = store.workspace_mut(id).unwrap().canvas.add();
+        (store, id, agent.id, terminal.id)
+    }
+
+    #[test]
+    fn issued_tokens_are_random_and_distinct() {
+        let mut registry = AgentRegistry::default();
+        let first = registry.issue(1, 1);
+        let second = registry.issue(1, 2);
+        assert!(!first.is_empty());
+        assert_ne!(first, second);
+        assert!(first.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn unknown_token_is_permission_denied() {
+        let (store, ..) = workspace_with_cards();
+        let registry = AgentRegistry::default();
+        assert_eq!(
+            authorize_request(&registry, &store, "never-issued", &Request::List),
+            Response::Err("permission_denied".into())
+        );
+    }
+
+    #[test]
+    fn removed_card_revokes_its_token() {
+        let (mut store, workspace_id, agent_id, _) = workspace_with_cards();
+        let mut registry = AgentRegistry::default();
+        let token = registry.issue(workspace_id, agent_id);
+        assert_eq!(
+            authorize_request(&registry, &store, &token, &Request::List),
+            Response::Ok(String::new())
+        );
+
+        store.workspace_mut(workspace_id).unwrap().canvas.remove_agent(agent_id);
+        registry.revoke_agent(workspace_id, agent_id);
+
+        assert_eq!(
+            authorize_request(&registry, &store, &token, &Request::List),
+            Response::Err("permission_denied".into())
+        );
+    }
+
+    #[test]
+    fn removing_a_card_keeps_the_same_id_in_another_workspace() {
+        let (mut store, first, agent_id, _) = workspace_with_cards();
+        let other = store.add("Other".into(), WorkspaceIcon::Star, PathBuf::from("/tmp/auri-other"));
+        let other_agent = store.workspace_mut(other.id).unwrap().canvas.add_agent(AgentKind::Codex, card_bounds());
+        assert_eq!(other_agent.id, agent_id);
+
+        let mut registry = AgentRegistry::default();
+        let first_token = registry.issue(first, agent_id);
+        let other_token = registry.issue(other.id, other_agent.id);
+        registry.revoke_agent(first, agent_id);
+
+        assert_eq!(
+            authorize_request(&registry, &store, &first_token, &Request::List),
+            Response::Err("permission_denied".into())
+        );
+        assert_eq!(
+            authorize_request(&registry, &store, &other_token, &Request::List),
+            Response::Ok(String::new())
+        );
+    }
+
+    #[test]
+    fn plain_terminal_token_has_no_agent_identity() {
+        let (store, workspace_id, _, terminal_id) = workspace_with_cards();
+        let mut registry = AgentRegistry::default();
+        let token = registry.issue(workspace_id, terminal_id);
+
+        assert_eq!(
+            authorize_request(&registry, &store, &token, &Request::List),
+            Response::Err("no_identity".into())
+        );
+        let workspace = store.workspaces().iter().find(|w| w.id == workspace_id).unwrap();
+        let principal = workspace.canvas.agent(terminal_id).map(crate::permissions::Principal::from);
+        assert_eq!(principal, None);
+        assert_eq!(authorize(workspace, principal.as_ref(), &Action::List), Err(Denied::NoIdentity));
+    }
+
+    #[test]
+    fn unloading_a_workspace_revokes_its_tokens() {
+        let (store, workspace_id, agent_id, _) = workspace_with_cards();
+        let mut registry = AgentRegistry::default();
+        let token = registry.issue(workspace_id, agent_id);
+        assert_eq!(
+            authorize_request(&registry, &store, &token, &Request::List),
+            Response::Ok(String::new())
+        );
+
+        registry.revoke_workspace(workspace_id);
+
+        assert_eq!(
+            authorize_request(&registry, &store, &token, &Request::List),
+            Response::Err("permission_denied".into())
+        );
+    }
+
+    #[test]
+    fn registering_a_pty_retains_its_shared_writer() {
+        let mut registry = AgentRegistry::default();
+        let id = 7;
+        let writer = sink_writer();
+        registry.register(id, writer.clone());
+        assert!(Arc::ptr_eq(registry.writers.get(&id).unwrap(), &writer));
+
+        registry.revoke_agent(1, id);
+        assert!(registry.writers.is_empty());
     }
 }

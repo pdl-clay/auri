@@ -14,6 +14,118 @@ use canvas_types::WorkspaceStore;
 
 use crate::config::LoadOutcome;
 
+use std::fs;
+use std::io::{self, BufRead, BufReader, Write};
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
+use std::sync::Arc;
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
+
+use auri_protocol::{RequestLine, Response, decode_line, encode_response};
+
+/// The host's answer to one CLI line. Request bodies are decoded before this
+/// handler runs; a connection waits for exactly one response.
+type RequestHandler = Arc<dyn Fn(RequestLine) -> Response + Send + Sync>;
+
+fn socket_path_in(runtime_dir: &Path) -> PathBuf {
+    runtime_dir.join(format!("auri-{}.sock", std::process::id()))
+}
+
+/// One socket per running app instance, local to the user's runtime directory.
+fn socket_path() -> PathBuf {
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .unwrap_or_else(std::env::temp_dir);
+    socket_path_in(&runtime)
+}
+
+/// Answer one connection. A malformed line is refused without shutting down
+/// the listener, and the timeout keeps a silent client from pinning a thread.
+fn serve(stream: &mut UnixStream, handler: &RequestHandler) {
+    let result = (|| -> anyhow::Result<Response> {
+        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+        let mut reader = BufReader::new(stream.try_clone()?);
+        let mut line = String::new();
+        if reader.read_line(&mut line)? == 0 {
+            anyhow::bail!("empty request line");
+        }
+        Ok(handler(decode_line(line.trim_end())?))
+    })();
+    let response = result.unwrap_or_else(|error| Response::Err(format!("bad_request: {error}")));
+    let mut payload = encode_response(&response);
+    payload.push('\n');
+    let _ = stream.write_all(payload.as_bytes());
+    let _ = stream.flush();
+}
+
+/// Owns the host's single Unix socket. Dropping it stops the accept loop and
+/// unlinks the socket, so a stale path never outlives the app.
+pub struct HostListener {
+    path: PathBuf,
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl HostListener {
+    /// Bind the app socket under `XDG_RUNTIME_DIR` and start accepting.
+    pub fn start(handler: RequestHandler) -> io::Result<Self> {
+        Self::start_at(&socket_path(), handler)
+    }
+
+    /// Bind a specific socket path; `start` uses the app's runtime directory.
+    pub fn start_at(path: &Path, handler: RequestHandler) -> io::Result<Self> {
+        if path.exists() {
+            // A crashed instance may have left a socket behind.
+            fs::remove_file(path)?;
+        }
+        let listener = UnixListener::bind(path)?;
+        listener.set_nonblocking(true)?;
+        // XDG_RUNTIME_DIR is private already, but the /tmp fallback is not.
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let thread_path = path.to_path_buf();
+        let thread = thread::spawn(move || {
+            while !thread_stop.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => serve(&mut stream, &handler),
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(_) => break,
+                }
+            }
+            let _ = fs::remove_file(&thread_path);
+        });
+        Ok(Self {
+            path: path.to_path_buf(),
+            stop,
+            thread: Some(thread),
+        })
+    }
+
+    /// Stop accepting and unlink the socket. Safe to call more than once.
+    pub fn stop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+impl Drop for HostListener {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
 /// Runs the app with the terminal canvas as the `main` window's root view.
 pub fn run() {
     let mut store = WorkspaceStore::new();
@@ -54,8 +166,119 @@ pub fn run() {
             let view = cx.new(|cx| canvas::Canvas::new(store.clone(), load.clone(), handle, cx));
             view.update(cx, |canvas, cx| canvas.bind_actions(cx));
             view.update(cx, |canvas, cx| canvas.prepare_workspaces(cx));
+
+            // Requests arrive on the socket thread but must mutate the canvas
+            // on the main thread; each connection waits for its own answer.
+            let (sender, receiver) = mpsc::channel::<(RequestLine, mpsc::Sender<Response>)>();
+            view.update(cx, |_, cx| {
+                cx.spawn(async move |canvas, cx| {
+                    let mut receiver = Some(receiver);
+                    loop {
+                        let rx = receiver.take().expect("receiver is restored every turn");
+                        let (rx, incoming) = cx
+                            .background_executor()
+                            .spawn(async move {
+                                let item = rx.recv().ok();
+                                (rx, item)
+                            })
+                            .await;
+                        receiver = Some(rx);
+                        let Some((line, reply)) = incoming else {
+                            break;
+                        };
+                        let answer = canvas
+                            .upgrade()
+                            .and_then(|entity| {
+                                entity
+                                    .update(cx, |canvas, _| canvas.handle_request(&line.token, line.request))
+                                    .ok()
+                            })
+                            .unwrap_or_else(|| Response::Err("host_unavailable".into()));
+                        let _ = reply.send(answer);
+                    }
+                })
+                .detach();
+            });
+            let handler: RequestHandler = Arc::new(move |line| {
+                let (reply, wait) = mpsc::channel();
+                if sender.send((line, reply)).is_err() {
+                    return Response::Err("host_unavailable".into());
+                }
+                wait.recv().unwrap_or_else(|_| Response::Err("host_unavailable".into()))
+            });
+            match HostListener::start(handler) {
+                Ok(listener) => view.update(cx, |canvas, _| canvas.set_listener(listener)),
+                Err(error) => eprintln!("auri host socket unavailable: {error}"),
+            }
             cx.new(|cx| gpui_component::Root::new(view, window, cx))
         })
         .run();
+}
+
+#[cfg(test)]
+mod listener_tests {
+    use super::*;
+    use std::io::{BufRead, BufReader, Write};
+
+    use auri_protocol::{Request, RequestLine, decode_response, encode_line};
+
+    #[test]
+    fn socket_path_lives_under_the_runtime_directory() {
+        let path = socket_path_in(Path::new("/run/user/1000"));
+        assert_eq!(path.parent(), Some(Path::new("/run/user/1000")));
+        let name = path.file_name().unwrap().to_string_lossy();
+        assert!(name.starts_with("auri-"));
+        assert!(name.ends_with(".sock"));
+    }
+
+    #[test]
+    fn listener_answers_one_line_per_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auri.sock");
+        let handler: RequestHandler = Arc::new(|line| Response::Ok(format!("{}:{}", line.token, line.json)));
+        let mut listener = HostListener::start_at(&path, handler).unwrap();
+
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+
+        let mut stream = UnixStream::connect(&path).unwrap();
+        let line = encode_line(&RequestLine {
+            token: "abc".into(),
+            json: false,
+            request: Request::List,
+        });
+        writeln!(stream, "{line}").unwrap();
+        let mut answer = String::new();
+        BufReader::new(&stream).read_line(&mut answer).unwrap();
+        assert_eq!(decode_response(answer.trim()).unwrap(), Response::Ok("abc:false".into()));
+
+        listener.stop();
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn malformed_line_is_refused_without_stopping_the_listener() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auri.sock");
+        let handler: RequestHandler = Arc::new(|_| Response::Ok("ok".into()));
+        let mut listener = HostListener::start_at(&path, handler).unwrap();
+
+        let mut bad = UnixStream::connect(&path).unwrap();
+        writeln!(bad, "not json").unwrap();
+        let mut answer = String::new();
+        BufReader::new(&bad).read_line(&mut answer).unwrap();
+        assert!(matches!(decode_response(answer.trim()).unwrap(), Response::Err(reason) if reason.starts_with("bad_request")));
+
+        let mut good = UnixStream::connect(&path).unwrap();
+        writeln!(good, "{}", encode_line(&RequestLine {
+            token: "abc".into(),
+            json: true,
+            request: Request::List,
+        })).unwrap();
+        let mut answer = String::new();
+        BufReader::new(&good).read_line(&mut answer).unwrap();
+        assert_eq!(decode_response(answer.trim()).unwrap(), Response::Ok("ok".into()));
+        listener.stop();
+        assert!(!path.exists());
+    }
 }
 

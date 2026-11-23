@@ -8,12 +8,14 @@ rust-version = "1.90"
 gpui-component = "=0.5.1"
 auro = "=0.1.0-alpha.13"
 canvas-types = { path = "../types" }
+auri-protocol = { path = "../protocol" }
 anyhow = "1"
 gpui-terminal = { path = "../vendor/gpui-terminal" }
 parking_lot = "0.12"
 portable-pty = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+rand = "0.9"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

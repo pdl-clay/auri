@@ -185,11 +185,25 @@ impl PtySession {
         rows: u16,
         cwd: Option<&std::path::Path>,
     ) -> anyhow::Result<Self> {
+        Self::spawn_shell_in_with_env(cols, rows, cwd, &[])
+    }
+
+    /// Spawn `$SHELL` with the host's extra environment, inherited by the shell
+    /// and every command it launches. Later entries win over earlier ones.
+    pub fn spawn_shell_in_with_env(
+        cols: u16,
+        rows: u16,
+        cwd: Option<&std::path::Path>,
+        env: &[(String, String)],
+    ) -> anyhow::Result<Self> {
         let shell = default_shell();
         let mut cmd = CommandBuilder::new(shell);
         cmd.arg("-l");
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
+        for (key, value) in env {
+            cmd.env(key, value);
+        }
         if let Some(cwd) = cwd {
             cmd.cwd(cwd);
         }
@@ -293,6 +307,36 @@ mod tests {
     #[test]
     fn default_shell_points_to_an_existing_shell() {
         assert!(Path::new(&default_shell()).exists());
+    }
+
+    /// The host puts its socket and one-time token in an agent PTY's env; the
+    /// spawned shell (and the CLI it runs) must inherit both verbatim.
+    #[test]
+    fn spawned_shell_sees_auri_socket_and_token_env() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("env.txt");
+        let env = [
+            ("AURI_SOCKET".to_owned(), "/run/user/1000/auri-42.sock".to_owned()),
+            ("AURI_TOKEN".to_owned(), "test-token-123".to_owned()),
+        ];
+        let mut pty = PtySession::spawn_shell_in_with_env(80, 24, None, &env).unwrap();
+        pty.send_line(&format!(
+            "printf '%s\\n%s\\n' \"$AURI_SOCKET\" \"$AURI_TOKEN\" > {}",
+            out.display()
+        ))
+        .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let contents = loop {
+            if let Ok(text) = fs::read_to_string(&out)
+                && !text.is_empty()
+            {
+                break text;
+            }
+            assert!(Instant::now() < deadline, "shell never wrote the env file");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(contents, "/run/user/1000/auri-42.sock\ntest-token-123\n");
     }
 
     fn read_pid_with_timeout(path: &Path, timeout: Duration) -> anyhow::Result<u32> {

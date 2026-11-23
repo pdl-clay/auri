@@ -929,6 +929,7 @@ name = "canvas-ui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "auri-protocol",
  "auro",
  "canvas-types",
  "gpui-component",
@@ -936,6 +937,7 @@ dependencies = [
  "libc",
  "parking_lot",
  "portable-pty",
+ "rand 0.9.5",
  "serde",
  "serde_json",
  "tempfile",
