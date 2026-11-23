@@ -1130,6 +1130,42 @@ impl Canvas {
         }
         self.ensure_agent_name_input(window, cx);
         self.sync_agent_name_input(window, cx);
+
+        let Some(menu) = self.agent_menu.clone() else {
+            return;
+        };
+        let canvas = cx.weak_entity();
+        let name_input = self.agent_name_input.clone();
+        let error = self.error.clone();
+        let kinds: Vec<(AgentKind, AgentIcon)> = all_agent_kinds(&self.store)
+            .into_iter()
+            .map(|kind| {
+                let icon = self.agent_details(kind).2;
+                (kind, icon)
+            })
+            .collect();
+        let command = self.agent_details(menu.kind).1;
+        let root = self
+            .store
+            .workspaces()
+            .iter()
+            .find(|workspace| workspace.id == menu.workspace_id)
+            .map(|workspace| workspace.root.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        window.open_dialog(cx, move |dialog, window, cx| {
+            agent_edit_dialog(
+                dialog,
+                window,
+                cx,
+                &canvas,
+                name_input.clone(),
+                error.clone(),
+                kinds.clone(),
+                menu.kind,
+                command.clone(),
+                root.clone(),
+            )
+        });
         cx.notify();
     }
 
@@ -1972,6 +2008,166 @@ fn custom_agent_dialog(
         )
 }
 
+/// Centered "Editar agente" form; a real dialog stays above canvas menus.
+fn agent_edit_dialog(
+    dialog: Dialog,
+    window: &mut Window,
+    _cx: &mut App,
+    canvas: &WeakEntity<Canvas>,
+    name_input: Option<Entity<InputState>>,
+    error: Option<String>,
+    kinds: Vec<(AgentKind, AgentIcon)>,
+    kind: AgentKind,
+    command: String,
+    root: String,
+) -> Dialog {
+    let ok_canvas = canvas.clone();
+    let cancel_canvas = canvas.clone();
+    let close_canvas = canvas.clone();
+
+    dialog
+        .title(
+            div()
+                .text_lg()
+                .text_color(rgb(COLOR_FOREGROUND))
+                .child("Editar agente"),
+        )
+        .w(px(AGENT_DIALOG_WIDTH))
+        .margin_top((window.viewport_size().height - px(AGENT_DIALOG_HEIGHT)) / 2.0)
+        .overlay(true)
+        .rounded(px(RADIUS_DIALOG))
+        .border_1()
+        .border_color(rgb(COLOR_BORDER))
+        .bg(rgb(COLOR_PANEL))
+        .text_color(rgb(COLOR_FOREGROUND))
+        .button_props(
+            DialogButtonProps::default()
+                .ok_text("Salvar")
+                .cancel_text("Cancelar")
+                .ok_variant(ButtonVariant::Primary)
+                .cancel_variant(ButtonVariant::Ghost),
+        )
+        .footer(|ok, cancel, window, cx| vec![cancel(window, cx), ok(window, cx)])
+        .on_ok(move |_, _, cx| {
+            let mut accepted = false;
+            if let Some(entity) = ok_canvas.upgrade() {
+                entity.update(cx, |this, cx| {
+                    this.save_agent_edits(cx);
+                    accepted = this.agent_menu.is_none() && this.error.is_none();
+                });
+            }
+            accepted
+        })
+        .on_cancel(move |_, _, cx| {
+            if let Some(entity) = cancel_canvas.upgrade() {
+                entity.update(cx, |this, cx| this.close_agent_menu(cx));
+            }
+            true
+        })
+        .on_close(move |_, _, cx| {
+            if let Some(entity) = close_canvas.upgrade() {
+                entity.update(cx, |this, cx| this.close_agent_menu(cx));
+            }
+        })
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(COLOR_MUTED))
+                        .child("Nome do terminal"),
+                )
+                .children(name_input.iter().map(|state| {
+                    Input::new(state)
+                        .w_full()
+                        .rounded(px(RADIUS_CONTROL))
+                        .bg(rgb(COLOR_ELEVATED))
+                        .border_color(rgb(COLOR_BORDER))
+                }))
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(COLOR_MUTED))
+                        .child("Agente"),
+                )
+                .child(div().flex().gap_2().children(
+                    kinds.into_iter().map(|(candidate, icon)| {
+                        let tile_canvas = canvas.clone();
+                        let selected = candidate == kind;
+                        ComponentButton::new(("agent-edit-kind", candidate.id()))
+                            .child(
+                                svg()
+                                    .path(agent_icon_path(icon))
+                                    .w(px(ICON_SIZE))
+                                    .h(px(ICON_SIZE))
+                                    .text_color(rgb(agent_color(icon))),
+                            )
+                            .w(px(AGENT_TILE_SIZE))
+                            .h(px(AGENT_TILE_SIZE))
+                            .p_0()
+                            .rounded(px(RADIUS_CONTROL))
+                            .border_1()
+                            .border_color(rgb(if selected {
+                                agent_color(icon)
+                            } else {
+                                COLOR_BORDER
+                            }))
+                            .bg(rgb(if selected {
+                                COLOR_ELEVATED
+                            } else {
+                                COLOR_PANEL
+                            }))
+                            .with_variant(ButtonVariant::Ghost)
+                            .on_click(move |_, _, cx| {
+                                if let Some(entity) = tile_canvas.upgrade() {
+                                    entity.update(cx, |this, cx| {
+                                        if let Some(menu) = this.agent_menu.as_mut() {
+                                            menu.kind = candidate;
+                                        }
+                                        cx.notify();
+                                    });
+                                }
+                            })
+                    }),
+                ))
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(COLOR_MUTED))
+                        .child("Comando"),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(COLOR_FOREGROUND))
+                        .child(command),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(COLOR_MUTED))
+                        .child("Raiz"),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(COLOR_MUTED))
+                        .child(root),
+                )
+                .when_some(error, |form, error| {
+                    form.child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(COLOR_DANGER))
+                            .child(error),
+                    )
+                }),
+        )
+}
+
 impl Render for Canvas {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let active = self.store.active();
@@ -1984,25 +2180,6 @@ impl Render for Canvas {
         let agent_list = self.menu.agent_list;
         let agent_list_anchor = self.menu.agent_list_anchor;
         let agent_menu = self.agent_menu.clone();
-        let agent_name_input = self.agent_name_input.clone();
-        let dialog_error = self.error.clone();
-        let agent_root = self
-            .agent_menu
-            .as_ref()
-            .and_then(|menu| {
-                self.store
-                    .workspaces()
-                    .iter()
-                    .find(|workspace| workspace.id == menu.workspace_id)
-            })
-            .map(|workspace| workspace.root.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let agent_kinds = all_agent_kinds(&self.store);
-        let edit_command = self
-            .agent_menu
-            .as_ref()
-            .map(|menu| self.agent_details(menu.kind).1)
-            .unwrap_or_default();
         let drawer_width = self.drawer.read(cx).drawer_width();
         let context_menu = self.menu.context_menu.map(|position| {
             (
@@ -2408,12 +2585,9 @@ impl Render for Canvas {
                                     ))
                                 })
                             })
-                            .when_some(agent_menu.clone(), |area, menu| {
+                            .when_some(agent_menu.clone().filter(|menu| !menu.editing), |area, menu| {
                                 let x = (f32::from(menu.position.x) - drawer_width).max(SPACE_NORMAL);
                                 let y = f32::from(menu.position.y).max(SPACE_NORMAL);
-                                let name_input = agent_name_input.clone();
-                                let root_text = agent_root.clone();
-                                let error = dialog_error.clone();
                                 area.child(
                                     div()
                                         .absolute()
@@ -2425,139 +2599,7 @@ impl Render for Canvas {
                                             cx.listener(|this, _, _, cx| this.close_agent_menu(cx)),
                                         ),
                                 )
-                                .child(if menu.editing {
-                                    let cancel = ComponentButton::new("agent-edit-cancel")
-                                        .label("Cancelar")
-                                        .with_variant(ButtonVariant::Ghost)
-                                        .on_click(cx.listener(|this, _, _, cx| this.close_agent_menu(cx)));
-                                    let save = ComponentButton::new("agent-edit-save")
-                                        .label("Salvar")
-                                        .with_variant(ButtonVariant::Primary)
-                                        .on_click(cx.listener(|this, _, _, cx| this.save_agent_edits(cx)));
-                                    div()
-                                        .absolute()
-                                        .left(px(x))
-                                        .top(px(y))
-                                        .w(px(AGENT_DIALOG_WIDTH))
-                                        .flex()
-                                        .flex_col()
-                                        .gap_3()
-                                        .p(px(SPACE_PANEL))
-                                        .rounded(px(RADIUS_DIALOG))
-                                        .border_1()
-                                        .border_color(rgb(COLOR_BORDER))
-                                        .bg(rgb(COLOR_PANEL))
-                                        .text_color(rgb(COLOR_FOREGROUND))
-                                        .child(
-                                            div()
-                                                .text_lg()
-                                                .text_color(rgb(COLOR_FOREGROUND))
-                                                .child("Editar agente"),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .text_color(rgb(COLOR_MUTED))
-                                                .child("Nome do terminal"),
-                                        )
-                                        .children(name_input.iter().map(|state| {
-                                            Input::new(state)
-                                                .w_full()
-                                                .rounded(px(RADIUS_CONTROL))
-                                                .bg(rgb(COLOR_ELEVATED))
-                                                .border_color(rgb(COLOR_BORDER))
-                                        }))
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .text_color(rgb(COLOR_MUTED))
-                                                .child("Agente"),
-                                        )
-                                        .child(
-                                            div().flex().gap_2().children(
-                                                agent_kinds.iter().copied().map(|kind| {
-                                                    let selected = kind == menu.kind;
-                                                    let icon = self.agent_details(kind).2;
-                                                    ComponentButton::new(("agent-kind", kind.id()))
-                                                        .child(
-                                                            svg()
-                                                                .path(agent_icon_path(icon))
-                                                                .w(px(ICON_SIZE))
-                                                                .h(px(ICON_SIZE))
-                                                                .text_color(rgb(agent_color(icon))),
-                                                        )
-                                                        .w(px(AGENT_TILE_SIZE))
-                                                        .h(px(AGENT_TILE_SIZE))
-                                                        .p_0()
-                                                        .rounded(px(RADIUS_CONTROL))
-                                                        .border_1()
-                                                        .border_color(rgb(if selected {
-                                                            agent_color(icon)
-                                                        } else {
-                                                            COLOR_BORDER
-                                                        }))
-                                                        .bg(rgb(if selected {
-                                                            COLOR_ELEVATED
-                                                        } else {
-                                                            COLOR_PANEL
-                                                        }))
-                                                        .with_variant(ButtonVariant::Ghost)
-                                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                                            let (ws, id, name) = {
-                                                                let Some(menu) = this.agent_menu.as_mut() else {
-                                                                    return;
-                                                                };
-                                                                menu.kind = kind;
-                                                                (menu.workspace_id, menu.card_id, menu.name.clone())
-                                                            };
-                                                            this.apply_agent_to_card(ws, id, kind, name, cx);
-                                                            cx.notify();
-                                                        }))
-                                                }),
-                                            ),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .text_color(rgb(COLOR_MUTED))
-                                                .child("Comando"),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .text_color(rgb(COLOR_FOREGROUND))
-                                                .child(edit_command.clone()),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .text_color(rgb(COLOR_MUTED))
-                                                .child("Raiz"),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(rgb(COLOR_MUTED))
-                                                .child(root_text),
-                                        )
-                                        .when_some(error, |dialog, error| {
-                                            dialog
-                                                .child(
-                                                    div()
-                                                        .text_xs()
-                                                        .text_color(rgb(COLOR_DANGER))
-                                                        .child(error),
-                                                )
-                                        })
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .justify_end()
-                                                .gap_2()
-                                                .child(cancel)
-                                                .child(save),
-                                        )
-                                } else {
+                                .child(
                                     div()
                                         .absolute()
                                         .left(px(x))
@@ -2582,10 +2624,11 @@ impl Render for Canvas {
                                                 .hover(|style| style.bg(rgb(COLOR_BORDER)))
                                                 .on_mouse_down(
                                                     MouseButton::Left,
-                                                    cx.listener(|this, _, window, cx| {
-                                                        this.begin_agent_edit(window, cx);
-                                                    }),
+                                                    cx.listener(|_, _, _, cx| cx.stop_propagation()),
                                                 )
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.begin_agent_edit(window, cx);
+                                                }))
                                                 .child(
                                                     svg()
                                                         .path("edit.svg")
@@ -2600,7 +2643,7 @@ impl Render for Canvas {
                                                         .child("Editar"),
                                                 ),
                                         )
-                                })
+                                )
                             })
                     ),
             )
