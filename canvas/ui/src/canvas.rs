@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use auri_protocol::{Request, Response};
@@ -16,6 +17,7 @@ use gpui_component::{
     Disableable, WindowExt,
     button::{Button as ComponentButton, ButtonVariant, ButtonVariants as _},
     dialog::{Dialog, DialogButtonProps},
+    switch::Switch,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use canvas_types::{AgentIcon, AgentKind, AgentState, CardBounds, ConnectionTarget, NoteState, TerminalId, TerminalState, WorkspaceColor, WorkspaceIcon, WorkspaceId, WorkspaceState, WorkspaceStore};
@@ -698,8 +700,38 @@ struct AgentMenu {
     editing: bool,
     name: String,
     kind: AgentKind,
+    /// Role shown by the switch; committed to the store only on save.
+    admin: bool,
     original_name: String,
     original_kind: AgentKind,
+    original_admin: bool,
+}
+
+impl AgentMenu {
+    /// Selecting the switch changes only the form, never the live agent.
+    fn select_admin(&mut self, value: bool) {
+        self.admin = value;
+    }
+
+    /// Cancel returns every edited field to the value it opened with.
+    fn restore_edits(&mut self) {
+        self.name = self.original_name.clone();
+        self.kind = self.original_kind;
+        self.admin = self.original_admin;
+    }
+}
+
+/// Write the form's name, agent and role into persisted workspace state.
+/// Returns the trimmed title, or `None` when the form has no usable name.
+fn write_agent_edits(menu: &AgentMenu, workspace: &mut WorkspaceState) -> Option<String> {
+    let name = menu.name.trim().to_owned();
+    if name.is_empty() {
+        return None;
+    }
+    workspace.canvas.rename_agent(menu.card_id, name.clone());
+    workspace.canvas.set_agent_kind(menu.card_id, menu.kind);
+    workspace.canvas.set_agent_admin(menu.card_id, menu.admin);
+    Some(name)
 }
 
 /// Items of the empty-canvas `Adicionar` submenu, in display order.
@@ -1010,6 +1042,9 @@ pub struct Canvas {
     menu: MenuState,
     selected_note: NoteSelection,
     agent_menu: Option<AgentMenu>,
+    /// UI mirror of the switch position; the dialog reads this without
+    /// borrowing Canvas while its update handler is running.
+    agent_admin_toggle: Arc<AtomicBool>,
     agent_name_input: Option<Entity<InputState>>,
     agent_name_subscription: Option<Subscription>,
     custom_dialog: Option<CustomAgentDialog>,
@@ -1046,6 +1081,7 @@ impl Canvas {
             menu: MenuState::default(),
             selected_note: NoteSelection::default(),
             agent_menu: None,
+            agent_admin_toggle: Arc::new(AtomicBool::new(false)),
             agent_name_input: None,
             agent_name_subscription: None,
             custom_dialog: None,
@@ -2008,6 +2044,7 @@ impl Canvas {
         else {
             return;
         };
+        self.agent_admin_toggle.store(agent.admin, Ordering::Relaxed);
         self.agent_menu = Some(AgentMenu {
             workspace_id,
             card_id,
@@ -2015,10 +2052,22 @@ impl Canvas {
             editing: false,
             name: agent.name.clone(),
             kind: agent.kind,
+            admin: agent.admin,
             original_name: agent.name,
             original_kind: agent.kind,
+            original_admin: agent.admin,
         });
         self.menu.close();
+        cx.notify();
+    }
+
+    /// Flip the role in the open form. The stored `AgentState.admin` and the
+    /// next CLI request see the new value only after saving.
+    pub fn select_agent_admin(&mut self, value: bool, cx: &mut Context<Self>) {
+        if let Some(menu) = self.agent_menu.as_mut() {
+            menu.select_admin(value);
+        }
+        self.agent_admin_toggle.store(value, Ordering::Relaxed);
         cx.notify();
     }
 
@@ -2033,6 +2082,7 @@ impl Canvas {
             return;
         };
         let canvas = cx.weak_entity();
+        let admin_toggle = self.agent_admin_toggle.clone();
         let name_input = self.agent_name_input.clone();
         let error = self.error.clone();
         let kinds: Vec<(AgentKind, AgentIcon)> = all_agent_kinds(&self.store)
@@ -2056,6 +2106,7 @@ impl Canvas {
                 window,
                 cx,
                 &canvas,
+                admin_toggle.clone(),
                 name_input.clone(),
                 error.clone(),
                 kinds.clone(),
@@ -2130,12 +2181,14 @@ impl Canvas {
     }
 
     fn close_agent_menu(&mut self, cx: &mut Context<Self>) {
-        if let Some(menu) = self.agent_menu.clone() {
+        if let Some(mut menu) = self.agent_menu.clone() {
+            menu.restore_edits();
+            self.agent_admin_toggle.store(menu.admin, Ordering::Relaxed);
             self.apply_agent_to_card(
                 menu.workspace_id,
                 menu.card_id,
-                menu.original_kind,
-                menu.original_name,
+                menu.kind,
+                menu.name,
                 cx,
             );
         }
@@ -2148,16 +2201,17 @@ impl Canvas {
         let Some(menu) = self.agent_menu.clone() else {
             return;
         };
-        let name = menu.name.trim().to_owned();
-        if name.is_empty() {
+        let Some(workspace) = self.store.workspace_mut(menu.workspace_id) else {
+            self.agent_menu = None;
+            self.error = None;
+            cx.notify();
+            return;
+        };
+        let Some(name) = write_agent_edits(&menu, workspace) else {
             self.error = Some("Informe um nome para o agente.".into());
             cx.notify();
             return;
-        }
-        if let Some(workspace) = self.store.workspace_mut(menu.workspace_id) {
-            workspace.canvas.rename_agent(menu.card_id, name.clone());
-            workspace.canvas.set_agent_kind(menu.card_id, menu.kind);
-        }
+        };
         self.apply_agent_to_card(menu.workspace_id, menu.card_id, menu.kind, name, cx);
         self.agent_menu = None;
         self.error = None;
@@ -2925,6 +2979,7 @@ fn agent_edit_dialog(
     window: &mut Window,
     _cx: &mut App,
     canvas: &WeakEntity<Canvas>,
+    admin_toggle: Arc<AtomicBool>,
     name_input: Option<Entity<InputState>>,
     error: Option<String>,
     kinds: Vec<(AgentKind, AgentIcon)>,
@@ -2932,9 +2987,13 @@ fn agent_edit_dialog(
     command: String,
     root: String,
 ) -> Dialog {
+    // The mirror is written before the dialog refreshes, so rendering never
+    // reads Canvas while its update handler is running.
+    let admin = admin_toggle.load(Ordering::Relaxed);
     let ok_canvas = canvas.clone();
     let cancel_canvas = canvas.clone();
     let close_canvas = canvas.clone();
+    let switch_canvas = canvas.clone();
 
     dialog
         .title(
@@ -3044,6 +3103,30 @@ fn agent_edit_dialog(
                             })
                     }),
                 ))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(COLOR_FOREGROUND))
+                                .child("Administrador"),
+                        )
+                        .child(
+                            Switch::new("agent-edit-admin")
+                                .checked(admin)
+                                .on_click(move |value, window, cx| {
+                                    if let Some(entity) = switch_canvas.upgrade() {
+                                        entity.update(cx, |this, cx| {
+                                            this.select_agent_admin(*value, cx)
+                                        });
+                                    }
+                                    window.refresh();
+                                }),
+                        ),
+                )
                 .child(
                     div()
                         .text_sm()
@@ -4746,5 +4829,127 @@ mod connect_tests {
         assert_eq!(connect_target(None, ConnectionTarget::Note(note)), None);
         assert!(finish_connect(&mut mode, ConnectionTarget::Note(note)).is_some());
         assert_eq!(mode, None);
+    }
+}
+
+#[cfg(test)]
+mod admin_toggle_tests {
+    use super::*;
+    use crate::permissions::{Action, Denied, Principal};
+    use canvas_types::WorkspaceIcon;
+
+    fn bounds() -> CardBounds {
+        CardBounds { x: 0.0, y: 0.0, width: 100.0, height: 100.0 }
+    }
+
+    fn workspace_with_agent() -> (WorkspaceState, TerminalId) {
+        let mut store = WorkspaceStore::new();
+        let mut workspace = store.add("A".into(), WorkspaceIcon::Star, PathBuf::from("/a"));
+        let agent = workspace.canvas.add_agent(AgentKind::Claude, bounds());
+        (workspace, agent.id)
+    }
+
+    /// Mirrors `open_agent_menu`: the form snapshots the persisted role.
+    fn form_for(workspace: &WorkspaceState, card_id: TerminalId) -> AgentMenu {
+        let agent = workspace.canvas.agent(card_id).expect("agent exists");
+        AgentMenu {
+            workspace_id: workspace.id,
+            card_id,
+            position: Point::new(px(0.0), px(0.0)),
+            editing: true,
+            name: agent.name.clone(),
+            kind: agent.kind,
+            admin: agent.admin,
+            original_name: agent.name.clone(),
+            original_kind: agent.kind,
+            original_admin: agent.admin,
+        }
+    }
+
+    #[test]
+    fn selecting_admin_changes_only_the_form_state() {
+        let (mut workspace, id) = workspace_with_agent();
+        let mut form = form_for(&workspace, id);
+        let before = form.clone();
+
+        form.select_admin(true);
+
+        assert!(form.admin, "the switch updates the form");
+        assert!(!form.original_admin, "the snapshot is untouched");
+        assert_eq!(form.name, before.name);
+        assert_eq!(form.kind, before.kind);
+        assert_eq!(form.original_name, before.original_name);
+        assert_eq!(form.original_kind, before.original_kind);
+        assert!(!workspace.canvas.agent(id).unwrap().admin, "the store changes only on save");
+    }
+
+    #[test]
+    fn saving_persists_admin_in_agent_state() {
+        let (mut workspace, id) = workspace_with_agent();
+        let mut form = form_for(&workspace, id);
+        form.select_admin(true);
+
+        let name = write_agent_edits(&form, &mut workspace).expect("valid name");
+
+        assert_eq!(name, form.name);
+        assert!(workspace.canvas.agent(id).unwrap().admin);
+        assert!(!form.original_admin, "saving does not rewrite the cancel snapshot");
+    }
+
+    #[test]
+    fn cancelling_restores_the_original_admin() {
+        let (mut workspace, id) = workspace_with_agent();
+        let mut form = form_for(&workspace, id);
+        form.select_admin(true);
+
+        form.restore_edits();
+
+        assert_eq!(form.admin, form.original_admin);
+        assert!(!form.admin);
+
+        assert!(workspace.canvas.set_agent_admin(id, true));
+        let mut form = form_for(&workspace, id);
+        form.select_admin(false);
+        form.restore_edits();
+        assert!(form.admin, "a promoted agent keeps its role when the edit is cancelled");
+        assert!(workspace.canvas.agent(id).unwrap().admin, "cancel never writes the store");
+    }
+
+    #[test]
+    fn a_second_edit_can_turn_admin_off_again() {
+        let (mut workspace, id) = workspace_with_agent();
+        let mut first = form_for(&workspace, id);
+        first.select_admin(true);
+        write_agent_edits(&first, &mut workspace).expect("valid name");
+
+        let reopened = form_for(&workspace, id);
+        assert!(reopened.admin, "reopening reads the persisted role");
+        assert!(reopened.original_admin);
+
+        let mut second = reopened;
+        second.select_admin(false);
+        write_agent_edits(&second, &mut workspace).expect("valid name");
+
+        assert!(!workspace.canvas.agent(id).unwrap().admin);
+        assert!(second.original_admin, "the new snapshot still holds the value at open time");
+    }
+
+    #[test]
+    fn saved_role_is_authoritative_on_the_next_request() {
+        let (mut workspace, id) = workspace_with_agent();
+        // Snapshot taken before the toggle, like a token resolved at PTY start.
+        let principal = Principal::from(workspace.canvas.agent(id).unwrap());
+        assert_eq!(authorize(&workspace, Some(&principal), &Action::AgentNew), Err(Denied::NotAdmin));
+
+        let mut form = form_for(&workspace, id);
+        form.select_admin(true);
+        write_agent_edits(&form, &mut workspace).expect("valid name");
+
+        assert_eq!(authorize(&workspace, Some(&principal), &Action::AgentNew), Ok(()));
+
+        let mut demote = form_for(&workspace, id);
+        demote.select_admin(false);
+        write_agent_edits(&demote, &mut workspace).expect("valid name");
+        assert_eq!(authorize(&workspace, Some(&principal), &Action::AgentNew), Err(Denied::NotAdmin));
     }
 }
