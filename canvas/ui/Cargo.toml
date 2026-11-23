@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.90"
 
 [dependencies]
-gpui-component = "=0.5.1"
+gpui-component = "=0.10.0"
 auro = "=0.1.0-alpha.13"
 canvas-types = { path = "../types" }
 auri-protocol = { path = "../protocol" }
