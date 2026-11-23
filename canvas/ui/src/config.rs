@@ -307,7 +307,7 @@ fn restart_at(store: &mut WorkspaceStore, path: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use canvas_types::{CardBounds, WorkspaceIcon, WorkspaceStore};
+    use canvas_types::{AgentKind, CardBounds, WorkspaceIcon, WorkspaceStore};
     use std::fs;
     use std::path::{Path, PathBuf};
 
@@ -630,6 +630,43 @@ mod tests {
     }
 
     #[test]
+    fn save_then_load_preserves_agents_and_shared_allocator() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = config_file(dir.path());
+        let root = dir.path().join("root");
+        fs::create_dir_all(&root).unwrap();
+
+        let mut store = WorkspaceStore::new();
+        store.add("Canvas".into(), WorkspaceIcon::Star, root);
+        let bounds = CardBounds {
+            x: 48.0,
+            y: 64.0,
+            width: 640.0,
+            height: 400.0,
+        };
+        let canvas = &mut store.active_mut().unwrap().canvas;
+        let terminal = canvas.add();
+        let agent = canvas.add_agent(AgentKind::OpenCode, bounds);
+        canvas.rename_agent(agent.id, "Meu agente".into());
+        canvas.add_note("nota".into(), bounds);
+
+        save_at(&store, &path).unwrap();
+
+        let mut loaded = WorkspaceStore::new();
+        assert_eq!(load_at(&mut loaded, &path), LoadOutcome::Loaded);
+        let canvas = &loaded.workspaces()[0].canvas;
+        assert_eq!(canvas.terminals()[0].id, terminal.id);
+        assert_eq!(canvas.agents().len(), 1);
+        assert_eq!(canvas.agents()[0].id, agent.id);
+        assert_eq!(canvas.agents()[0].kind, agent.kind);
+        assert_eq!(canvas.agents()[0].name, "Meu agente");
+        assert_eq!(canvas.agents()[0].kind, AgentKind::OpenCode);
+        assert_eq!(canvas.agents()[0].bounds, bounds);
+        assert_eq!(canvas.notes().len(), 1);
+        assert_eq!(canvas.next_id(), 4);
+    }
+
+    #[test]
     fn old_workspace_line_without_geometry_or_notes_still_loads() {
         let dir = tempfile::tempdir().unwrap();
         let path = config_file(dir.path());
@@ -655,6 +692,7 @@ mod tests {
         assert_eq!(load_at(&mut loaded, &path), LoadOutcome::Loaded);
         let canvas = &loaded.workspaces()[0].canvas;
         assert_eq!(canvas.terminals()[0].bounds, None);
+        assert!(canvas.agents().is_empty());
         assert!(canvas.notes().is_empty());
         assert_eq!(canvas.next_id(), 2);
         assert!(!loaded.workspaces()[0].unloaded);

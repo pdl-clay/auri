@@ -33,6 +33,63 @@ pub struct NoteState {
     pub bounds: CardBounds,
 }
 
+/// CLI agents that can own a canvas card.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AgentKind {
+    Claude,
+    Codex,
+    Pi,
+    Omp,
+    OpenCode,
+}
+
+impl AgentKind {
+    pub const ALL: [Self; 5] = [
+        Self::Claude,
+        Self::Codex,
+        Self::Pi,
+        Self::Omp,
+        Self::OpenCode,
+    ];
+
+    /// Label shown in menus, cards and the edit dialog.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Claude => "Claude",
+            Self::Codex => "Codex",
+            Self::Pi => "Pi",
+            Self::Omp => "OMP",
+            Self::OpenCode => "Open Code",
+        }
+    }
+
+    /// Exact CLI command written to the PTY when the card is created.
+    pub fn command(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::Pi => "pi",
+            Self::Omp => "omp",
+            Self::OpenCode => "opencode",
+        }
+    }
+}
+
+impl Default for AgentKind {
+    fn default() -> Self {
+        Self::Claude
+    }
+}
+
+/// Persisted AI agent card: the CLI it runs, its title and its canvas geometry.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AgentState {
+    pub id: TerminalId,
+    pub kind: AgentKind,
+    pub name: String,
+    pub bounds: CardBounds,
+}
+
 /// Logical state of a single terminal card.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TerminalState {
@@ -52,6 +109,8 @@ pub struct CanvasState {
     #[serde(default)]
     notes: Vec<NoteState>,
     #[serde(default)]
+    agents: Vec<AgentState>,
+    #[serde(default)]
     selected: Option<TerminalId>,
     #[serde(default = "default_next_id")]
     next_id: TerminalId,
@@ -67,6 +126,7 @@ impl CanvasState {
         Self {
             terminals: Vec::new(),
             notes: Vec::new(),
+            agents: Vec::new(),
             selected: None,
             next_id: 1,
         }
@@ -167,6 +227,71 @@ impl CanvasState {
 
     pub fn notes(&self) -> &[NoteState] {
         &self.notes
+    }
+
+    /// Allocate an agent from the same id space as terminals and notes.
+    pub fn add_agent(&mut self, kind: AgentKind, bounds: CardBounds) -> AgentState {
+        let id = self.next_id;
+        self.next_id += 1;
+        let agent = AgentState {
+            id,
+            kind,
+            name: format!("{} {id}", kind.label()),
+            bounds,
+        };
+        self.agents.push(agent.clone());
+        self.selected = Some(id);
+        agent
+    }
+
+    pub fn remove_agent(&mut self, id: TerminalId) -> Option<AgentState> {
+        let index = self.agents.iter().position(|agent| agent.id == id)?;
+        let removed = self.agents.remove(index);
+        if self.selected == Some(id) {
+            self.selected = None;
+        }
+        Some(removed)
+    }
+
+    pub fn agent(&self, id: TerminalId) -> Option<&AgentState> {
+        self.agents.iter().find(|agent| agent.id == id)
+    }
+
+    pub fn agents(&self) -> &[AgentState] {
+        &self.agents
+    }
+
+    pub fn rename_agent(&mut self, id: TerminalId, name: String) -> bool {
+        let Some(agent) = self.agents.iter_mut().find(|agent| agent.id == id) else {
+            return false;
+        };
+        if agent.name == name {
+            return false;
+        }
+        agent.name = name;
+        true
+    }
+
+    pub fn set_agent_kind(&mut self, id: TerminalId, kind: AgentKind) -> bool {
+        let Some(agent) = self.agents.iter_mut().find(|agent| agent.id == id) else {
+            return false;
+        };
+        if agent.kind == kind {
+            return false;
+        }
+        agent.kind = kind;
+        true
+    }
+
+    pub fn set_agent_bounds(&mut self, id: TerminalId, bounds: CardBounds) -> bool {
+        let Some(agent) = self.agents.iter_mut().find(|agent| agent.id == id) else {
+            return false;
+        };
+        if agent.bounds == bounds {
+            return false;
+        }
+        agent.bounds = bounds;
+        true
     }
 
     /// Forget the live selection without discarding the saved layout: unloading
@@ -447,6 +572,81 @@ mod tests {
         state.mark_exited(terminal.id);
         state.set_terminal_exited(terminal.id, false);
         assert!(!state.terminals()[0].exited);
+    }
+
+    #[test]
+    fn agent_command_mapping_covers_all_five_agents() {
+        let expected = [
+            (AgentKind::Claude, "Claude", "claude"),
+            (AgentKind::Codex, "Codex", "codex"),
+            (AgentKind::Pi, "Pi", "pi"),
+            (AgentKind::Omp, "OMP", "omp"),
+            (AgentKind::OpenCode, "Open Code", "opencode"),
+        ];
+        assert_eq!(AgentKind::ALL.len(), expected.len());
+        for (kind, (expected_kind, label, command)) in AgentKind::ALL.into_iter().zip(expected) {
+            assert_eq!(kind, expected_kind);
+            assert_eq!(kind.label(), label);
+            assert_eq!(kind.command(), command);
+        }
+    }
+
+    #[test]
+    fn agents_share_the_terminal_and_note_allocator() {
+        let mut state = CanvasState::new();
+        let terminal = state.add();
+        let bounds = CardBounds { x: 0.0, y: 0.0, width: 640.0, height: 400.0 };
+        let agent = state.add_agent(AgentKind::Codex, bounds);
+        let note = state.add_note("oi".into(), bounds);
+        let last = state.add_agent(AgentKind::Pi, bounds);
+
+        assert_eq!((terminal.id, agent.id, note.id, last.id), (1, 2, 3, 4));
+        assert_eq!(agent.name, "Codex 2");
+        assert_eq!(state.selected(), Some(4));
+
+        let mut restored = CanvasState::new();
+        restored.reserve_id_above(last.id);
+        assert_eq!(restored.add_agent(AgentKind::Claude, bounds).id, 5);
+    }
+
+    #[test]
+    fn agent_name_kind_bounds_and_removal_are_persisted_mutations() {
+        let mut state = CanvasState::new();
+        let bounds = CardBounds { x: 4.0, y: 8.0, width: 640.0, height: 400.0 };
+        let agent = state.add_agent(AgentKind::Claude, bounds);
+
+        assert!(state.rename_agent(agent.id, "Meu Claude".into()));
+        assert!(!state.rename_agent(agent.id, "Meu Claude".into()));
+        assert!(state.set_agent_kind(agent.id, AgentKind::OpenCode));
+        assert!(!state.set_agent_kind(agent.id, AgentKind::OpenCode));
+        let moved = CardBounds { x: 40.0, ..bounds };
+        assert!(state.set_agent_bounds(agent.id, moved));
+        assert!(!state.set_agent_bounds(agent.id, moved));
+
+        let saved = state.agent(agent.id).unwrap().clone();
+        assert_eq!((saved.name.as_str(), saved.kind, saved.bounds), ("Meu Claude", AgentKind::OpenCode, moved));
+
+        assert_eq!(state.remove_agent(agent.id), Some(saved.clone()));
+        assert_eq!(state.selected(), None);
+        assert!(state.agents().is_empty());
+        assert!(state.remove_agent(agent.id).is_none());
+    }
+
+    #[test]
+    fn agent_state_round_trips_and_old_canvas_without_agents_still_loads() {
+        let bounds = CardBounds { x: 2.0, y: 3.0, width: 640.0, height: 400.0 };
+        let json = r#"{"terminals":[],"notes":[],"selected":7,"next_id":8}"#;
+        let mut state: CanvasState = serde_json::from_str(json).unwrap();
+        assert!(state.agents().is_empty());
+
+        let agent = state.add_agent(AgentKind::Omp, bounds);
+        let encoded = serde_json::to_string(&state).unwrap();
+        let decoded: CanvasState = serde_json::from_str(&encoded).unwrap();
+
+        assert_eq!(decoded.agents().len(), 1);
+        assert_eq!(decoded.agents()[0], agent);
+        assert_eq!(decoded.agents()[0].kind, AgentKind::Omp);
+        assert_eq!(decoded.next_id(), 9);
     }
 }
 

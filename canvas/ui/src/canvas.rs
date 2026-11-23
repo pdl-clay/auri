@@ -5,14 +5,15 @@ use std::path::{Path, PathBuf};
 
 use auro::gpui::{
     AnyWindowHandle, Bounds, Context, CursorStyle, Entity, MouseButton, MouseDownEvent, Pixels, Point, Render,
-    ScrollWheelEvent, Size, Window, canvas, fill, px, rgb, svg,
+    ScrollWheelEvent, Size, Subscription, Window, canvas, fill, px, rgb, svg,
 };
 use auro::prelude::*;
 use gpui_component::{
     Disableable,
     button::{Button as ComponentButton, ButtonVariant, ButtonVariants as _},
 };
-use canvas_types::{CardBounds, NoteState, TerminalId, TerminalState, WorkspaceColor, WorkspaceIcon, WorkspaceId, WorkspaceState, WorkspaceStore};
+use gpui_component::input::{Input, InputEvent, InputState};
+use canvas_types::{AgentKind, AgentState, CardBounds, NoteState, TerminalId, TerminalState, WorkspaceColor, WorkspaceIcon, WorkspaceId, WorkspaceState, WorkspaceStore};
 
 use crate::card::{TerminalCard, scroll_delta, terminal_grid};
 use crate::text_card::TextCard;
@@ -24,6 +25,20 @@ use crate::pty::PtySession;
 type CardGroups = HashMap<WorkspaceId, Vec<(TerminalId, Entity<TerminalCard>)>>;
 
 type NoteGroups = HashMap<WorkspaceId, Vec<(u64, Entity<TextCard>)>>;
+
+
+/// Transient UI state for the header menu and its edit dialog.
+#[derive(Clone, Debug)]
+struct AgentMenu {
+    workspace_id: WorkspaceId,
+    card_id: TerminalId,
+    position: Point<Pixels>,
+    editing: bool,
+    name: String,
+    kind: AgentKind,
+    original_name: String,
+    original_kind: AgentKind,
+}
 
 /// The store is the persisted state: cards and notes stay in it, and the
 /// framework-specific entities are rebuilt from it on startup.
@@ -133,6 +148,7 @@ struct WorkspaceLayout {
     root_ok: bool,
     terminals: Vec<TerminalState>,
     notes: Vec<NoteState>,
+    agents: Vec<AgentState>,
 }
 
 /// Select a workspace and clear its unloaded flag, returning the saved layout
@@ -152,6 +168,7 @@ fn begin_workspace_load(store: &mut WorkspaceStore, id: WorkspaceId) -> Option<W
             && workspace.root.is_dir(),
         terminals: workspace.canvas.terminals().to_vec(),
         notes: workspace.canvas.notes().to_vec(),
+        agents: workspace.canvas.agents().to_vec(),
     })
 }
 
@@ -166,12 +183,11 @@ fn remove_workspace(
     Some((removed, cards))
 }
 
-/// Allocate a terminal in the active workspace and return its spawn target.
-fn active_spawn_target(
-    store: &mut WorkspaceStore,
-) -> Result<(WorkspaceId, TerminalId, PathBuf), SpawnTargetError> {
+/// Validate the active workspace as a shell spawn target without allocating an id.
+fn active_workspace_root(store: &WorkspaceStore) -> Result<(WorkspaceId, PathBuf), SpawnTargetError> {
     let workspace = store
-        .active_mut()
+        .active()
+        .and_then(|id| store.workspaces().iter().find(|item| item.id == id))
         .ok_or(SpawnTargetError::NoWorkspace)?;
     if workspace.root.as_os_str().is_empty()
         || workspace.invalid_root
@@ -179,8 +195,37 @@ fn active_spawn_target(
     {
         return Err(SpawnTargetError::InvalidRoot(workspace.root.clone()));
     }
-    let id = workspace.canvas.add().id;
-    Ok((workspace.id, id, workspace.root.clone()))
+    Ok((workspace.id, workspace.root.clone()))
+}
+
+/// Allocate a terminal in the active workspace and return its spawn target.
+fn active_spawn_target(
+    store: &mut WorkspaceStore,
+) -> Result<(WorkspaceId, TerminalId, PathBuf), SpawnTargetError> {
+    let (workspace_id, root) = active_workspace_root(store)?;
+    let id = store
+        .workspace_mut(workspace_id)
+        .expect("active workspace")
+        .canvas
+        .add()
+        .id;
+    Ok((workspace_id, id, root))
+}
+
+/// Allocate an agent card from the same id space as terminals and notes.
+fn active_agent_target(
+    store: &mut WorkspaceStore,
+    kind: AgentKind,
+    bounds: CardBounds,
+) -> Result<(WorkspaceId, TerminalId, PathBuf), SpawnTargetError> {
+    let (workspace_id, root) = active_workspace_root(store)?;
+    let id = store
+        .workspace_mut(workspace_id)
+        .expect("active workspace")
+        .canvas
+        .add_agent(kind, bounds)
+        .id;
+    Ok((workspace_id, id, root))
 }
 
 /// Remove a terminal from exactly one workspace; ids are only unique within a workspace.
@@ -193,7 +238,11 @@ fn remove_terminal_state(
     let Some(workspace) = store.workspace_mut(workspace_id) else {
         return false;
     };
-    if workspace.canvas.remove(id).is_none() {
+    if workspace.canvas.agent(id).is_some() {
+        if workspace.canvas.remove_agent(id).is_none() {
+            return false;
+        }
+    } else if workspace.canvas.remove(id).is_none() {
         return false;
     }
     if let Some(cards) = groups.get_mut(&workspace_id) {
@@ -217,6 +266,11 @@ pub struct Canvas {
     offset_y: f32,
     context_menu: Option<Point<Pixels>>,
     submenu: bool,
+    placing_agent: Option<AgentKind>,
+    agent_list: bool,
+    agent_menu: Option<AgentMenu>,
+    agent_name_input: Option<Entity<InputState>>,
+    agent_name_subscription: Option<Subscription>,
 }
 impl Canvas {
     /// `load` is authoritative for the drawer banner; the store was already
@@ -238,6 +292,11 @@ impl Canvas {
             offset_y: 0.0,
             context_menu: None,
             submenu: false,
+            placing_agent: None,
+            agent_list: false,
+            agent_menu: None,
+            agent_name_input: None,
+            agent_name_subscription: None,
         }
     }
 
@@ -429,9 +488,12 @@ impl Canvas {
     pub fn begin_placement(&mut self, cx: &mut Context<Self>) {
         self.placing = true;
         self.placing_text = false;
+        self.placing_agent = None;
         self.error = None;
         self.context_menu = None;
         self.submenu = false;
+        self.agent_list = false;
+        self.agent_menu = None;
         cx.notify();
     }
 
@@ -439,16 +501,19 @@ impl Canvas {
     pub fn begin_text_placement(&mut self, cx: &mut Context<Self>) {
         self.placing_text = true;
         self.placing = false;
+        self.placing_agent = None;
         self.error = None;
         self.context_menu = None;
         self.submenu = false;
+        self.agent_list = false;
+        self.agent_menu = None;
         cx.notify();
     }
 
     pub fn cancel_placement(&mut self, cx: &mut Context<Self>) {
         self.placing = false;
         self.placing_text = false;
-        cx.notify();
+        self.placing_agent = None;
     }
 
     fn place_terminal(
@@ -465,7 +530,11 @@ impl Canvas {
             px((local_y - CARD_HEIGHT / 2.0).max(8.0)),
         );
         self.placing = false;
-        self.spawn_terminal(Some(origin), window, cx);
+        if let Some(kind) = self.placing_agent.take() {
+            self.spawn_agent(kind, Some(origin), window, cx);
+        } else {
+            self.spawn_terminal(Some(origin), window, cx);
+        }
     }
 
     fn place_text_at(
@@ -586,6 +655,247 @@ impl Canvas {
         self.finish_store_change(cx);
     }
 
+    /// Enter placement mode for one of the five CLI agents.
+    pub fn begin_agent_placement(&mut self, kind: AgentKind, cx: &mut Context<Self>) {
+        self.placing = true;
+        self.placing_text = false;
+        self.placing_agent = Some(kind);
+        self.error = None;
+        self.context_menu = None;
+        self.submenu = false;
+        self.agent_list = false;
+        self.agent_menu = None;
+        cx.notify();
+    }
+
+    /// Spawn a shell, type the agent's CLI into it and keep the card alive.
+    fn spawn_agent(
+        &mut self,
+        kind: AgentKind,
+        origin: Option<Point<Pixels>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let origin = origin.unwrap_or_else(|| {
+            self.cards
+                .get(&self.store.active().unwrap_or_default())
+                .and_then(|cards| cards.last())
+                .map(|(_, card)| adjacent_origin(card.read(cx).bounds))
+                .unwrap_or_else(|| Point::new(px(SPACE_PANEL), px(SPACE_PANEL)))
+        });
+        let bounds = Bounds::new(origin, Size::new(px(CARD_WIDTH), px(CARD_HEIGHT)));
+        let saved = card_bounds(&bounds);
+        let (workspace_id, id, root) = match active_agent_target(&mut self.store, kind, saved) {
+            Ok(target) => target,
+            Err(error) => {
+                self.error = Some(error.message());
+                cx.notify();
+                return;
+            }
+        };
+        let (cols, rows) = terminal_grid(&bounds);
+        let mut pty = match PtySession::spawn_shell_in(cols, rows, Some(&root)) {
+            Ok(pty) => pty,
+            Err(error) => {
+                if let Some(workspace) = self.store.workspace_mut(workspace_id) {
+                    workspace.canvas.remove_agent(id);
+                }
+                self.error = Some(format!("Agente {} não iniciou: {error}", kind.label()));
+                self.finish_store_change(cx);
+                return;
+            }
+        };
+        if let Err(error) = pty.send_line(kind.command()) {
+            if let Some(workspace) = self.store.workspace_mut(workspace_id) {
+                workspace.canvas.remove_agent(id);
+            }
+            self.error = Some(format!("Agente {} não iniciou: {error}", kind.label()));
+            self.finish_store_change(cx);
+            return;
+        }
+        if let Some(workspace) = self.store.workspace_mut(workspace_id) {
+            workspace.mark_loaded();
+        }
+        self.error = None;
+        let name = self
+            .store
+            .workspace_mut(workspace_id)
+            .and_then(|workspace| workspace.canvas.agent(id))
+            .map(|agent| agent.name.clone())
+            .unwrap_or_else(|| kind.label().to_owned());
+        let canvas = cx.entity().downgrade();
+        let card = cx.new(|cx| {
+            TerminalCard::new(id, workspace_id, bounds, canvas.clone(), root.clone(), pty, (cols, rows), cx)
+        });
+        card.update(cx, |card, cx| card.set_agent(kind, name, cx));
+        card.read(cx).terminal.read(cx).focus_handle().focus(window);
+        let (zoom, offset_x, offset_y) = (self.zoom, self.offset_x, self.offset_y);
+        card.update(cx, |card, cx| card.set_view(zoom, offset_x, offset_y, cx));
+        self.cards.entry(workspace_id).or_default().push((id, card));
+        self.sync_card_selection(workspace_id, cx);
+        self.finish_store_change(cx);
+    }
+
+    /// Open the small header menu at the point where the strip was clicked.
+    pub fn open_agent_menu(
+        &mut self,
+        workspace_id: WorkspaceId,
+        card_id: TerminalId,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(agent) = self
+            .store
+            .workspace_mut(workspace_id)
+            .and_then(|workspace| workspace.canvas.agent(card_id))
+            .cloned()
+        else {
+            return;
+        };
+        self.agent_menu = Some(AgentMenu {
+            workspace_id,
+            card_id,
+            position,
+            editing: false,
+            name: agent.name.clone(),
+            kind: agent.kind,
+            original_name: agent.name,
+            original_kind: agent.kind,
+        });
+        self.context_menu = None;
+        self.submenu = false;
+        self.agent_list = false;
+        cx.notify();
+    }
+
+    fn begin_agent_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(menu) = self.agent_menu.as_mut() {
+            menu.editing = true;
+        }
+        self.ensure_agent_name_input(window, cx);
+        self.sync_agent_name_input(window, cx);
+        cx.notify();
+    }
+
+    fn ensure_agent_name_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.agent_name_input.is_some() {
+            return;
+        }
+        let value = self
+            .agent_menu
+            .as_ref()
+            .map(|menu| menu.name.clone())
+            .unwrap_or_default();
+        let state = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(value)
+                .placeholder("Nome do terminal")
+        });
+        self.agent_name_subscription = Some(cx.subscribe_in(
+            &state,
+            window,
+            |this, state, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::Change)
+                    && let Some(menu) = this.agent_menu.as_mut()
+                {
+                    menu.name = state.read(cx).value().to_string();
+                    cx.notify();
+                }
+            },
+        ));
+        self.agent_name_input = Some(state);
+    }
+
+    fn sync_agent_name_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(state) = self.agent_name_input.clone() else {
+            return;
+        };
+        let value = self
+            .agent_menu
+            .as_ref()
+            .map(|menu| menu.name.clone())
+            .unwrap_or_default();
+        if state.read(cx).value().to_string() != value {
+            state.update(cx, |state, cx| state.set_value(value, window, cx));
+        }
+    }
+
+    fn apply_agent_to_card(
+        &self,
+        workspace_id: WorkspaceId,
+        card_id: TerminalId,
+        kind: AgentKind,
+        name: String,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(card) = self
+            .cards
+            .get(&workspace_id)
+            .and_then(|group| group.iter().find(|(id, _)| *id == card_id))
+            .map(|(_, card)| card)
+        {
+            card.update(cx, |card, cx| card.set_agent(kind, name, cx));
+        }
+    }
+
+    fn close_agent_menu(&mut self, cx: &mut Context<Self>) {
+        if let Some(menu) = self.agent_menu.clone() {
+            self.apply_agent_to_card(
+                menu.workspace_id,
+                menu.card_id,
+                menu.original_kind,
+                menu.original_name,
+                cx,
+            );
+        }
+        self.agent_menu = None;
+        self.error = None;
+        cx.notify();
+    }
+
+    fn save_agent_edits(&mut self, cx: &mut Context<Self>) {
+        let Some(menu) = self.agent_menu.clone() else {
+            return;
+        };
+        let name = menu.name.trim().to_owned();
+        if name.is_empty() {
+            self.error = Some("Informe um nome para o agente.".into());
+            cx.notify();
+            return;
+        }
+        if let Some(workspace) = self.store.workspace_mut(menu.workspace_id) {
+            workspace.canvas.rename_agent(menu.card_id, name.clone());
+            workspace.canvas.set_agent_kind(menu.card_id, menu.kind);
+        }
+        self.apply_agent_to_card(menu.workspace_id, menu.card_id, menu.kind, name, cx);
+        self.agent_menu = None;
+        self.error = None;
+        self.finish_store_change(cx);
+    }
+
+    /// Commit geometry to the right persisted card type after a drag.
+    pub fn commit_card_bounds(
+        &mut self,
+        workspace_id: WorkspaceId,
+        id: TerminalId,
+        bounds: CardBounds,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = self
+            .store
+            .workspace_mut(workspace_id)
+            .is_some_and(|workspace| {
+                if workspace.canvas.agent(id).is_some() {
+                    workspace.canvas.set_agent_bounds(id, bounds)
+                } else {
+                    workspace.canvas.set_terminal_bounds(id, bounds)
+                }
+            });
+        if changed {
+            self.persist_store(cx);
+        }
+    }
+
     /// Push the current store to the drawer without touching the config file.
     fn sync_drawer(&mut self, cx: &mut Context<Self>) {
         let store = self.store.clone();
@@ -601,6 +911,13 @@ impl Canvas {
     }
 
     pub fn remove(&mut self, workspace_id: WorkspaceId, id: TerminalId, cx: &mut Context<Self>) {
+        if self
+            .agent_menu
+            .as_ref()
+            .is_some_and(|menu| menu.workspace_id == workspace_id && menu.card_id == id)
+        {
+            self.agent_menu = None;
+        }
         remove_terminal_state(&mut self.store, &mut self.cards, workspace_id, id);
         self.finish_store_change(cx);
     }
@@ -746,7 +1063,11 @@ impl Canvas {
         let mut changed = false;
         for (workspace_id, id, bounds) in terminals {
             if let Some(workspace) = self.store.workspace_mut(workspace_id) {
-                changed |= workspace.canvas.set_terminal_bounds(id, bounds);
+                changed |= if workspace.canvas.agent(id).is_some() {
+                    workspace.canvas.set_agent_bounds(id, bounds)
+                } else {
+                    workspace.canvas.set_terminal_bounds(id, bounds)
+                };
             }
         }
         for (workspace_id, id, bounds, text) in notes {
@@ -778,7 +1099,7 @@ impl Canvas {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(WorkspaceLayout { root, root_ok, terminals, notes }) =
+        let Some(WorkspaceLayout { root, root_ok, terminals, notes, agents }) =
             begin_workspace_load(&mut self.store, id)
         else {
             return;
@@ -794,7 +1115,8 @@ impl Canvas {
         let ids = terminals
             .iter()
             .map(|terminal| terminal.id)
-            .chain(notes.iter().map(|note| note.id));
+            .chain(notes.iter().map(|note| note.id))
+            .chain(agents.iter().map(|agent| agent.id));
         if let Some(workspace) = self.store.workspace_mut(id) {
             for saved_id in ids {
                 workspace.canvas.reserve_id_above(saved_id);
@@ -846,6 +1168,43 @@ impl Canvas {
             });
             card.update(cx, |card, cx| card.set_view(zoom, offset_x, offset_y, cx));
             self.cards.entry(id).or_default().push((terminal.id, card));
+        }
+
+        for agent in agents {
+            let bounds = pixel_bounds(agent.bounds);
+            let (cols, rows) = terminal_grid(&bounds);
+            let mut pty = if root_ok {
+                match PtySession::spawn_shell_in(cols, rows, Some(&root)) {
+                    Ok(pty) => pty,
+                    Err(error) => {
+                        self.error = Some(format!("Agente {} não iniciou: {error}", agent.kind.label()));
+                        continue;
+                    }
+                }
+            } else {
+                continue;
+            };
+            if let Err(error) = pty.send_line(agent.kind.command()) {
+                self.error = Some(format!("Agente {} não iniciou: {error}", agent.kind.label()));
+                continue;
+            }
+            let card = cx.new(|cx| {
+                TerminalCard::new(
+                    agent.id,
+                    id,
+                    bounds,
+                    canvas.clone(),
+                    root.clone(),
+                    pty,
+                    (cols, rows),
+                    cx,
+                )
+            });
+            card.update(cx, |card, cx| {
+                card.set_agent(agent.kind, agent.name.clone(), cx);
+                card.set_view(zoom, offset_x, offset_y, cx);
+            });
+            self.cards.entry(id).or_default().push((agent.id, card));
         }
 
         for note in notes {
@@ -914,6 +1273,21 @@ impl Render for Canvas {
         let offset_y = self.offset_y;
         let placing_text = self.placing_text;
         let submenu = self.submenu;
+        let agent_list = self.agent_list;
+        let agent_menu = self.agent_menu.clone();
+        let agent_name_input = self.agent_name_input.clone();
+        let dialog_error = self.error.clone();
+        let agent_root = self
+            .agent_menu
+            .as_ref()
+            .and_then(|menu| {
+                self.store
+                    .workspaces()
+                    .iter()
+                    .find(|workspace| workspace.id == menu.workspace_id)
+            })
+            .map(|workspace| workspace.root.to_string_lossy().into_owned())
+            .unwrap_or_default();
         let drawer_width = self.drawer.read(cx).drawer_width();
         let context_menu = self.context_menu.map(|position| {
             (
@@ -1262,8 +1636,286 @@ impl Render for Canvas {
                                                             .text_color(rgb(COLOR_FOREGROUND))
                                                             .child("Bloco de texto"),
                                                     ),
+                                            )
+                                            .child(
+                                                div()
+                                                    .id("context-add-agent-option")
+                                                    .h(px(CONTEXT_MENU_ITEM_HEIGHT))
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap(px(SPACE_NORMAL))
+                                                    .px(px(SPACE_NORMAL))
+                                                    .rounded(px(RADIUS_CHIP))
+                                                    .hover(|style| style.bg(rgb(COLOR_BORDER)))
+                                                    .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                                                        if *hovered {
+                                                            this.agent_list = true;
+                                                            cx.notify();
+                                                        }
+                                                    }))
+                                                    .on_mouse_down(
+                                                        MouseButton::Left,
+                                                        cx.listener(|this, _, _, cx| {
+                                                            this.agent_list = true;
+                                                            cx.notify();
+                                                        }),
+                                                    )
+                                                    .child(
+                                                        svg()
+                                                            .path(agent_icon_path(AgentKind::Claude))
+                                                            .w(px(ICON_SIZE))
+                                                            .h(px(ICON_SIZE))
+                                                            .text_color(rgb(COLOR_FOREGROUND)),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_sm()
+                                                            .text_color(rgb(COLOR_FOREGROUND))
+                                                            .child("Agente"),
+                                                    ),
                                             ),
                                     )
+                                })
+                            })
+                            .when(agent_list, |area| {
+                                area.when_some(context_menu, |area, (x, y)| {
+                                    area.child(
+                                        div()
+                                            .absolute()
+                                            .left(px(x + 2.0 * (CONTEXT_MENU_WIDTH + SUBMENU_GAP)))
+                                            .top(px(y))
+                                            .w(px(CONTEXT_MENU_WIDTH))
+                                            .flex()
+                                            .flex_col()
+                                            .p(px(SPACE_TIGHT))
+                                            .rounded(px(RADIUS_CONTROL))
+                                            .bg(rgb(COLOR_ELEVATED))
+                                            .border_1()
+                                            .border_color(rgb(COLOR_BORDER))
+                                            .children(AgentKind::ALL.into_iter().map(|kind| {
+                                                div()
+                                                    .id(("context-agent-option", kind as u64))
+                                                    .h(px(CONTEXT_MENU_ITEM_HEIGHT))
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap(px(SPACE_NORMAL))
+                                                    .px(px(SPACE_NORMAL))
+                                                    .rounded(px(RADIUS_CHIP))
+                                                    .hover(|style| style.bg(rgb(COLOR_BORDER)))
+                                                    .on_mouse_down(
+                                                        MouseButton::Left,
+                                                        cx.listener(move |this, _, _, cx| {
+                                                            this.begin_agent_placement(kind, cx);
+                                                        }),
+                                                    )
+                                                    .child(
+                                                        svg()
+                                                            .path(agent_icon_path(kind))
+                                                            .w(px(ICON_SIZE))
+                                                            .h(px(ICON_SIZE))
+                                                            .text_color(rgb(agent_color(kind))),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_sm()
+                                                            .text_color(rgb(COLOR_FOREGROUND))
+                                                            .child(kind.label()),
+                                                    )
+                                            })),
+                                    )
+                                })
+                            })
+                            .when_some(agent_menu.clone(), |area, menu| {
+                                let x = (f32::from(menu.position.x) - drawer_width).max(SPACE_NORMAL);
+                                let y = f32::from(menu.position.y).max(SPACE_NORMAL);
+                                let name_input = agent_name_input.clone();
+                                let root_text = agent_root.clone();
+                                let error = dialog_error.clone();
+                                area.child(
+                                    div()
+                                        .absolute()
+                                        .left(px(0.0))
+                                        .top(px(0.0))
+                                        .size_full()
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(|this, _, _, cx| this.close_agent_menu(cx)),
+                                        ),
+                                )
+                                .child(if menu.editing {
+                                    let cancel = ComponentButton::new("agent-edit-cancel")
+                                        .label("Cancelar")
+                                        .with_variant(ButtonVariant::Ghost)
+                                        .on_click(cx.listener(|this, _, _, cx| this.close_agent_menu(cx)));
+                                    let save = ComponentButton::new("agent-edit-save")
+                                        .label("Salvar")
+                                        .with_variant(ButtonVariant::Primary)
+                                        .on_click(cx.listener(|this, _, _, cx| this.save_agent_edits(cx)));
+                                    div()
+                                        .absolute()
+                                        .left(px(x))
+                                        .top(px(y))
+                                        .w(px(AGENT_DIALOG_WIDTH))
+                                        .flex()
+                                        .flex_col()
+                                        .gap_3()
+                                        .p(px(SPACE_PANEL))
+                                        .rounded(px(RADIUS_DIALOG))
+                                        .border_1()
+                                        .border_color(rgb(COLOR_BORDER))
+                                        .bg(rgb(COLOR_PANEL))
+                                        .text_color(rgb(COLOR_FOREGROUND))
+                                        .child(
+                                            div()
+                                                .text_lg()
+                                                .text_color(rgb(COLOR_FOREGROUND))
+                                                .child("Editar agente"),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(rgb(COLOR_MUTED))
+                                                .child("Nome do terminal"),
+                                        )
+                                        .children(name_input.iter().map(|state| {
+                                            Input::new(state)
+                                                .w_full()
+                                                .rounded(px(RADIUS_CONTROL))
+                                                .bg(rgb(COLOR_ELEVATED))
+                                                .border_color(rgb(COLOR_BORDER))
+                                        }))
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(rgb(COLOR_MUTED))
+                                                .child("Agente"),
+                                        )
+                                        .child(
+                                            div().flex().gap_2().children(
+                                                AgentKind::ALL.into_iter().map(|kind| {
+                                                    let selected = kind == menu.kind;
+                                                    ComponentButton::new(("agent-kind", kind as u64))
+                                                        .child(
+                                                            svg()
+                                                                .path(agent_icon_path(kind))
+                                                                .w(px(ICON_SIZE))
+                                                                .h(px(ICON_SIZE))
+                                                                .text_color(rgb(agent_color(kind))),
+                                                        )
+                                                        .w(px(AGENT_TILE_SIZE))
+                                                        .h(px(AGENT_TILE_SIZE))
+                                                        .p_0()
+                                                        .rounded(px(RADIUS_CONTROL))
+                                                        .border_1()
+                                                        .border_color(rgb(if selected {
+                                                            agent_color(kind)
+                                                        } else {
+                                                            COLOR_BORDER
+                                                        }))
+                                                        .bg(rgb(if selected {
+                                                            COLOR_ELEVATED
+                                                        } else {
+                                                            COLOR_PANEL
+                                                        }))
+                                                        .with_variant(ButtonVariant::Ghost)
+                                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                                            let (ws, id, name) = {
+                                                                let Some(menu) = this.agent_menu.as_mut() else {
+                                                                    return;
+                                                                };
+                                                                menu.kind = kind;
+                                                                (menu.workspace_id, menu.card_id, menu.name.clone())
+                                                            };
+                                                            this.apply_agent_to_card(ws, id, kind, name, cx);
+                                                            cx.notify();
+                                                        }))
+                                                }),
+                                            ),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(rgb(COLOR_MUTED))
+                                                .child("Comando"),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(rgb(COLOR_FOREGROUND))
+                                                .child(menu.kind.command()),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(rgb(COLOR_MUTED))
+                                                .child("Raiz"),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(rgb(COLOR_MUTED))
+                                                .child(root_text),
+                                        )
+                                        .when_some(error, |dialog, error| {
+                                            dialog
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(rgb(COLOR_DANGER))
+                                                        .child(error),
+                                                )
+                                        })
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .justify_end()
+                                                .gap_2()
+                                                .child(cancel)
+                                                .child(save),
+                                        )
+                                } else {
+                                    div()
+                                        .absolute()
+                                        .left(px(x))
+                                        .top(px(y))
+                                        .w(px(CONTEXT_MENU_WIDTH))
+                                        .flex()
+                                        .flex_col()
+                                        .p(px(SPACE_TIGHT))
+                                        .rounded(px(RADIUS_CONTROL))
+                                        .bg(rgb(COLOR_ELEVATED))
+                                        .border_1()
+                                        .border_color(rgb(COLOR_BORDER))
+                                        .child(
+                                            div()
+                                                .id("agent-menu-edit")
+                                                .h(px(CONTEXT_MENU_ITEM_HEIGHT))
+                                                .flex()
+                                                .items_center()
+                                                .gap(px(SPACE_NORMAL))
+                                                .px(px(SPACE_NORMAL))
+                                                .rounded(px(RADIUS_CHIP))
+                                                .hover(|style| style.bg(rgb(COLOR_BORDER)))
+                                                .on_mouse_down(
+                                                    MouseButton::Left,
+                                                    cx.listener(|this, _, window, cx| {
+                                                        this.begin_agent_edit(window, cx);
+                                                    }),
+                                                )
+                                                .child(
+                                                    svg()
+                                                        .path("edit.svg")
+                                                        .w(px(ICON_SIZE))
+                                                        .h(px(ICON_SIZE))
+                                                        .text_color(rgb(COLOR_FOREGROUND)),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_sm()
+                                                        .text_color(rgb(COLOR_FOREGROUND))
+                                                        .child("Editar"),
+                                                ),
+                                        )
                                 })
                             }),
                     ),
@@ -1485,6 +2137,23 @@ mod tests {
     }
 
     #[test]
+    fn persisted_snapshot_keeps_agents() {
+        let mut store = WorkspaceStore::new();
+        let workspace = store.add("A".into(), WorkspaceIcon::Star, PathBuf::from("/a"));
+        let bounds = CardBounds { x: 8.0, y: 12.0, width: 640.0, height: 400.0 };
+        let agent = store
+            .workspace_mut(workspace.id)
+            .unwrap()
+            .canvas
+            .add_agent(AgentKind::Pi, bounds);
+
+        let snapshot = persisted_snapshot(&store);
+
+        assert_eq!(snapshot.workspaces()[0].canvas.agents(), &[agent]);
+        assert_eq!(snapshot, store);
+    }
+
+    #[test]
     fn card_bounds_survive_pixel_conversion() {
         let original = Bounds::new(Point::new(px(-12.5), px(30.0)), Size::new(px(320.0), px(220.0)));
         let restored = pixel_bounds(card_bounds(&original));
@@ -1512,6 +2181,31 @@ mod tests {
 
         assert_eq!(store.workspace_mut(first.id).unwrap().canvas.terminals().len(), 1);
         assert!(store.workspace_mut(second.id).unwrap().canvas.terminals().is_empty());
+    }
+
+    #[test]
+    fn active_agent_target_allocates_a_removable_card() {
+        let mut store = WorkspaceStore::new();
+        let workspace = store.add("A".into(), WorkspaceIcon::Star, std::env::current_dir().unwrap());
+        let bounds = CardBounds { x: 0.0, y: 0.0, width: 640.0, height: 400.0 };
+        let mut groups = groups_for(&store);
+
+        let (workspace_id, id, root) =
+            active_agent_target(&mut store, AgentKind::Pi, bounds).unwrap();
+        assert_eq!(workspace_id, workspace.id);
+        assert_eq!(root, workspace.root);
+        assert_eq!(id, 1);
+        assert_eq!(
+            store.workspace_mut(workspace_id).unwrap().canvas.agents()[0].kind,
+            AgentKind::Pi
+        );
+
+        assert!(remove_terminal_state(&mut store, &mut groups, workspace_id, id));
+        assert!(store.workspace_mut(workspace_id).unwrap().canvas.agents().is_empty());
+        assert_eq!(
+            active_agent_target(&mut store, AgentKind::Omp, bounds).unwrap().1,
+            2
+        );
     }
 
     #[test]
@@ -1559,6 +2253,7 @@ mod tests {
             let terminal = canvas.add();
             canvas.set_terminal_bounds(terminal.id, bounds);
             canvas.add_note("nota".into(), bounds);
+            canvas.add_agent(AgentKind::Claude, bounds);
         }
         store.workspace_mut(first.id).unwrap().unload();
         store.select(second.id);
@@ -1569,6 +2264,8 @@ mod tests {
         assert_eq!(layout.terminals.len(), 1);
         assert_eq!(layout.terminals[0].bounds, Some(bounds));
         assert_eq!(layout.notes[0].text, "nota");
+        assert_eq!(layout.agents.len(), 1);
+        assert_eq!(layout.agents[0].kind, AgentKind::Claude);
         assert_eq!(store.active(), Some(first.id));
         assert!(!store.workspaces()[0].unloaded);
         assert!(store.workspaces()[1].unloaded);
@@ -1578,6 +2275,7 @@ mod tests {
         store.select(first.id);
         assert!(!store.workspaces()[0].unloaded);
         assert_eq!(store.workspaces()[0].canvas.terminals().len(), 1);
+        assert_eq!(store.workspaces()[0].canvas.agents().len(), 1);
     }
 
     #[test]

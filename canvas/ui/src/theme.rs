@@ -18,6 +18,13 @@ pub const COLOR_NOTE_FG: u32 = 0x2A2721;
 pub const COLOR_NOTE_PLACEHOLDER: u32 = 0x6B6553;
 pub const COLOR_SUCCESS: u32 = 0x6F9E7A;
 
+// Agent card accents — every agent colour lives here, never in a component.
+pub const COLOR_AGENT_CLAUDE: u32 = 0xD97757;
+pub const COLOR_AGENT_CODEX: u32 = 0x19A58C;
+pub const COLOR_AGENT_PI: u32 = 0xA78BFA;
+pub const COLOR_AGENT_OMP: u32 = 0xE2B35C;
+pub const COLOR_AGENT_OPEN_CODE: u32 = 0x4FB3E8;
+
 // Workspace row (translucent gray, not a solid accent).
 pub const COLOR_ROW_BORDER_SOFT: u32 = 0x8A8D9133;
 pub const COLOR_ROW_BORDER_ACTIVE: u32 = 0x9A9DA266;
@@ -63,8 +70,11 @@ pub const SUBMENU_GAP: f32 = 4.;
 pub const TEXT_CARD_WIDTH: f32 = 320.;
 pub const TEXT_CARD_HEIGHT: f32 = 220.;
 pub const TEXT_CARD_PADDING: f32 = 12.;
+pub const AGENT_DIALOG_WIDTH: f32 = 340.;
+pub const AGENT_TILE_SIZE: f32 = 32.;
+pub const DRAG_CLICK_SLOP: f32 = 3.;
 
-use canvas_types::WorkspaceColor;
+use canvas_types::{AgentKind, WorkspaceColor};
 
 /// Map a workspace's persisted color choice to a concrete swatch.
 pub fn workspace_color(color: WorkspaceColor) -> u32 {
@@ -73,5 +83,27 @@ pub fn workspace_color(color: WorkspaceColor) -> u32 {
         WorkspaceColor::Steel => COLOR_SELECTION,
         WorkspaceColor::Red => COLOR_DANGER,
         WorkspaceColor::Green => COLOR_SUCCESS,
+    }
+}
+
+/// Accent used for an agent's icon and menu tile.
+pub fn agent_color(kind: AgentKind) -> u32 {
+    match kind {
+        AgentKind::Claude => COLOR_AGENT_CLAUDE,
+        AgentKind::Codex => COLOR_AGENT_CODEX,
+        AgentKind::Pi => COLOR_AGENT_PI,
+        AgentKind::Omp => COLOR_AGENT_OMP,
+        AgentKind::OpenCode => COLOR_AGENT_OPEN_CODE,
+    }
+}
+
+/// Embedded SVG matching the agent's mark.
+pub fn agent_icon_path(kind: AgentKind) -> &'static str {
+    match kind {
+        AgentKind::Claude => "agent-claude.svg",
+        AgentKind::Codex => "agent-codex.svg",
+        AgentKind::Pi => "agent-pi.svg",
+        AgentKind::Omp => "agent-omp.svg",
+        AgentKind::OpenCode => "agent-open-code.svg",
     }
 }

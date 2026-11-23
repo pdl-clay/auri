@@ -4,12 +4,12 @@ use std::path::PathBuf;
 use auro::gpui::{
     App, Bounds, Context, CursorStyle, Div, DragMoveEvent, Edges, Entity, EntityId, MouseButton,
     MouseDownEvent, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, Size, Stateful,
-    WeakEntity, Window, div, px, rgb,
+    WeakEntity, Window, div, px, rgb, svg,
 };
 use auro::prelude::*;
 use portable_pty::PtySize;
 use gpui_terminal::{TerminalConfig, TerminalView};
-use canvas_types::{TerminalId, WorkspaceId};
+use canvas_types::{AgentKind, TerminalId, WorkspaceId};
 
 use crate::canvas::{Canvas, card_bounds};
 use crate::pty::PtySession;
@@ -88,6 +88,7 @@ struct DragStart {
     mode: DragMode,
     position: Point<Pixels>,
     bounds: Bounds<Pixels>,
+    moved: bool,
 }
 
 /// Visual card for a single terminal, owning the PTY and its emulator view.
@@ -96,6 +97,7 @@ pub struct TerminalCard {
     pub workspace_id: WorkspaceId,
     pub bounds: Bounds<Pixels>,
     pub exited: bool,
+    agent: Option<(AgentKind, String)>,
     pub selected: bool,
     pub terminal: Entity<TerminalView>,
     canvas: WeakEntity<Canvas>,
@@ -162,6 +164,7 @@ impl TerminalCard {
             workspace_id,
             bounds,
             exited: false,
+            agent: None,
             selected: false,
             terminal,
             canvas,
@@ -188,6 +191,16 @@ impl TerminalCard {
         }
     }
 
+    /// Attach or replace the agent shown in the card header.
+    pub fn set_agent(&mut self, kind: AgentKind, name: String, cx: &mut Context<Self>) {
+        self.agent = Some((kind, name));
+        cx.notify();
+    }
+
+    pub fn agent(&self) -> Option<(AgentKind, String)> {
+        self.agent.clone()
+    }
+
     /// Apply the canvas zoom/pan to this card and its terminal font.
     pub fn set_view(&mut self, zoom: f32, offset_x: f32, offset_y: f32, cx: &mut Context<Self>) {
         self.view_zoom = zoom;
@@ -207,6 +220,7 @@ impl TerminalCard {
             mode,
             position,
             bounds: self.bounds,
+            moved: false,
         });
     }
 
@@ -225,6 +239,9 @@ impl TerminalCard {
         let zoom = self.view_zoom.max(0.01);
         let dx = (f32::from(event.event.position.x) - f32::from(start.position.x)) / zoom;
         let dy = (f32::from(event.event.position.y) - f32::from(start.position.y)) / zoom;
+        if dx.abs() > DRAG_CLICK_SLOP || dy.abs() > DRAG_CLICK_SLOP {
+            self.drag = Some(DragStart { moved: true, ..start });
+        }
         let bounds = start.bounds;
         let x = f32::from(bounds.origin.x);
         let y = f32::from(bounds.origin.y);
@@ -347,6 +364,7 @@ impl Render for TerminalCard {
         let entity_id = cx.entity_id();
         let scroll_canvas = self.canvas.clone();
         let zoom = self.view_zoom;
+        let agent = self.agent();
         let left = f32::from(self.bounds.origin.x) * zoom + self.view_offset_x;
         let top = f32::from(self.bounds.origin.y) * zoom + self.view_offset_y;
         let width = f32::from(self.bounds.size.width) * zoom;
@@ -364,7 +382,7 @@ impl Render for TerminalCard {
                 MouseButton::Left,
                 cx.listener(move |_, _, _, cx| {
                     let _ = bounds_canvas.update(cx, |canvas, cx| {
-                        canvas.commit_terminal_bounds(workspace_id, id, saved_bounds, cx)
+                        canvas.commit_card_bounds(workspace_id, id, saved_bounds, cx)
                     });
                 }),
             )
@@ -406,18 +424,32 @@ impl Render for TerminalCard {
                             .flex()
                             .items_center()
                             .gap_2()
-                            .child(
-                                div()
-                                    .w(px(8.0))
-                                    .h(px(8.0))
-                                    .rounded_full()
-                                    .bg(if selected {
-                                        rgb(COLOR_SELECTION)
-                                    } else {
-                                        rgb(COLOR_SUBTLE)
-                                    }),
-                            )
-                            .child(div().text_sm().child(format!("Terminal {id}")))
+                            .when_some(agent.clone(), |title, (kind, name)| {
+                                title
+                                    .child(
+                                        svg()
+                                            .path(agent_icon_path(kind))
+                                            .w(px(ICON_SIZE))
+                                            .h(px(ICON_SIZE))
+                                            .text_color(rgb(agent_color(kind))),
+                                    )
+                                    .child(div().text_sm().child(name))
+                            })
+                            .when(agent.is_none(), |title| {
+                                title
+                                    .child(
+                                        div()
+                                            .w(px(8.0))
+                                            .h(px(8.0))
+                                            .rounded_full()
+                                            .bg(if selected {
+                                                rgb(COLOR_SELECTION)
+                                            } else {
+                                                rgb(COLOR_SUBTLE)
+                                            }),
+                                    )
+                                    .child(div().text_sm().child(format!("Terminal {id}")))
+                            })
                             .when(exited, |title| {
                                 title
                                     .child("encerrado")
@@ -450,6 +482,24 @@ impl Render for TerminalCard {
                     .on_drag_move(
                         cx.listener(move |this, event: &DragMoveEvent<DragToken>, _, cx| {
                             this.apply_drag(event, entity_id, cx);
+                        }),
+                    )
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            let moved = this.drag.is_some_and(|drag| drag.moved);
+                            this.drag = None;
+                            if !moved && this.agent.is_some() {
+                                let workspace_id = this.workspace_id;
+                                let id = this.id;
+                                let position = window.mouse_position();
+                                let Some(canvas) = this.canvas.upgrade() else {
+                                    return;
+                                };
+                                let _ = canvas.update(cx, |canvas, cx| {
+                                    canvas.open_agent_menu(workspace_id, id, position, cx)
+                                });
+                            }
                         }),
                     ),
             )

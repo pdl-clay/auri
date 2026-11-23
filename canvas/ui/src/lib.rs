@@ -31,6 +31,11 @@ pub fn run() {
             ("note.svg", include_bytes!("../../icons/note.svg")),
             ("unload.svg", include_bytes!("../../icons/unload.svg")),
             ("edit.svg", include_bytes!("../../icons/edit.svg")),
+            ("agent-claude.svg", include_bytes!("../../icons/agent-claude.svg")),
+            ("agent-codex.svg", include_bytes!("../../icons/agent-codex.svg")),
+            ("agent-pi.svg", include_bytes!("../../icons/agent-pi.svg")),
+            ("agent-omp.svg", include_bytes!("../../icons/agent-omp.svg")),
+            ("agent-open-code.svg", include_bytes!("../../icons/agent-open-code.svg")),
         ]))
         .setup(|cx, _| {
             gpui_component::init(cx);

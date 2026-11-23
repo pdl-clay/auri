@@ -138,6 +138,13 @@ impl PtySession {
         Ok(())
     }
 
+    /// Type a command into the shell. The pty buffers it until the shell reads.
+    pub fn send_line(&mut self, command: &str) -> std::io::Result<()> {
+        self.writer.write_all(command.as_bytes())?;
+        self.writer.write_all(b"\n")?;
+        self.writer.flush()
+    }
+
     /// The process id of the pty's child, when the platform provides one.
     pub fn pid(&self) -> Option<u32> {
         self.pid
