@@ -747,12 +747,14 @@ impl Render for WorkspaceDrawer {
                     .child(
                         div()
                             .relative()
+                            .w(px(ICON_SIZE + COUNT_BADGE_RESERVE))
+                            .flex_none()
                             .child(icon_svg(workspace.icon, color))
                             .child(
                                 div()
                                     .absolute()
                                     .top(px(COUNT_BADGE_OFFSET))
-                                    .right(px(COUNT_BADGE_OFFSET))
+                                    .right_0()
                                     .text_xs()
                                     .text_color(rgb(COLOR_MUTED))
                                     .child(format!("{}", workspace.canvas.terminals().len())),
