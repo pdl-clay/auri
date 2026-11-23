@@ -203,6 +203,16 @@ impl Default for CanvasState {
         Self::new()
     }
 }
+
+/// Generated labels are the only ones safe to renumber; user-renamed cards keep
+/// their names. Custom agents always keep their saved name.
+fn is_generated_agent_name(kind: AgentKind, name: &str) -> bool {
+    if name == kind.label() {
+        return true;
+    }
+    name.strip_prefix(&format!("{} ", kind.label()))
+        .is_some_and(|suffix| suffix.parse::<usize>().is_ok())
+}
 impl CanvasState {
     pub fn new() -> Self {
         Self {
@@ -219,7 +229,7 @@ impl CanvasState {
         self.next_id += 1;
         let terminal = TerminalState {
             id,
-            title: format!("Terminal {id}"),
+            title: format!("Terminal {}", self.terminals.len() + 1),
             exited: false,
             bounds: None,
         };
@@ -231,6 +241,7 @@ impl CanvasState {
     pub fn remove(&mut self, id: TerminalId) -> Option<TerminalState> {
         let index = self.terminals.iter().position(|terminal| terminal.id == id)?;
         let removed = self.terminals.remove(index);
+        self.reindex_titles();
         if self.selected == Some(id) {
             self.selected = None;
         }
@@ -318,7 +329,8 @@ impl CanvasState {
 
     /// Allocate an agent from the same id space as terminals and notes.
     pub fn add_agent(&mut self, kind: AgentKind, bounds: CardBounds) -> AgentState {
-        self.add_agent_named(format!("{} {}", kind.label(), self.next_id), kind, bounds)
+        let number = self.agents.len() + 1;
+        self.add_agent_named(format!("{} {number}", kind.label()), kind, bounds)
     }
 
     /// Allocate a card whose title comes from a custom agent's saved name.
@@ -328,6 +340,11 @@ impl CanvasState {
         kind: AgentKind,
         bounds: CardBounds,
     ) -> AgentState {
+        let name = if matches!(kind, AgentKind::Custom(_)) || !is_generated_agent_name(kind, &name) {
+            name
+        } else {
+            format!("{} {}", kind.label(), self.agents.len() + 1)
+        };
         let id = self.next_id;
         self.next_id += 1;
         let agent = AgentState {
@@ -337,6 +354,7 @@ impl CanvasState {
             bounds,
         };
         self.agents.push(agent.clone());
+        self.reindex_titles();
         self.selected = Some(id);
         agent
     }
@@ -344,6 +362,7 @@ impl CanvasState {
     pub fn remove_agent(&mut self, id: TerminalId) -> Option<AgentState> {
         let index = self.agents.iter().position(|agent| agent.id == id)?;
         let removed = self.agents.remove(index);
+        self.reindex_titles();
         if self.selected == Some(id) {
             self.selected = None;
         }
@@ -356,6 +375,21 @@ impl CanvasState {
 
     pub fn agents(&self) -> &[AgentState] {
         &self.agents
+    }
+
+    /// Display numbers follow the current per-type lists, not the cumulative id.
+    /// Internal and persisted ids stay untouched, so reloading or editing is safe.
+    pub fn reindex_titles(&mut self) {
+        for (index, terminal) in self.terminals.iter_mut().enumerate() {
+            terminal.title = format!("Terminal {}", index + 1);
+        }
+        for (index, agent) in self.agents.iter_mut().enumerate() {
+            if !matches!(agent.kind, AgentKind::Custom(_))
+                && is_generated_agent_name(agent.kind, &agent.name)
+            {
+                agent.name = format!("{} {}", agent.kind.label(), index + 1);
+            }
+        }
     }
 
     pub fn rename_agent(&mut self, id: TerminalId, name: String) -> bool {
@@ -642,6 +676,61 @@ mod tests {
     }
 
     #[test]
+    fn terminal_titles_follow_current_positions_not_ids() {
+        let mut state = CanvasState::new();
+        let first = state.add();
+        let second = state.add();
+        let third = state.add();
+        assert_eq!(
+            state.terminals().iter().map(|item| item.title.as_str()).collect::<Vec<_>>(),
+            ["Terminal 1", "Terminal 2", "Terminal 3"]
+        );
+
+        state.remove(second.id);
+        assert_eq!(
+            state.terminals().iter().map(|item| item.title.as_str()).collect::<Vec<_>>(),
+            ["Terminal 1", "Terminal 2"]
+        );
+        assert_eq!(state.terminals()[1].id, third.id);
+
+        let reopened = state.add();
+        assert_eq!(reopened.id, 4);
+        assert_eq!(reopened.title, "Terminal 3");
+        let _ = first;
+    }
+
+    #[test]
+    fn agent_titles_follow_current_positions_and_keep_custom_names() {
+        let mut state = CanvasState::new();
+        let bounds = CardBounds { x: 0.0, y: 0.0, width: 10.0, height: 10.0 };
+        let first = state.add_agent(AgentKind::Claude, bounds);
+        let second = state.add_agent(AgentKind::Codex, bounds);
+        assert_eq!((first.name.as_str(), second.name.as_str()), ("Claude 1", "Codex 2"));
+
+        state.remove_agent(first.id);
+        assert_eq!(state.agents()[0].name, "Codex 1");
+
+        let custom = state.add_agent_named("Meu agente".into(), AgentKind::Custom(99), bounds);
+        state.reindex_titles();
+        assert_eq!(state.agents()[1].id, custom.id);
+        assert_eq!(state.agents()[1].name, "Meu agente");
+    }
+
+    #[test]
+    fn renumbering_keeps_user_chosen_agent_names() {
+        let mut state = CanvasState::new();
+        let bounds = CardBounds { x: 0.0, y: 0.0, width: 10.0, height: 10.0 };
+        let first = state.add_agent(AgentKind::Claude, bounds);
+        assert!(state.rename_agent(first.id, "Meu Claude".into()));
+        state.add_agent(AgentKind::Codex, bounds);
+
+        assert_eq!(state.agents()[0].name, "Meu Claude");
+        assert_eq!(state.agents()[1].name, "Codex 2");
+        state.reindex_titles();
+        assert_eq!(state.agents()[0].name, "Meu Claude");
+    }
+
+    #[test]
     fn remove_clears_selection_only_when_removing_selected() {
         let mut state = CanvasState::new();
         let a = state.add();
@@ -761,7 +850,7 @@ mod tests {
         let last = state.add_agent(AgentKind::Pi, bounds);
 
         assert_eq!((terminal.id, agent.id, note.id, last.id), (1, 2, 3, 4));
-        assert_eq!(agent.name, "Codex 2");
+        assert_eq!((agent.name.as_str(), last.name.as_str()), ("Codex 1", "Pi 2"));
         assert_eq!(state.selected(), Some(4));
 
         let mut restored = CanvasState::new();

@@ -55,6 +55,7 @@ pub struct TextCard {
     pub workspace_id: WorkspaceId,
     pub bounds: Bounds<Pixels>,
     pub selected: bool,
+    number: usize,
     input: Entity<InputState>,
     canvas: WeakEntity<Canvas>,
     drag: Option<DragStart>,
@@ -107,6 +108,7 @@ impl TextCard {
             view_offset_y: 0.0,
             _text_subscription: text_subscription,
             selected: false,
+            number: 1,
         }
     }
 
@@ -121,6 +123,14 @@ impl TextCard {
     pub fn set_selected(&mut self, selected: bool, cx: &mut Context<Self>) {
         if self.selected != selected {
             self.selected = selected;
+            cx.notify();
+        }
+    }
+
+    /// Display number is the note's current position among workspace notes.
+    pub fn set_number(&mut self, number: usize, cx: &mut Context<Self>) {
+        if self.number != number {
+            self.number = number;
             cx.notify();
         }
     }
@@ -268,7 +278,7 @@ impl Render for TextCard {
                         div()
                             .text_xs()
                             .text_color(rgb(COLOR_NOTE_PLACEHOLDER))
-                            .child(format!("Bloco de texto {id}")),
+                            .child(format!("Bloco de texto {}", self.number)),
                     )
                     .child(
                         div()

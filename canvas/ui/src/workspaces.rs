@@ -69,6 +69,15 @@ fn filter_matches(name: &str, query: &str) -> bool {
     name.to_lowercase().contains(&query.to_lowercase())
 }
 
+/// Rows show every card in a workspace: terminals and agents together.
+fn workspace_item_count(workspace: &WorkspaceState) -> usize {
+    if workspace.unloaded {
+        0
+    } else {
+        workspace.canvas.terminals().len() + workspace.canvas.agents().len()
+    }
+}
+
 #[derive(Clone, Copy)]
 struct DrawerDragToken;
 
@@ -850,6 +859,7 @@ impl Render for WorkspaceDrawer {
                 let is_active = active == Some(id);
                 let invalid = workspace.invalid_root;
                 let unloaded = workspace.unloaded;
+                let item_count = workspace_item_count(&workspace);
                 let terminal_color = if unloaded {
                     COLOR_UNLOADED_ICON
                 } else {
@@ -917,7 +927,7 @@ impl Render for WorkspaceDrawer {
                                     .right_0()
                                     .text_xs()
                                     .text_color(rgb(terminal_color))
-                                    .child(format!("{}", if unloaded { 0 } else { workspace.canvas.terminals().len() })),
+                                    .child(format!("{item_count}")),
                             ),
                     )
                     .child(
@@ -1107,11 +1117,12 @@ impl Render for WorkspaceDrawer {
 
 #[cfg(test)]
 mod tests {
-    use canvas_types::{WorkspaceColor, WorkspaceIcon, WorkspaceStore};
+    use canvas_types::{AgentKind, CardBounds, WorkspaceColor, WorkspaceIcon, WorkspaceStore};
     use std::path::PathBuf;
 
     use super::{
         DrawerAction, LoadOutcome, WorkspaceDrawer, apply_restart_result, filter_matches, menu_origin,
+        workspace_item_count,
     };
     use auro::gpui::{Point, px};
 
@@ -1137,6 +1148,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn workspace_row_counts_terminals_and_agents() {
+        let mut store = WorkspaceStore::new();
+        let workspace = store.add("A".into(), WorkspaceIcon::Star, PathBuf::from("/tmp/auro-count"));
+        let id = workspace.id;
+        assert_eq!(workspace_item_count(&workspace), 0);
+
+        let canvas = &mut store.workspace_mut(id).unwrap().canvas;
+        canvas.add();
+        let bounds = CardBounds { x: 0.0, y: 0.0, width: 10.0, height: 10.0 };
+        canvas.add_agent(AgentKind::Claude, bounds);
+        canvas.add_agent(AgentKind::Codex, bounds);
+        store.workspace_mut(id).unwrap().mark_loaded();
+        let loaded = store.workspaces().iter().find(|item| item.id == id).unwrap();
+        assert_eq!(workspace_item_count(loaded), 3);
+
+        let mut unloaded = loaded.clone();
+        unloaded.unloaded = true;
+        assert_eq!(workspace_item_count(&unloaded), 0);
+    }
 
     #[test]
     fn edit_form_emits_update_with_all_edited_fields() {

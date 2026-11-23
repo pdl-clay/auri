@@ -97,6 +97,7 @@ pub struct TerminalCard {
     pub bounds: Bounds<Pixels>,
     pub exited: bool,
     agent: Option<(AgentKind, String, AgentIcon)>,
+    number: usize,
     pub selected: bool,
     pub terminal: Entity<TerminalView>,
     canvas: WeakEntity<Canvas>,
@@ -164,6 +165,7 @@ impl TerminalCard {
             bounds,
             exited: false,
             agent: None,
+            number: 1,
             selected: false,
             terminal,
             canvas,
@@ -200,6 +202,24 @@ impl TerminalCard {
     ) {
         self.agent = Some((kind, name, icon));
         cx.notify();
+    }
+
+    /// Display number is the card's current position among its type in the workspace.
+    pub fn set_number(&mut self, number: usize, cx: &mut Context<Self>) {
+        if self.number != number {
+            self.number = number;
+            cx.notify();
+        }
+    }
+
+    /// Refresh the header after the workspace renumbers its agent cards.
+    pub fn set_agent_name(&mut self, name: String, cx: &mut Context<Self>) {
+        if let Some((_, current, _)) = self.agent.as_mut() {
+            if *current != name {
+                *current = name;
+                cx.notify();
+            }
+        }
     }
 
     pub fn agent(&self) -> Option<(AgentKind, String, AgentIcon)> {
@@ -471,7 +491,7 @@ impl Render for TerminalCard {
                                                 rgb(COLOR_SUBTLE)
                                             }),
                                     )
-                                    .child(div().text_sm().child(format!("Terminal {id}")))
+                                    .child(div().text_sm().child(format!("Terminal {}", self.number)))
                             })
                             .when(exited, |title| {
                                 title

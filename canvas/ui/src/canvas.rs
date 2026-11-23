@@ -4,13 +4,14 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use auro::gpui::{
-    AnyElement, AnyWindowHandle, Bounds, ClickEvent, Context, CursorStyle, Entity, MouseButton, MouseDownEvent, Pixels, Point, Render,
-    ScrollWheelEvent, Size, Subscription, Window, canvas, fill, px, rgb, svg,
+    AnyElement, AnyWindowHandle, App, Bounds, ClickEvent, Context, CursorStyle, Entity, MouseButton, MouseDownEvent, Pixels, Point, Render,
+    ScrollWheelEvent, Size, Subscription, WeakEntity, Window, canvas, fill, px, rgb, svg,
 };
 use auro::prelude::*;
 use gpui_component::{
-    Disableable,
+    Disableable, WindowExt,
     button::{Button as ComponentButton, ButtonVariant, ButtonVariants as _},
+    dialog::{Dialog, DialogButtonProps},
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use canvas_types::{AgentIcon, AgentKind, AgentState, CardBounds, NoteState, TerminalId, TerminalState, WorkspaceColor, WorkspaceIcon, WorkspaceId, WorkspaceState, WorkspaceStore};
@@ -37,7 +38,6 @@ struct MenuState {
     /// Canvas-local top-left of the agent list when opened from the island;
     /// `None` means the list is anchored to the context menu's `Adicionar`.
     agent_list_anchor: Option<Point<Pixels>>,
-    placing_agent: Option<AgentKind>,
 }
 
 impl MenuState {
@@ -57,10 +57,24 @@ impl MenuState {
         self.agent_list_anchor = Some(anchor);
     }
 
-    fn begin_placement(&mut self, kind: Option<AgentKind>) {
-        self.close();
-        self.placing_agent = kind;
+    /// Open the agent list from `Adicionar` > `Agente`: no explicit anchor,
+    /// the list is positioned relative to the context menu instead.
+    fn open_context_agent_list(&mut self) {
+        self.agent_list = true;
+        self.agent_list_anchor = None;
     }
+
+    /// Both agent-list entry paths converge here before the dialog opens.
+    fn close_for_custom_dialog(&mut self) {
+        self.close();
+    }
+}
+
+/// Shared transition for picking an agent from either list. The choice lives
+/// outside `MenuState`, so dismissing a menu cannot turn it into a terminal.
+fn select_agent_placement(menu: &mut MenuState, pending: &mut Option<AgentKind>, kind: AgentKind) {
+    *pending = Some(kind);
+    menu.close();
 }
 
 /// UI-only sticky-note selection; never written to the workspace store.
@@ -137,7 +151,6 @@ impl AddOption {
 /// Transient state of the "Adicionar agente" dialog opened from an agent list.
 #[derive(Clone, Debug)]
 struct CustomAgentDialog {
-    position: Point<Pixels>,
     name: String,
     command: String,
     icon: AgentIcon,
@@ -151,9 +164,18 @@ fn all_agent_kinds(store: &WorkspaceStore) -> Vec<AgentKind> {
         .collect()
 }
 
-fn new_custom_dialog(position: Point<Pixels>) -> CustomAgentDialog {
+/// Resolve the name, CLI command and icon written into a new or reloaded card.
+fn resolve_agent_details(store: &WorkspaceStore, kind: AgentKind) -> (String, String, AgentIcon) {
+    if let AgentKind::Custom(id) = kind {
+        if let Some(agent) = store.custom_agent(id) {
+            return (agent.name.clone(), agent.command.clone(), agent.icon);
+        }
+    }
+    (kind.label(), kind.command(), kind.icon())
+}
+
+fn new_custom_dialog() -> CustomAgentDialog {
     CustomAgentDialog {
-        position,
         name: String::new(),
         command: String::new(),
         icon: AgentIcon::Claude,
@@ -381,6 +403,8 @@ pub struct Canvas {
     notes: NoteGroups,
     error: Option<String>,
     placing: bool,
+    /// Survives menu dismissal so an agent choice is never downgraded to a terminal.
+    pending_agent: Option<AgentKind>,
     placing_text: bool,
     zoom: f32,
     offset_x: f32,
@@ -410,6 +434,7 @@ impl Canvas {
             notes: HashMap::new(),
             error: None,
             placing: false,
+            pending_agent: None,
             placing_text: false,
             zoom: 1.0,
             offset_x: 0.0,
@@ -430,12 +455,7 @@ impl Canvas {
     /// Resolve the label, command and icon actually used by an agent kind.
     /// Built-ins are self-contained; custom agents live in the store.
     fn agent_details(&self, kind: AgentKind) -> (String, String, AgentIcon) {
-        if let AgentKind::Custom(id) = kind {
-            if let Some(agent) = self.store.custom_agent(id) {
-                return (agent.name.clone(), agent.command.clone(), agent.icon);
-            }
-        }
-        (kind.label(), kind.command(), kind.icon())
+        resolve_agent_details(&self.store, kind)
     }
 
     /// Hierarchical agent list used by both the island and `Adicionar`.
@@ -454,10 +474,10 @@ impl Canvas {
                     .px(px(SPACE_NORMAL))
                     .rounded(px(RADIUS_CHIP))
                     .hover(|style| style.bg(rgb(COLOR_BORDER)))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, _, cx| this.begin_agent_placement(kind, cx)),
-                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.begin_agent_placement(kind, cx);
+                    }))
                     .child(
                         svg()
                             .path(agent_icon_path(icon))
@@ -484,12 +504,10 @@ impl Canvas {
                 .px(px(SPACE_NORMAL))
                 .rounded(px(RADIUS_CHIP))
                 .hover(|style| style.bg(rgb(COLOR_BORDER)))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                        this.open_custom_dialog(event.position, window, cx);
-                    }),
-                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.open_custom_dialog(window, cx);
+                }))
                 .child(
                     svg()
                         .path("plus.svg")
@@ -635,6 +653,7 @@ impl Canvas {
     }
 
     fn finish_store_change(&mut self, cx: &mut Context<Self>) {
+        self.sync_card_numbers(cx);
         self.persist_store(cx);
         let store = self.store.clone();
         let drawer = self.drawer.clone();
@@ -645,6 +664,74 @@ impl Canvas {
                     drawer.set_store(store);
                     cx.notify();
                 })
+        });
+    }
+
+    /// Reindex live card headers from the current per-type workspace lists.
+    fn sync_card_numbers(&self, cx: &mut Context<Self>) {
+        let Some(workspace_id) = self.store.active() else {
+            return;
+        };
+        let Some(workspace) = self
+            .store
+            .workspaces()
+            .iter()
+            .find(|item| item.id == workspace_id)
+        else {
+            return;
+        };
+        let mut card_updates: HashMap<TerminalId, (usize, Option<String>)> = workspace
+            .canvas
+            .terminals()
+            .iter()
+            .enumerate()
+            .map(|(index, terminal)| (terminal.id, (index + 1, None)))
+            .collect();
+        card_updates.extend(
+            workspace
+                .canvas
+                .agents()
+                .iter()
+                .enumerate()
+                .map(|(index, agent)| (agent.id, (index + 1, Some(agent.name.clone())))),
+        );
+        let note_numbers: HashMap<u64, usize> = workspace
+            .canvas
+            .notes()
+            .iter()
+            .enumerate()
+            .map(|(index, note)| (note.id, index + 1))
+            .collect();
+        let cards: Vec<_> = self
+            .cards
+            .get(&workspace_id)
+            .into_iter()
+            .flatten()
+            .filter_map(|(id, card)| {
+                card_updates
+                    .get(id)
+                    .map(|(number, name)| (card.clone(), *number, name.clone()))
+            })
+            .collect();
+        let notes: Vec<_> = self
+            .notes
+            .get(&workspace_id)
+            .into_iter()
+            .flatten()
+            .filter_map(|(id, note)| note_numbers.get(id).map(|number| (note.clone(), *number)))
+            .collect();
+        cx.defer(move |cx| {
+            for (card, number, agent_name) in cards {
+                card.update(cx, |card, cx| {
+                    card.set_number(number, cx);
+                    if let Some(name) = agent_name {
+                        card.set_agent_name(name, cx);
+                    }
+                });
+            }
+            for (note, number) in notes {
+                note.update(cx, |note, cx| note.set_number(number, cx));
+            }
         });
     }
 
@@ -716,7 +803,8 @@ impl Canvas {
     pub fn begin_placement(&mut self, cx: &mut Context<Self>) {
         self.placing = true;
         self.placing_text = false;
-        self.menu.begin_placement(None);
+        self.menu.close();
+        self.pending_agent = None;
         self.error = None;
         self.agent_menu = None;
         self.custom_dialog = None;
@@ -727,7 +815,8 @@ impl Canvas {
     pub fn begin_text_placement(&mut self, cx: &mut Context<Self>) {
         self.placing_text = true;
         self.placing = false;
-        self.menu.begin_placement(None);
+        self.menu.close();
+        self.pending_agent = None;
         self.error = None;
         self.agent_menu = None;
         self.custom_dialog = None;
@@ -736,6 +825,7 @@ impl Canvas {
 
     pub fn cancel_placement(&mut self, cx: &mut Context<Self>) {
         self.placing = false;
+        self.pending_agent = None;
         self.placing_text = false;
         self.menu.close();
         self.custom_dialog = None;
@@ -755,7 +845,7 @@ impl Canvas {
             px((local_y - CARD_HEIGHT / 2.0).max(8.0)),
         );
         self.placing = false;
-        if let Some(kind) = self.menu.placing_agent.take() {
+        if let Some(kind) = self.pending_agent.take() {
             self.spawn_agent(kind, Some(origin), window, cx);
         } else {
             self.spawn_terminal(Some(origin), window, cx);
@@ -887,7 +977,7 @@ impl Canvas {
     pub fn begin_agent_placement(&mut self, kind: AgentKind, cx: &mut Context<Self>) {
         self.placing = true;
         self.placing_text = false;
-        self.menu.begin_placement(Some(kind));
+        select_agent_placement(&mut self.menu, &mut self.pending_agent, kind);
         self.error = None;
         self.agent_menu = None;
         self.custom_dialog = None;
@@ -1094,19 +1184,18 @@ impl Canvas {
         self.finish_store_change(cx);
     }
 
-    /// Open the "Adicionar agente" form at the point that was clicked.
-    fn open_custom_dialog(
-        &mut self,
-        position: Point<Pixels>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.menu.close();
+    /// Open the centered "Adicionar agente" form from either agent-list path.
+    fn open_custom_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.menu.close_for_custom_dialog();
         self.agent_menu = None;
-        self.custom_dialog = Some(new_custom_dialog(position));
+        self.custom_dialog = Some(new_custom_dialog());
         self.ensure_custom_inputs(window, cx);
         self.sync_custom_inputs(window, cx);
         self.error = None;
+        let canvas = cx.weak_entity();
+        window.open_dialog(cx, move |dialog, window, cx| {
+            custom_agent_dialog(dialog, window, cx, &canvas)
+        });
         cx.notify();
     }
 
@@ -1491,11 +1580,25 @@ impl Canvas {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(WorkspaceLayout { root, root_ok, terminals, notes, agents }) =
+        let Some(WorkspaceLayout { root, root_ok, terminals, notes, mut agents }) =
             begin_workspace_load(&mut self.store, id)
         else {
             return;
         };
+        if let Some(workspace) = self.store.workspace_mut(id) {
+            workspace.canvas.reindex_titles();
+            let names: HashMap<TerminalId, String> = workspace
+                .canvas
+                .agents()
+                .iter()
+                .map(|agent| (agent.id, agent.name.clone()))
+                .collect();
+            for agent in &mut agents {
+                if let Some(name) = names.get(&agent.id) {
+                    agent.name = name.clone();
+                }
+            }
+        }
         self.clear_note_selection(cx);
         // An unloaded workspace has no live cards; drop any stale entities.
         let dropped = self.cards.remove(&id).unwrap_or_default();
@@ -1656,12 +1759,162 @@ fn zoom_at(
     (next, local_x - world_x * next, local_y - world_y * next)
 }
 
+/// Centered creation form, built on the same root dialog overlay as the
+/// workspace form so canvas menus cannot swallow its clicks.
+fn custom_agent_dialog(
+    dialog: Dialog,
+    window: &mut Window,
+    cx: &mut App,
+    canvas: &WeakEntity<Canvas>,
+) -> Dialog {
+    let Some(entity) = canvas.upgrade() else {
+        return dialog;
+    };
+    let (name_input, command_input, error, icon) = {
+        let state = entity.read(cx);
+        (
+            state.custom_name_input.clone(),
+            state.custom_command_input.clone(),
+            state.error.clone(),
+            state.custom_dialog.as_ref().map(|form| form.icon).unwrap_or_default(),
+        )
+    };
+    let ok_canvas = canvas.clone();
+    let cancel_canvas = canvas.clone();
+    let close_canvas = canvas.clone();
+
+    dialog
+        .title(
+            div()
+                .text_lg()
+                .text_color(rgb(COLOR_FOREGROUND))
+                .child("Adicionar agente"),
+        )
+        .w(px(AGENT_DIALOG_WIDTH))
+        .margin_top((window.viewport_size().height - px(AGENT_DIALOG_HEIGHT)) / 2.0)
+        .overlay(true)
+        .rounded(px(RADIUS_DIALOG))
+        .border_1()
+        .border_color(rgb(COLOR_BORDER))
+        .bg(rgb(COLOR_PANEL))
+        .text_color(rgb(COLOR_FOREGROUND))
+        .button_props(
+            DialogButtonProps::default()
+                .ok_text("Adicionar")
+                .cancel_text("Cancelar")
+                .ok_variant(ButtonVariant::Primary)
+                .cancel_variant(ButtonVariant::Ghost),
+        )
+        .footer(|ok, cancel, window, cx| vec![cancel(window, cx), ok(window, cx)])
+        .on_ok(move |_, window, cx| {
+            let mut accepted = false;
+            if let Some(entity) = ok_canvas.upgrade() {
+                entity.update(cx, |this, cx| {
+                    this.submit_custom_agent(window, cx);
+                    accepted = this.custom_dialog.is_none() && this.error.is_none();
+                });
+            }
+            accepted
+        })
+        .on_cancel(move |_, _, cx| {
+            if let Some(entity) = cancel_canvas.upgrade() {
+                entity.update(cx, |this, cx| this.close_custom_dialog(cx));
+            }
+            true
+        })
+        .on_close(move |_, _, cx| {
+            if let Some(entity) = close_canvas.upgrade() {
+                entity.update(cx, |this, cx| this.close_custom_dialog(cx));
+            }
+        })
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(COLOR_MUTED))
+                        .child("Nome"),
+                )
+                .children(name_input.iter().map(|state| {
+                    Input::new(state)
+                        .w_full()
+                        .rounded(px(RADIUS_CONTROL))
+                        .bg(rgb(COLOR_ELEVATED))
+                        .border_color(rgb(COLOR_BORDER))
+                }))
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(COLOR_MUTED))
+                        .child("Comando para executar"),
+                )
+                .children(command_input.iter().map(|state| {
+                    Input::new(state)
+                        .w_full()
+                        .rounded(px(RADIUS_CONTROL))
+                        .bg(rgb(COLOR_ELEVATED))
+                        .border_color(rgb(COLOR_BORDER))
+                }))
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(COLOR_MUTED))
+                        .child("Ícone"),
+                )
+                .child(div().flex().gap_2().children(
+                    AgentIcon::ALL.into_iter().map(|candidate| {
+                        let selected = candidate == icon;
+                        let icon_canvas = canvas.clone();
+                        ComponentButton::new(("custom-agent-icon", candidate.kind().id()))
+                            .child(
+                                svg()
+                                    .path(agent_icon_path(candidate))
+                                    .w(px(ICON_SIZE))
+                                    .h(px(ICON_SIZE))
+                                    .text_color(rgb(agent_color(candidate))),
+                            )
+                            .w(px(AGENT_TILE_SIZE))
+                            .h(px(AGENT_TILE_SIZE))
+                            .p_0()
+                            .rounded(px(RADIUS_CONTROL))
+                            .border_1()
+                            .border_color(rgb(if selected {
+                                agent_color(candidate)
+                            } else {
+                                COLOR_BORDER
+                            }))
+                            .bg(rgb(if selected {
+                                COLOR_ELEVATED
+                            } else {
+                                COLOR_PANEL
+                            }))
+                            .with_variant(ButtonVariant::Ghost)
+                            .on_click(move |_, _, cx| {
+                                if let Some(entity) = icon_canvas.upgrade() {
+                                    entity.update(cx, |this, cx| {
+                                        this.select_custom_icon(candidate, cx)
+                                    });
+                                }
+                            })
+                    }),
+                ))
+                .when_some(error, |form, error| {
+                    form.child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(COLOR_DANGER))
+                            .child(error),
+                    )
+                }),
+        )
+}
+
 impl Render for Canvas {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let active = self.store.active();
-        let selected = active
-            .and_then(|id| self.store.workspaces().iter().find(|item| item.id == id))
-            .and_then(|workspace| workspace.canvas.selected());
         let zoom = self.zoom;
         let offset_x = self.offset_x;
         let offset_y = self.offset_y;
@@ -1669,9 +1922,6 @@ impl Render for Canvas {
         let submenu = self.menu.submenu;
         let agent_list = self.menu.agent_list;
         let agent_list_anchor = self.menu.agent_list_anchor;
-        let custom_dialog = self.custom_dialog.clone();
-        let custom_name_input = self.custom_name_input.clone();
-        let custom_command_input = self.custom_command_input.clone();
         let agent_menu = self.agent_menu.clone();
         let agent_name_input = self.agent_name_input.clone();
         let dialog_error = self.error.clone();
@@ -1747,16 +1997,6 @@ impl Render for Canvas {
         } else {
             add_note.disabled(true)
         };
-        let remove = ComponentButton::new("remove-selected")
-            .tooltip("Apagar selecionado")
-            .child(canvas_icon("trash.svg"))
-            .w(px(28.0))
-            .h(px(28.0))
-            .p_0()
-            .rounded(px(8.0))
-            .with_variant(ButtonVariant::Ghost)
-            .disabled(selected.is_none())
-            .on_click(cx.listener(|this, _, _, cx| this.remove_selected(cx)));
         let cards: Vec<_> = active
             .and_then(|id| self.cards.get(&id))
             .map(|group| {
@@ -2017,7 +2257,7 @@ impl Render for Canvas {
                                                     .when(option == AddOption::Agent, |item| {
                                                         item.on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                                                             if *hovered {
-                                                                this.menu.agent_list = true;
+                                                                this.menu.open_context_agent_list();
                                                                 cx.notify();
                                                             }
                                                         }))
@@ -2026,7 +2266,7 @@ impl Render for Canvas {
                                                         MouseButton::Left,
                                                         cx.listener(move |this, _, _, cx| match option {
                                                             AddOption::Agent => {
-                                                                this.menu.agent_list = true;
+                                                                this.menu.open_context_agent_list();
                                                                 cx.notify();
                                                             }
                                                             AddOption::Terminal => this.begin_placement(cx),
@@ -2277,135 +2517,6 @@ impl Render for Canvas {
                                         )
                                 })
                             })
-                            .when_some(custom_dialog.clone(), |area, dialog| {
-                                let x = (f32::from(dialog.position.x) - drawer_width).max(SPACE_NORMAL);
-                                let y = f32::from(dialog.position.y).max(SPACE_NORMAL);
-                                let cancel = ComponentButton::new("custom-agent-cancel")
-                                    .label("Cancelar")
-                                    .with_variant(ButtonVariant::Ghost)
-                                    .on_click(cx.listener(|this, _, _, cx| this.close_custom_dialog(cx)));
-                                let submit = ComponentButton::new("custom-agent-submit")
-                                    .label("Adicionar")
-                                    .with_variant(ButtonVariant::Primary)
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.submit_custom_agent(window, cx);
-                                    }));
-                                area.child(
-                                    div()
-                                        .absolute()
-                                        .left(px(0.0))
-                                        .top(px(0.0))
-                                        .size_full()
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(|this, _, _, cx| this.close_custom_dialog(cx)),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .absolute()
-                                        .left(px(x))
-                                        .top(px(y))
-                                        .w(px(AGENT_DIALOG_WIDTH))
-                                        .flex()
-                                        .flex_col()
-                                        .gap_3()
-                                        .p(px(SPACE_PANEL))
-                                        .rounded(px(RADIUS_DIALOG))
-                                        .border_1()
-                                        .border_color(rgb(COLOR_BORDER))
-                                        .bg(rgb(COLOR_PANEL))
-                                        .text_color(rgb(COLOR_FOREGROUND))
-                                        .child(
-                                            div()
-                                                .text_lg()
-                                                .text_color(rgb(COLOR_FOREGROUND))
-                                                .child("Adicionar agente"),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .text_color(rgb(COLOR_MUTED))
-                                                .child("Nome"),
-                                        )
-                                        .children(custom_name_input.iter().map(|state| {
-                                            Input::new(state)
-                                                .w_full()
-                                                .rounded(px(RADIUS_CONTROL))
-                                                .bg(rgb(COLOR_ELEVATED))
-                                                .border_color(rgb(COLOR_BORDER))
-                                        }))
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .text_color(rgb(COLOR_MUTED))
-                                                .child("Comando para executar"),
-                                        )
-                                        .children(custom_command_input.iter().map(|state| {
-                                            Input::new(state)
-                                                .w_full()
-                                                .rounded(px(RADIUS_CONTROL))
-                                                .bg(rgb(COLOR_ELEVATED))
-                                                .border_color(rgb(COLOR_BORDER))
-                                        }))
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .text_color(rgb(COLOR_MUTED))
-                                                .child("Ícone"),
-                                        )
-                                        .child(
-                                            div().flex().gap_2().children(
-                                                AgentIcon::ALL.into_iter().map(|icon| {
-                                                    let selected = icon == dialog.icon;
-                                                    ComponentButton::new(("custom-agent-icon", icon.kind().id()))
-                                                        .child(
-                                                            svg()
-                                                                .path(agent_icon_path(icon))
-                                                                .w(px(ICON_SIZE))
-                                                                .h(px(ICON_SIZE))
-                                                                .text_color(rgb(agent_color(icon))),
-                                                        )
-                                                        .w(px(AGENT_TILE_SIZE))
-                                                        .h(px(AGENT_TILE_SIZE))
-                                                        .p_0()
-                                                        .rounded(px(RADIUS_CONTROL))
-                                                        .border_1()
-                                                        .border_color(rgb(if selected {
-                                                            agent_color(icon)
-                                                        } else {
-                                                            COLOR_BORDER
-                                                        }))
-                                                        .bg(rgb(if selected {
-                                                            COLOR_ELEVATED
-                                                        } else {
-                                                            COLOR_PANEL
-                                                        }))
-                                                        .with_variant(ButtonVariant::Ghost)
-                                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                                            this.select_custom_icon(icon, cx);
-                                                        }))
-                                                }),
-                                            ),
-                                        )
-                                        .when_some(dialog_error.clone(), |form, error| {
-                                            form.child(
-                                                div()
-                                                    .text_xs()
-                                                    .text_color(rgb(COLOR_DANGER))
-                                                    .child(error),
-                                            )
-                                        })
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .justify_end()
-                                                .gap_2()
-                                                .child(cancel)
-                                                .child(submit),
-                                        ),
-                                )
-                            })
                     ),
             )
             .child(
@@ -2431,8 +2542,7 @@ impl Render for Canvas {
                             .border_color(rgb(COLOR_BORDER))
                             .child(add_agent)
                             .child(add)
-                            .child(add_note)
-                            .child(remove),
+                            .child(add_note),
                     )
                     .when(active.is_none(), |column| {
                         column.child(
@@ -2509,21 +2619,35 @@ mod tests {
         assert_eq!(menu.context_menu, Some(Point::new(px(30.0), px(40.0))));
         assert!(!menu.submenu);
         assert!(!menu.agent_list);
-        assert_eq!(menu.placing_agent, None);
     }
 
     #[test]
-    fn starting_placement_clears_menu_and_remembers_the_agent() {
+    fn selecting_an_agent_survives_menu_dismissal() {
         let mut menu = MenuState::default();
-        menu.open_context_menu(Point::new(px(1.0), px(2.0)));
-        menu.agent_list = true;
+        menu.open_island_agent_list(Point::new(px(120.0), px(48.0)));
+        let mut pending = None;
 
-        menu.begin_placement(Some(AgentKind::Codex));
+        select_agent_placement(&mut menu, &mut pending, AgentKind::Codex);
 
-        assert_eq!(menu.context_menu, None);
-        assert!(!menu.submenu);
-        assert!(!menu.agent_list);
-        assert_eq!(menu.placing_agent, Some(AgentKind::Codex));
+        assert_eq!(menu, MenuState::default());
+        assert_eq!(pending, Some(AgentKind::Codex));
+        menu.close();
+        assert_eq!(pending, Some(AgentKind::Codex));
+    }
+
+    #[test]
+    fn agent_details_resolve_builtin_and_custom_commands() {
+        let mut store = WorkspaceStore::new();
+        let custom = store.add_custom_agent("Meu agente".into(), "meu-comando".into(), AgentIcon::Pi);
+
+        assert_eq!(
+            resolve_agent_details(&store, AgentKind::Codex),
+            ("Codex".into(), "codex".into(), AgentIcon::Codex)
+        );
+        assert_eq!(
+            resolve_agent_details(&store, custom.kind()),
+            ("Meu agente".into(), "meu-comando".into(), AgentIcon::Pi)
+        );
     }
 
     #[test]
@@ -2566,11 +2690,33 @@ mod tests {
 
     #[test]
     fn custom_dialog_starts_empty_with_the_default_icon() {
-        let dialog = new_custom_dialog(Point::new(px(10.0), px(20.0)));
-        assert_eq!(dialog.position, Point::new(px(10.0), px(20.0)));
+        let dialog = new_custom_dialog();
         assert!(dialog.name.is_empty());
         assert!(dialog.command.is_empty());
         assert_eq!(dialog.icon, AgentIcon::Claude);
+    }
+
+    #[test]
+    fn both_agent_list_entry_paths_close_before_the_custom_dialog() {
+        let mut from_menu = MenuState::default();
+        from_menu.open_context_menu(Point::new(px(40.0), px(60.0)));
+        from_menu.submenu = true;
+        from_menu.open_context_agent_list();
+        assert!(from_menu.agent_list);
+        assert_eq!(from_menu.agent_list_anchor, None);
+        assert_eq!(from_menu.context_menu, Some(Point::new(px(40.0), px(60.0))));
+
+        let anchor = Point::new(px(120.0), px(48.0));
+        let mut from_island = MenuState::default();
+        from_island.open_island_agent_list(anchor);
+        assert!(from_island.agent_list);
+        assert_eq!(from_island.agent_list_anchor, Some(anchor));
+        assert_eq!(from_island.context_menu, None);
+
+        for menu in [&mut from_menu, &mut from_island] {
+            menu.close_for_custom_dialog();
+            assert_eq!(*menu, MenuState::default());
+        }
     }
 
     #[test]
