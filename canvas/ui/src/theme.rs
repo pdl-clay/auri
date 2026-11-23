@@ -67,7 +67,6 @@ pub const CARD_GAP: f32 = 1.;
 pub const WORKSPACE_NOTICE_WIDTH: f32 = 400.;
 
 // Context menu.
-pub const FPS_BADGE_WIDTH: f32 = 72.;
 pub const CONTEXT_MENU_WIDTH: f32 = 180.;
 pub const CONTEXT_MENU_ITEM_HEIGHT: f32 = 32.;
 pub const SUBMENU_GAP: f32 = 4.;
