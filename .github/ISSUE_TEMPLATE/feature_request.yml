@@ -1,0 +1,33 @@
+---
+name: Idea / feature
+description: Sugira uma mudança ou recurso para o Auri
+title: "[idea]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Ideias são bem-vindas. Itens do roadmap não são promessa de entrega.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Qual problema isso resolve no seu fluxo?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: O que você gostaria que acontecesse?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternativas consideradas
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Escopo
+      options:
+        - label: Entendo que isto é uma ferramenta pessoal e pode não ser aceito
+          required: true

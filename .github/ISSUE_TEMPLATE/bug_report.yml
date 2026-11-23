@@ -1,0 +1,38 @@
+---
+name: Bug report
+description: Reporte um comportamento inesperado no Auri
+title: "[bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Obrigado por reportar. Lembre-se: Auri é uma ferramenta pessoal, sem SLA de suporte.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: O que aconteceu?
+      description: Descreva o comportamento e o que você esperava.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Como reproduzir
+      description: Passos mínimos, incluindo versão, sistema e comandos usados.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs relevantes
+      description: Cole apenas dados sem segredos ou prompts privados.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Verificações
+      options:
+        - label: Rodei `cargo test --workspace`
+          required: false
+        - label: Li `NOTICE.md` e entendo que não há compromisso de suporte
+          required: true
