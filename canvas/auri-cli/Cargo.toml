@@ -1,0 +1,12 @@
+[package]
+name = "auri-cli"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+
+[[bin]]
+name = "auri"
+path = "src/main.rs"
+
+[dependencies]
+auri-protocol = { path = "../protocol" }

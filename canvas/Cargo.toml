@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.90"
 
 [dependencies]
+auri-protocol = { path = "protocol" }
 canvas-ui = { path = "ui" }
 
 [profile.release]
@@ -32,4 +33,4 @@ debug-assertions = false
 
 # Its own workspace: a parent manifest must never capture the generated app.
 [workspace]
-members = [".", "ui", "types"]
+members = [".", "ui", "types", "protocol", "auri-cli"]
