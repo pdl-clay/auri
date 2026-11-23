@@ -381,6 +381,13 @@ impl TerminalCard {
                 }),
             )
     }
+    /// End any active move/resize gesture and restore the terminal body.
+    pub fn end_drag(&mut self, cx: &mut Context<Self>) {
+        if self.drag.take().is_some() {
+            cx.notify();
+        }
+    }
+
 }
 
 pub(crate) fn scroll_delta(event: &ScrollWheelEvent) -> (f32, f32) {
@@ -427,11 +434,16 @@ impl Render for TerminalCard {
             )
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(move |_, _, _, cx| {
+                cx.listener(move |this, _, _, cx| {
+                    this.end_drag(cx);
                     let _ = bounds_canvas.update(cx, |canvas, cx| {
                         canvas.commit_card_bounds(workspace_id, id, saved_bounds, cx)
                     });
                 }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| this.end_drag(cx)),
             )
             .on_scroll_wheel(cx.listener(move |_, event: &ScrollWheelEvent, _, cx| {
                 let (dx, dy) = scroll_delta(event);

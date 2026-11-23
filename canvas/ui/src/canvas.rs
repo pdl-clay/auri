@@ -1589,6 +1589,12 @@ impl Canvas {
 
     /// Capture every live card, including drags released outside its own bounds.
     fn commit_all_bounds(&mut self, cx: &mut Context<Self>) {
+
+        for group in self.cards.values() {
+            for (_, card) in group {
+                card.update(cx, |card, cx| card.end_drag(cx));
+            }
+        }
         let mut terminals = Vec::new();
         for (workspace_id, group) in &self.cards {
             for (id, card) in group {
