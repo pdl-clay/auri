@@ -14,6 +14,11 @@ pub const COLOR_GRID: u32 = 0x2D2F32;
 pub const COLOR_SUBTLE: u32 = 0x424446;
 pub const COLOR_SUCCESS: u32 = 0x6F9E7A;
 
+// Workspace row (translucent gray, not a solid accent).
+pub const COLOR_ROW_BORDER_SOFT: u32 = 0x8A8D9133;
+pub const COLOR_ROW_BORDER_ACTIVE: u32 = 0x9A9DA266;
+pub const WORKSPACE_ROW_PAD_Y: f32 = 3.;
+
 // Radii and icons.
 pub const RADIUS_CHIP: f32 = 4.;
 pub const RADIUS_CONTROL: f32 = 8.;

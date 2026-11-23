@@ -2,7 +2,7 @@
 
 use auro::gpui::{
     App, Context, Entity, MouseButton, MouseDownEvent, PathPromptOptions, Pixels, Point, Render,
-    Subscription, WeakEntity, Window, div, px, rgb, svg,
+    Subscription, WeakEntity, Window, div, px, rgb, rgba, svg,
 };
 use auro::prelude::*;
 use canvas_types::{WorkspaceColor, WorkspaceIcon, WorkspaceId, WorkspaceState, WorkspaceStore};
@@ -722,16 +722,17 @@ impl Render for WorkspaceDrawer {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .p_2()
+                    .px_2()
+                    .py(px(WORKSPACE_ROW_PAD_Y))
                     .rounded(px(RADIUS_CONTROL))
                     .bg(rgb(if is_active {
                         COLOR_ELEVATED
                     } else {
                         COLOR_PANEL
                     }))
-                    .when(is_active, |this| {
-                        this.border_1().border_color(rgb(color))
-                    })
+                    .border_1()
+                    .when(is_active, |this| this.border_color(rgba(COLOR_ROW_BORDER_ACTIVE)))
+                    .when(!is_active, |this| this.border_color(rgba(COLOR_ROW_BORDER_SOFT)))
                     .hover(|this| this.bg(rgb(COLOR_ELEVATED)))
                     .on_mouse_down(
                         MouseButton::Left,
