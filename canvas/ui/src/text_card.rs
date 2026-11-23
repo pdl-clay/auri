@@ -1,7 +1,7 @@
 //! A draggable, resizable sticky note with an always-editable text input.
 use auro::gpui::{
     App, Bounds, Context, CursorStyle, DragMoveEvent, Entity, EntityId, MouseButton, MouseDownEvent,
-    Pixels, Point, Render, ScrollWheelEvent, Size, WeakEntity, Window, div, px, rgb,
+    Pixels, Point, Render, ScrollWheelEvent, Size, Subscription, WeakEntity, Window, div, px, rgb,
 };
 use auro::prelude::*;
 use canvas_types::WorkspaceId;
@@ -48,7 +48,8 @@ struct DragStart {
     bounds: Bounds<Pixels>,
 }
 
-/// A canvas card that owns one multi-line text input. No PTY, no persistence.
+/// A canvas card that owns one multi-line text input. Its text and geometry are
+/// mirrored into the persisted store by the canvas.
 pub struct TextCard {
     pub id: u64,
     pub workspace_id: WorkspaceId,
@@ -59,6 +60,7 @@ pub struct TextCard {
     view_zoom: f32,
     view_offset_x: f32,
     view_offset_y: f32,
+    _text_subscription: Subscription,
 }
 
 /// Notes move like terminal cards: the canvas does not clamp their origin.
@@ -71,14 +73,26 @@ impl TextCard {
         id: u64,
         workspace_id: WorkspaceId,
         bounds: Bounds<Pixels>,
+        text: String,
         canvas: WeakEntity<Canvas>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let input = cx.new(|cx| {
-            InputState::new(window, cx)
+            let mut input = InputState::new(window, cx)
                 .multi_line(true)
-                .placeholder("Escreva aqui...")
+                .placeholder("Escreva aqui...");
+            if !text.is_empty() {
+                input.set_value(text, window, cx);
+            }
+            input
+        });
+        let commit_canvas = canvas.clone();
+        let text_subscription = cx.observe(&input, move |this: &mut Self, input, cx| {
+            let text = input.read(cx).value().to_string();
+            let _ = commit_canvas.update(cx, |canvas, cx| {
+                canvas.commit_note_text(this.workspace_id, this.id, text, cx)
+            });
         });
         Self {
             id,
@@ -90,6 +104,7 @@ impl TextCard {
             view_zoom: 1.0,
             view_offset_x: 0.0,
             view_offset_y: 0.0,
+            _text_subscription: text_subscription,
         }
     }
 
@@ -99,6 +114,16 @@ impl TextCard {
         self.view_offset_x = offset_x;
         self.view_offset_y = offset_y;
         cx.notify();
+    }
+
+    /// Current canvas geometry, used by the canvas-wide commit listener.
+    pub fn bounds(&self) -> Bounds<Pixels> {
+        self.bounds
+    }
+
+    /// Current text, used when no input notification has fired yet.
+    pub fn text(&self, cx: &App) -> String {
+        self.input.read(cx).value().to_string()
     }
 
     /// Focus the note's input so placement drops the caret straight into it.
@@ -158,6 +183,7 @@ impl Render for TextCard {
         let workspace_id = self.workspace_id;
         let canvas = self.canvas.clone();
         let scroll_canvas = self.canvas.clone();
+        let bounds_canvas = self.canvas.clone();
         let entity_id = cx.entity_id();
         let zoom = self.view_zoom;
         let left = f32::from(self.bounds.origin.x) * zoom + self.view_offset_x;
@@ -169,6 +195,15 @@ impl Render for TextCard {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, window, cx| this.focus_input(window, cx)),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    let bounds = crate::canvas::card_bounds(&this.bounds);
+                    let _ = bounds_canvas.update(cx, |canvas, cx| {
+                        canvas.commit_note_bounds(workspace_id, id, bounds, cx)
+                    });
+                }),
             )
             .on_scroll_wheel(cx.listener(move |_, event: &ScrollWheelEvent, _, cx| {
                 let (dx, dy) = scroll_delta(event);

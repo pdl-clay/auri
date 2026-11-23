@@ -12,7 +12,7 @@ use gpui_component::{
     Disableable,
     button::{Button as ComponentButton, ButtonVariant, ButtonVariants as _},
 };
-use canvas_types::{CanvasState, TerminalId, WorkspaceColor, WorkspaceIcon, WorkspaceId, WorkspaceState, WorkspaceStore};
+use canvas_types::{CardBounds, TerminalId, WorkspaceColor, WorkspaceIcon, WorkspaceId, WorkspaceState, WorkspaceStore};
 
 use crate::card::{TerminalCard, scroll_delta, terminal_grid};
 use crate::text_card::TextCard;
@@ -25,20 +25,27 @@ type CardGroups = HashMap<WorkspaceId, Vec<(TerminalId, Entity<TerminalCard>)>>;
 
 type NoteGroups = HashMap<WorkspaceId, Vec<(u64, Entity<TextCard>)>>;
 
-/// Terminals are never restored from disk; their runtime state must not survive a save.
-fn clear_terminals(store: &mut WorkspaceStore) {
-    let ids: Vec<WorkspaceId> = store.workspaces().iter().map(|workspace| workspace.id).collect();
-    for id in ids {
-        if let Some(workspace) = store.workspace_mut(id) {
-            workspace.canvas = CanvasState::new();
-        }
+/// The store is the persisted state: cards and notes stay in it, and the
+/// framework-specific entities are rebuilt from it on startup.
+fn persisted_snapshot(store: &WorkspaceStore) -> WorkspaceStore {
+    store.clone()
+}
+
+/// Convert GPUI geometry into the framework-free persisted form.
+pub(crate) fn card_bounds(bounds: &Bounds<Pixels>) -> CardBounds {
+    CardBounds {
+        x: f32::from(bounds.origin.x),
+        y: f32::from(bounds.origin.y),
+        width: f32::from(bounds.size.width),
+        height: f32::from(bounds.size.height),
     }
 }
 
-fn persisted_snapshot(store: &WorkspaceStore) -> WorkspaceStore {
-    let mut snapshot = store.clone();
-    clear_terminals(&mut snapshot);
-    snapshot
+fn pixel_bounds(bounds: CardBounds) -> Bounds<Pixels> {
+    Bounds::new(
+        Point::new(px(bounds.x), px(bounds.y)),
+        Size::new(px(bounds.width), px(bounds.height)),
+    )
 }
 /// Why no terminal can be spawned in the active workspace.
 #[derive(Debug, PartialEq, Eq)]
@@ -135,7 +142,6 @@ pub struct Canvas {
     error: Option<String>,
     placing: bool,
     placing_text: bool,
-    next_note_id: u64,
     zoom: f32,
     offset_x: f32,
     offset_y: f32,
@@ -145,8 +151,7 @@ pub struct Canvas {
 impl Canvas {
     /// `load` is authoritative for the drawer banner; the store was already
     /// loaded by the caller and is pushed back into the drawer explicitly.
-    pub fn new(mut store: WorkspaceStore, load: LoadOutcome, cx: &mut Context<Self>) -> Self {
-        clear_terminals(&mut store);
+    pub fn new(store: WorkspaceStore, load: LoadOutcome, cx: &mut Context<Self>) -> Self {
         let drawer = cx.new(|_| WorkspaceDrawer::new(load));
         drawer.update(cx, |drawer, _| drawer.set_store(store.clone()));
         Self {
@@ -157,7 +162,6 @@ impl Canvas {
             error: None,
             placing: false,
             placing_text: false,
-            next_note_id: 1,
             zoom: 1.0,
             offset_x: 0.0,
             offset_y: 0.0,
@@ -222,11 +226,16 @@ impl Canvas {
         }
     }
 
-    fn finish_store_change(&mut self, cx: &mut Context<Self>) {
+    fn persist_store(&mut self, cx: &mut Context<Self>) {
         self.error = match config::save(&persisted_snapshot(&self.store)) {
             Ok(()) => None,
             Err(error) => Some(format!("Não foi possível salvar os espaços: {error}")),
         };
+        cx.notify();
+    }
+
+    fn finish_store_change(&mut self, cx: &mut Context<Self>) {
+        self.persist_store(cx);
         let store = self.store.clone();
         let drawer = self.drawer.clone();
         // The action is emitted from inside a drawer update; defer the resync.
@@ -236,9 +245,7 @@ impl Canvas {
                     drawer.set_store(store);
                     cx.notify();
                 })
-
         });
-        cx.notify();
     }
 
     /// `config::restart` already replaced the file and the drawer's store.
@@ -363,15 +370,23 @@ impl Canvas {
             cx.notify();
             return;
         };
-        let id = self.next_note_id;
-        self.next_note_id += 1;
         let bounds = Bounds::new(
             origin,
             Size::new(px(TEXT_CARD_WIDTH), px(TEXT_CARD_HEIGHT)),
         );
+        let saved = card_bounds(&bounds);
+        let id = {
+            let Some(workspace) = self.store.workspace_mut(workspace_id) else {
+                self.placing_text = false;
+                self.error = Some(SpawnTargetError::NoWorkspace.message());
+                cx.notify();
+                return;
+            };
+            workspace.canvas.add_note(String::new(), saved).id
+        };
         let canvas = cx.entity().downgrade();
         let note = cx.new(|cx| {
-            TextCard::new(id, workspace_id, bounds, canvas.clone(), window, cx)
+            TextCard::new(id, workspace_id, bounds, String::new(), canvas.clone(), window, cx)
         });
         let (zoom, offset_x, offset_y) = (self.zoom, self.offset_x, self.offset_y);
         note.update(cx, |note, cx| {
@@ -380,16 +395,17 @@ impl Canvas {
         });
         self.notes.entry(workspace_id).or_default().push((id, note));
         self.placing_text = false;
-        self.error = None;
-        cx.notify();
+        self.finish_store_change(cx);
     }
-
-    /// Remove one note by its runtime id; notes are never persisted.
+    /// Remove one note and its persisted state.
     pub fn remove_text(&mut self, workspace_id: WorkspaceId, id: u64, cx: &mut Context<Self>) {
+        if let Some(workspace) = self.store.workspace_mut(workspace_id) {
+            workspace.canvas.remove_note(id);
+        }
         if let Some(notes) = self.notes.get_mut(&workspace_id) {
             notes.retain(|(note_id, _)| *note_id != id);
         }
-        cx.notify();
+        self.finish_store_change(cx);
     }
 
     pub fn add_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -415,6 +431,10 @@ impl Canvas {
             Point::new(px(16.0 + offset), px(16.0 + offset))
         });
         let bounds = Bounds::new(origin, Size::new(px(CARD_WIDTH), px(CARD_HEIGHT)));
+        let saved = card_bounds(&bounds);
+        if let Some(workspace) = self.store.workspace_mut(workspace_id) {
+            workspace.canvas.set_terminal_bounds(id, saved);
+        }
         let (cols, rows) = terminal_grid(&bounds);
         let pty = match PtySession::spawn_shell_in(cols, rows, Some(&root)) {
             Ok(pty) => pty,
@@ -424,7 +444,7 @@ impl Canvas {
                     workspace.canvas.remove(id);
                 }
                 self.error = Some(format!("Terminal {id} não iniciou: {error}"));
-                cx.notify();
+                self.finish_store_change(cx);
                 return;
             }
         };
@@ -438,12 +458,10 @@ impl Canvas {
         card.update(cx, |card, cx| card.set_view(zoom, offset_x, offset_y, cx));
         self.cards.entry(workspace_id).or_default().push((id, card));
         self.sync_card_selection(workspace_id, cx);
-        self.sync_drawer(cx);
-        cx.notify();
+        self.finish_store_change(cx);
     }
 
-    /// Terminal mutations only change the in-memory snapshot shown by the drawer:
-    /// they are deliberately not persisted because shells are not restored.
+    /// Push the current store to the drawer without touching the config file.
     fn sync_drawer(&mut self, cx: &mut Context<Self>) {
         let store = self.store.clone();
         let drawer = self.drawer.clone();
@@ -459,8 +477,7 @@ impl Canvas {
 
     pub fn remove(&mut self, workspace_id: WorkspaceId, id: TerminalId, cx: &mut Context<Self>) {
         remove_terminal_state(&mut self.store, &mut self.cards, workspace_id, id);
-        self.sync_drawer(cx);
-        cx.notify();
+        self.finish_store_change(cx);
     }
 
     pub fn remove_selected(&mut self, cx: &mut Context<Self>) {
@@ -531,6 +548,194 @@ impl Canvas {
         {
             card.1.update(cx, |card, cx| card.set_exited(cx));
         }
+        cx.notify();
+    }
+
+    /// Persist a terminal's geometry after a drag or resize.
+    pub fn commit_terminal_bounds(
+        &mut self,
+        workspace_id: WorkspaceId,
+        id: TerminalId,
+        bounds: CardBounds,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = self
+            .store
+            .workspace_mut(workspace_id)
+            .is_some_and(|workspace| workspace.canvas.set_terminal_bounds(id, bounds));
+        if changed {
+            self.persist_store(cx);
+        }
+    }
+
+    /// Persist a note's geometry after a drag or resize.
+    pub fn commit_note_bounds(
+        &mut self,
+        workspace_id: WorkspaceId,
+        id: u64,
+        bounds: CardBounds,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = self
+            .store
+            .workspace_mut(workspace_id)
+            .is_some_and(|workspace| workspace.canvas.set_note_bounds(id, bounds));
+        if changed {
+            self.persist_store(cx);
+        }
+    }
+
+    /// Persist note text whenever its input notifies the canvas.
+    pub fn commit_note_text(
+        &mut self,
+        workspace_id: WorkspaceId,
+        id: u64,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = self
+            .store
+            .workspace_mut(workspace_id)
+            .is_some_and(|workspace| workspace.canvas.set_note_text(id, text));
+        if changed {
+            self.persist_store(cx);
+        }
+    }
+
+    /// Capture every live card, including drags released outside its own bounds.
+    fn commit_all_bounds(&mut self, cx: &mut Context<Self>) {
+        let mut terminals = Vec::new();
+        for (workspace_id, group) in &self.cards {
+            for (id, card) in group {
+                terminals.push((*workspace_id, *id, card_bounds(&card.read(cx).bounds)));
+            }
+        }
+        let mut notes = Vec::new();
+        for (workspace_id, group) in &self.notes {
+            for (id, note) in group {
+                let note = note.read(cx);
+                notes.push((*workspace_id, *id, card_bounds(&note.bounds()), note.text(cx)));
+            }
+        }
+
+        let mut changed = false;
+        for (workspace_id, id, bounds) in terminals {
+            if let Some(workspace) = self.store.workspace_mut(workspace_id) {
+                changed |= workspace.canvas.set_terminal_bounds(id, bounds);
+            }
+        }
+        for (workspace_id, id, bounds, text) in notes {
+            if let Some(workspace) = self.store.workspace_mut(workspace_id) {
+                changed |= workspace.canvas.set_note_bounds(id, bounds);
+                changed |= workspace.canvas.set_note_text(id, text);
+            }
+        }
+        if changed {
+            self.persist_store(cx);
+        }
+    }
+
+    /// Rebuild every saved card. Shell processes cannot survive a restart, so
+    /// each restored terminal gets a fresh shell in its workspace root; a
+    /// terminal whose shell cannot start stays marked exited and is not shown.
+    pub fn restore_cards(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let workspace_ids: Vec<WorkspaceId> =
+            self.store.workspaces().iter().map(|workspace| workspace.id).collect();
+        let canvas = cx.entity().downgrade();
+        let (zoom, offset_x, offset_y) = (self.zoom, self.offset_x, self.offset_y);
+
+        for workspace_id in workspace_ids {
+            let (root, root_ok, terminals, notes) = {
+                let Some(workspace) = self.store.workspace_mut(workspace_id) else {
+                    continue;
+                };
+                (
+                    workspace.root.clone(),
+                    !workspace.invalid_root && !workspace.root.as_os_str().is_empty() && workspace.root.is_dir(),
+                    workspace.canvas.terminals().to_vec(),
+                    workspace.canvas.notes().to_vec(),
+                )
+            };
+            let ids = terminals
+                .iter()
+                .map(|terminal| terminal.id)
+                .chain(notes.iter().map(|note| note.id));
+            if let Some(workspace) = self.store.workspace_mut(workspace_id) {
+                for id in ids {
+                    workspace.canvas.reserve_id_above(id);
+                }
+            }
+
+            for (index, terminal) in terminals.into_iter().enumerate() {
+                let saved = terminal.bounds.unwrap_or_else(|| {
+                    let offset = GRID_STEP * (index % 8) as f32;
+                    CardBounds {
+                        x: SPACE_PANEL + offset,
+                        y: SPACE_PANEL + offset,
+                        width: CARD_WIDTH,
+                        height: CARD_HEIGHT,
+                    }
+                });
+                let bounds = pixel_bounds(saved);
+                let (cols, rows) = terminal_grid(&bounds);
+                let pty = if root_ok {
+                    match PtySession::spawn_shell_in(cols, rows, Some(&root)) {
+                        Ok(pty) => Some(pty),
+                        Err(error) => {
+                            self.error = Some(format!("Terminal {} não iniciou: {error}", terminal.id));
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+                let Some(pty) = pty else {
+                    if let Some(workspace) = self.store.workspace_mut(workspace_id) {
+                        workspace.canvas.mark_exited(terminal.id);
+                    }
+                    continue;
+                };
+                // The new shell is alive: a stale `exited` flag must not hide it.
+                if let Some(workspace) = self.store.workspace_mut(workspace_id) {
+                    workspace.canvas.set_terminal_bounds(terminal.id, saved);
+                    workspace.canvas.set_terminal_exited(terminal.id, false);
+                }
+                let card = cx.new(|cx| {
+                    TerminalCard::new(
+                        terminal.id,
+                        workspace_id,
+                        bounds,
+                        canvas.clone(),
+                        root.clone(),
+                        pty,
+                        (cols, rows),
+                        cx,
+                    )
+                });
+                card.update(cx, |card, cx| card.set_view(zoom, offset_x, offset_y, cx));
+                self.cards.entry(workspace_id).or_default().push((terminal.id, card));
+            }
+
+            for note in notes {
+                let bounds = pixel_bounds(note.bounds);
+                let note_entity = cx.new(|cx| {
+                    TextCard::new(
+                        note.id,
+                        workspace_id,
+                        bounds,
+                        note.text.clone(),
+                        canvas.clone(),
+                        window,
+                        cx,
+                    )
+                });
+                note_entity.update(cx, |note, cx| note.set_view(zoom, offset_x, offset_y, cx));
+                self.notes.entry(workspace_id).or_default().push((note.id, note_entity));
+            }
+        }
+
+        self.persist_store(cx);
+        self.sync_drawer(cx);
         cx.notify();
     }
 }
@@ -676,6 +881,10 @@ impl Render for Canvas {
                                     cx.stop_propagation();
                                     cx.notify();
                                 }),
+                            )
+                            .on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| this.commit_all_bounds(cx)),
                             )
                             .child(
                                 canvas(
@@ -1119,20 +1328,44 @@ mod tests {
     }
 
     #[test]
-    fn persisted_snapshot_drops_runtime_terminals() {
+    fn persisted_snapshot_keeps_cards_and_notes() {
         let mut store = WorkspaceStore::new();
         let workspace = store.add(
             "A".into(),
             WorkspaceIcon::Star,
             std::env::current_dir().unwrap(),
         );
-        active_spawn_target(&mut store).unwrap();
+        let terminal = active_spawn_target(&mut store).unwrap().1;
+        let bounds = CardBounds {
+            x: 10.0,
+            y: 20.0,
+            width: 640.0,
+            height: 400.0,
+        };
+        let canvas = &mut store.active_mut().unwrap().canvas;
+        canvas.set_terminal_bounds(terminal, bounds);
+        let note = canvas.add_note("guardado".into(), bounds);
 
         let snapshot = persisted_snapshot(&store);
 
-        assert!(snapshot.workspaces()[0].canvas.terminals().is_empty());
         assert_eq!(snapshot.active(), Some(workspace.id));
-        assert_eq!(store.workspaces()[0].canvas.terminals().len(), 1);
+        assert_eq!(snapshot.workspaces()[0].canvas.terminals()[0].bounds, Some(bounds));
+        assert_eq!(snapshot.workspaces()[0].canvas.notes()[0].text, note.text);
+        assert_eq!(snapshot, store);
+    }
+
+    #[test]
+    fn card_bounds_survive_pixel_conversion() {
+        let original = Bounds::new(Point::new(px(-12.5), px(30.0)), Size::new(px(320.0), px(220.0)));
+        let restored = pixel_bounds(card_bounds(&original));
+        assert_eq!(
+            (f32::from(restored.origin.x), f32::from(restored.origin.y)),
+            (-12.5, 30.0)
+        );
+        assert_eq!(
+            (f32::from(restored.size.width), f32::from(restored.size.height)),
+            (320.0, 220.0)
+        );
     }
 
     #[test]

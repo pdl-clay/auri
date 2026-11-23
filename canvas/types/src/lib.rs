@@ -16,19 +16,41 @@ pub type TerminalId = u64;
 /// Identifier of a workspace on the canvas.
 pub type WorkspaceId = u64;
 
+/// Saved pixel geometry of a canvas card, independent of the UI framework.
+#[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CardBounds {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+/// Persisted text block: its content and its canvas geometry.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct NoteState {
+    pub id: u64,
+    pub text: String,
+    pub bounds: CardBounds,
+}
+
 /// Logical state of a single terminal card.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TerminalState {
     pub id: TerminalId,
     pub title: String,
     pub exited: bool,
+    /// Absent in configs written before geometry was persisted.
+    #[serde(default)]
+    pub bounds: Option<CardBounds>,
 }
 
 /// Framework-free canvas state: terminals, the selected terminal and id allocation.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CanvasState {
     #[serde(default)]
     terminals: Vec<TerminalState>,
+    #[serde(default)]
+    notes: Vec<NoteState>,
     #[serde(default)]
     selected: Option<TerminalId>,
     #[serde(default = "default_next_id")]
@@ -40,11 +62,11 @@ impl Default for CanvasState {
         Self::new()
     }
 }
-
 impl CanvasState {
     pub fn new() -> Self {
         Self {
             terminals: Vec::new(),
+            notes: Vec::new(),
             selected: None,
             next_id: 1,
         }
@@ -57,6 +79,7 @@ impl CanvasState {
             id,
             title: format!("Terminal {id}"),
             exited: false,
+            bounds: None,
         };
         self.terminals.push(terminal.clone());
         self.selected = Some(id);
@@ -81,13 +104,78 @@ impl CanvasState {
     }
 
     pub fn mark_exited(&mut self, id: TerminalId) {
+        self.set_terminal_exited(id, true);
+    }
+
+    pub fn set_terminal_exited(&mut self, id: TerminalId, exited: bool) {
         if let Some(terminal) = self.terminals.iter_mut().find(|terminal| terminal.id == id) {
-            terminal.exited = true;
+            terminal.exited = exited;
         }
+    }
+
+    /// Record a terminal's saved geometry; returns true when it changed.
+    pub fn set_terminal_bounds(&mut self, id: TerminalId, bounds: CardBounds) -> bool {
+        let Some(terminal) = self.terminals.iter_mut().find(|terminal| terminal.id == id) else {
+            return false;
+        };
+        if terminal.bounds == Some(bounds) {
+            return false;
+        }
+        terminal.bounds = Some(bounds);
+        true
     }
 
     pub fn terminals(&self) -> &[TerminalState] {
         &self.terminals
+    }
+
+    /// Allocate a note from the same id space as terminals.
+    pub fn add_note(&mut self, text: String, bounds: CardBounds) -> NoteState {
+        let id = self.next_id;
+        self.next_id += 1;
+        let note = NoteState { id, text, bounds };
+        self.notes.push(note.clone());
+        note
+    }
+
+    pub fn set_note_text(&mut self, id: u64, text: String) -> bool {
+        let Some(note) = self.notes.iter_mut().find(|note| note.id == id) else {
+            return false;
+        };
+        if note.text == text {
+            return false;
+        }
+        note.text = text;
+        true
+    }
+
+    pub fn set_note_bounds(&mut self, id: u64, bounds: CardBounds) -> bool {
+        let Some(note) = self.notes.iter_mut().find(|note| note.id == id) else {
+            return false;
+        };
+        if note.bounds == bounds {
+            return false;
+        }
+        note.bounds = bounds;
+        true
+    }
+
+    pub fn remove_note(&mut self, id: u64) -> Option<NoteState> {
+        let index = self.notes.iter().position(|note| note.id == id)?;
+        Some(self.notes.remove(index))
+    }
+
+    pub fn notes(&self) -> &[NoteState] {
+        &self.notes
+    }
+
+    /// Keep the shared allocator above every id found in a restored config.
+    pub fn reserve_id_above(&mut self, id: u64) {
+        self.next_id = self.next_id.max(id.saturating_add(1));
+    }
+
+    pub fn next_id(&self) -> u64 {
+        self.next_id
     }
 }
 
@@ -117,7 +205,7 @@ impl Default for WorkspaceColor {
 }
 
 /// Persisted state of one workspace, including its own canvas.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceState {
     pub id: WorkspaceId,
     pub name: String,
@@ -132,7 +220,7 @@ pub struct WorkspaceState {
 }
 
 /// All workspaces plus the current selection and the id allocator.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceStore {
     #[serde(default)]
     workspaces: Vec<WorkspaceState>,
@@ -244,6 +332,70 @@ mod tests {
         state.mark_exited(a.id);
         assert!(state.terminals()[0].exited);
         assert_eq!(state.terminals().len(), 1);
+    }
+
+    #[test]
+    fn notes_keep_text_and_bounds_through_mutation_and_removal() {
+        let mut state = CanvasState::new();
+        let bounds = CardBounds {
+            x: 12.5,
+            y: -8.0,
+            width: 320.0,
+            height: 220.0,
+        };
+        let note = state.add_note("primeira linha\nsegunda linha".into(), bounds);
+        assert_eq!(note.bounds, bounds);
+        assert_eq!(state.notes()[0].text, "primeira linha\nsegunda linha");
+
+        assert!(state.set_note_text(note.id, "texto novo".into()));
+        assert!(!state.set_note_text(note.id, "texto novo".into()));
+        let moved = CardBounds { x: 40.0, ..bounds };
+        assert!(state.set_note_bounds(note.id, moved));
+        assert_eq!(state.notes()[0].bounds, moved);
+
+        assert_eq!(state.remove_note(note.id).map(|note| note.text), Some("texto novo".into()));
+        assert!(state.notes().is_empty());
+        assert_eq!(state.remove_note(note.id), None);
+    }
+
+    #[test]
+    fn terminal_and_note_ids_share_one_allocator() {
+        let mut state = CanvasState::new();
+        let terminal = state.add();
+        let note = state.add_note("oi".into(), CardBounds {
+            x: 0.0,
+            y: 0.0,
+            width: 10.0,
+            height: 10.0,
+        });
+        let next = state.add();
+
+        assert_eq!((terminal.id, note.id, next.id), (1, 2, 3));
+        assert_eq!((terminal.bounds, note.id), (None, 2));
+
+        let mut restored = CanvasState::new();
+        restored.reserve_id_above(17);
+        assert_eq!(restored.next_id(), 18);
+        let after = restored.add_note("a".into(), note.bounds);
+        assert_eq!(after.id, 18);
+    }
+
+    #[test]
+    fn terminal_bounds_are_settable_and_exited_flag_is_reversible() {
+        let mut state = CanvasState::new();
+        let terminal = state.add();
+        let bounds = CardBounds {
+            x: 1.0,
+            y: 2.0,
+            width: 640.0,
+            height: 400.0,
+        };
+        assert!(state.set_terminal_bounds(terminal.id, bounds));
+        assert!(!state.set_terminal_bounds(terminal.id, bounds));
+        assert_eq!(state.terminals()[0].bounds, Some(bounds));
+        state.mark_exited(terminal.id);
+        state.set_terminal_exited(terminal.id, false);
+        assert!(!state.terminals()[0].exited);
     }
 }
 

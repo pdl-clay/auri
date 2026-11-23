@@ -11,7 +11,7 @@ use portable_pty::PtySize;
 use gpui_terminal::{TerminalConfig, TerminalView};
 use canvas_types::{TerminalId, WorkspaceId};
 
-use crate::canvas::Canvas;
+use crate::canvas::{Canvas, card_bounds};
 use crate::pty::PtySession;
 use crate::theme::*;
 
@@ -342,6 +342,8 @@ impl Render for TerminalCard {
         let selected = self.selected;
         let select_canvas = self.canvas.clone();
         let canvas = self.canvas.clone();
+        let bounds_canvas = self.canvas.clone();
+        let saved_bounds = card_bounds(&self.bounds);
         let entity_id = cx.entity_id();
         let scroll_canvas = self.canvas.clone();
         let zoom = self.view_zoom;
@@ -356,6 +358,14 @@ impl Render for TerminalCard {
                 cx.listener(move |_, _, _, cx| {
                     let _ =
                         select_canvas.update(cx, |canvas, cx| canvas.select(workspace_id, id, cx));
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(move |_, _, _, cx| {
+                    let _ = bounds_canvas.update(cx, |canvas, cx| {
+                        canvas.commit_terminal_bounds(workspace_id, id, saved_bounds, cx)
+                    });
                 }),
             )
             .on_scroll_wheel(cx.listener(move |_, event: &ScrollWheelEvent, _, cx| {
