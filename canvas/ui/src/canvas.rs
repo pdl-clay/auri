@@ -47,6 +47,14 @@ fn pixel_bounds(bounds: CardBounds) -> Bounds<Pixels> {
         Size::new(px(bounds.width), px(bounds.height)),
     )
 }
+/// Place a new card immediately to the right of an existing one.
+fn adjacent_origin(last: Bounds<Pixels>) -> Point<Pixels> {
+    Point::new(
+        px(f32::from(last.origin.x) + f32::from(last.size.width) + CARD_GAP),
+        last.origin.y,
+    )
+}
+
 /// Why no terminal can be spawned in the active workspace.
 #[derive(Debug, PartialEq, Eq)]
 enum SpawnTargetError {
@@ -538,8 +546,11 @@ impl Canvas {
             }
         };
         let origin = origin.unwrap_or_else(|| {
-            let offset = GRID_STEP * (self.cards.get(&workspace_id).map_or(0, Vec::len) % 8) as f32;
-            Point::new(px(16.0 + offset), px(16.0 + offset))
+            self.cards
+                .get(&workspace_id)
+                .and_then(|cards| cards.last())
+                .map(|(_, card)| adjacent_origin(card.read(cx).bounds))
+                .unwrap_or_else(|| Point::new(px(16.0), px(16.0)))
         });
         let bounds = Bounds::new(origin, Size::new(px(CARD_WIDTH), px(CARD_HEIGHT)));
         let saved = card_bounds(&bounds);
@@ -791,14 +802,11 @@ impl Canvas {
         }
 
         for (index, terminal) in terminals.into_iter().enumerate() {
-            let saved = terminal.bounds.unwrap_or_else(|| {
-                let offset = GRID_STEP * (index % 8) as f32;
-                CardBounds {
-                    x: SPACE_PANEL + offset,
-                    y: SPACE_PANEL + offset,
-                    width: CARD_WIDTH,
-                    height: CARD_HEIGHT,
-                }
+            let saved = terminal.bounds.unwrap_or_else(|| CardBounds {
+                x: SPACE_PANEL + index as f32 * (CARD_WIDTH + CARD_GAP),
+                y: SPACE_PANEL,
+                width: CARD_WIDTH,
+                height: CARD_HEIGHT,
             });
             let bounds = pixel_bounds(saved);
             let (cols, rows) = terminal_grid(&bounds);
@@ -1629,5 +1637,20 @@ mod tests {
             PathBuf::from("/nao/existe"),
         )
         .is_err());
+    }
+}
+
+#[cfg(test)]
+mod card_gap_tests {
+    use super::*;
+
+    #[test]
+    fn adjacent_origin_leaves_one_pixel_between_cards() {
+        let last = Bounds::new(
+            Point::new(px(10.0), px(20.0)),
+            Size::new(px(CARD_WIDTH), px(CARD_HEIGHT)),
+        );
+        let next = adjacent_origin(last);
+        assert_eq!((f32::from(next.x), f32::from(next.y)), (10.0 + CARD_WIDTH + 1.0, 20.0));
     }
 }

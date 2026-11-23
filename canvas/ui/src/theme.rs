@@ -54,6 +54,7 @@ pub const MIN_TERMINAL_HEIGHT: f32 = 200.;
 pub const CARD_WIDTH: f32 = 640.;
 pub const CARD_HEIGHT: f32 = 400.;
 pub const GRID_STEP: f32 = 24.;
+pub const CARD_GAP: f32 = 1.;
 
 // Context menu.
 pub const CONTEXT_MENU_WIDTH: f32 = 180.;
