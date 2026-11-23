@@ -63,6 +63,13 @@ pub const CARD_HEIGHT: f32 = 400.;
 pub const GRID_STEP: f32 = 24.;
 pub const CARD_GAP: f32 = 1.;
 
+// Connection gesture and persisted edges.
+pub const CONNECTION_LINE_COLOR: u32 = 0x9AB4CE;
+pub const CONNECTION_SOURCE_COLOR: u32 = 0xC9A227;
+pub const CONNECTION_LINE_WIDTH: f32 = 2.0;
+pub const CONNECTION_DASH_LENGTH: f32 = 8.0;
+pub const CONNECTION_DASH_GAP: f32 = 6.0;
+
 /// Empty-canvas notice shown when no workspace has been loaded.
 pub const WORKSPACE_NOTICE_WIDTH: f32 = 400.;
 

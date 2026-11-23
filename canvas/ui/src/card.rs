@@ -11,7 +11,7 @@ use auro::gpui::{
 use auro::prelude::*;
 use portable_pty::PtySize;
 use gpui_terminal::{TerminalConfig, TerminalView};
-use canvas_types::{AgentIcon, AgentKind, TerminalId, WorkspaceId};
+use canvas_types::{AgentIcon, AgentKind, ConnectionTarget, TerminalId, WorkspaceId};
 
 use crate::canvas::{Canvas, card_bounds};
 use crate::pty::{BatchedReader, PtySession};
@@ -131,6 +131,9 @@ pub struct TerminalCard {
     agent: Option<(AgentKind, String, AgentIcon)>,
     number: usize,
     pub selected: bool,
+    /// Connection gesture: crosshair targeting and source highlight.
+    connect_mode: bool,
+    connect_source: bool,
     pub terminal: Entity<TerminalView>,
     writer: SharedPtyWriter,
     canvas: WeakEntity<Canvas>,
@@ -210,6 +213,8 @@ impl TerminalCard {
             number: 1,
             selected: false,
             terminal,
+            connect_mode: false,
+            connect_source: false,
             writer,
             canvas,
             _pty: pty,
@@ -246,6 +251,14 @@ impl TerminalCard {
     pub fn set_selected(&mut self, selected: bool, cx: &mut Context<Self>) {
         if self.selected != selected {
             self.selected = selected;
+            cx.notify();
+        }
+    }
+    /// Connection mode turns a click into edge completion and marks the source.
+    pub fn set_connect_mode(&mut self, connecting: bool, source: bool, cx: &mut Context<Self>) {
+        if self.connect_mode != connecting || self.connect_source != source {
+            self.connect_mode = connecting;
+            self.connect_source = source;
             cx.notify();
         }
     }
@@ -402,6 +415,7 @@ impl TerminalCard {
         mode: DragMode,
         entity_id: EntityId,
         cx: &mut Context<Self>,
+        connect_mode: bool,
     ) -> Stateful<Div> {
         let (element_id, cursor): ((&str, u64), CursorStyle) = match mode {
             DragMode::Move => unreachable!("only resize modes have handles"),
@@ -414,7 +428,11 @@ impl TerminalCard {
             DragMode::ResizeBottomLeft => (("resize-bottom-left", id), CursorStyle::ResizeUpLeftDownRight),
             DragMode::ResizeBottomRight => (("resize-bottom-right", id), CursorStyle::ResizeUpRightDownLeft),
         };
-        let mut handle = div().absolute().id(element_id).cursor(cursor);
+        let mut handle = div().absolute().id(element_id).cursor(if connect_mode {
+            CursorStyle::Crosshair
+        } else {
+            cursor
+        });
         handle = match mode {
             DragMode::Move => unreachable!("only resize modes have handles"),
             DragMode::ResizeLeft => handle.left_0().top(px(TITLE_HEIGHT)).bottom_0().w(px(HANDLE)),
@@ -430,6 +448,14 @@ impl TerminalCard {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    if this.connect_mode {
+                        let canvas = this.canvas.clone();
+                        let _ = canvas.update(cx, |canvas, cx| {
+                            canvas.complete_connect(ConnectionTarget::Card(id), cx)
+                        });
+                        cx.stop_propagation();
+                        return;
+                    }
                     cx.stop_propagation();
                     this.begin_drag(mode, event.position);
                 }),
@@ -464,6 +490,8 @@ impl Render for TerminalCard {
         let workspace_id = self.workspace_id;
         let exited = self.exited;
         let selected = self.selected;
+        let connect_mode = self.connect_mode;
+        let connect_source = self.connect_source;
         let select_canvas = self.canvas.clone();
         let canvas = self.canvas.clone();
         let bounds_canvas = self.canvas.clone();
@@ -480,7 +508,15 @@ impl Render for TerminalCard {
             .id(("card-select", id))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |_, _, _, cx| {
+                cx.listener(move |this, _, _, cx| {
+                    if this.connect_mode {
+                        let canvas = this.canvas.clone();
+                        let _ = canvas.update(cx, |canvas, cx| {
+                            canvas.complete_connect(ConnectionTarget::Card(id), cx)
+                        });
+                        cx.stop_propagation();
+                        return;
+                    }
                     let _ =
                         select_canvas.update(cx, |canvas, cx| canvas.select(workspace_id, id, cx));
                 }),
@@ -528,6 +564,10 @@ impl Render for TerminalCard {
             .when(!selected, |card| {
                 card.border_1().border_color(rgb(COLOR_BORDER))
             })
+            .when(connect_source, |card| {
+                card.border_2().border_color(rgb(CONNECTION_SOURCE_COLOR))
+            })
+            .when(connect_mode, |card| card.cursor(CursorStyle::Crosshair))
             .child(
                 div()
                     .id(("card-title", id))
@@ -590,7 +630,15 @@ impl Render for TerminalCard {
                     )
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                            if this.connect_mode {
+                                let canvas = this.canvas.clone();
+                                let _ = canvas.update(cx, |canvas, cx| {
+                                    canvas.complete_connect(ConnectionTarget::Card(id), cx)
+                                });
+                                cx.stop_propagation();
+                                return;
+                            }
                             this.terminal.read(cx).focus_handle().focus(window);
                             this.begin_drag(DragMode::Move, event.position);
                         }),
@@ -624,14 +672,14 @@ impl Render for TerminalCard {
                     .text_color(rgb(COLOR_MUTED))
                     .child(self.root.to_string_lossy().into_owned()),
             )
-            .child(Self::resize_handle(id, DragMode::ResizeLeft, entity_id, cx))
-            .child(Self::resize_handle(id, DragMode::ResizeRight, entity_id, cx))
-            .child(Self::resize_handle(id, DragMode::ResizeTop, entity_id, cx))
-            .child(Self::resize_handle(id, DragMode::ResizeBottom, entity_id, cx))
-            .child(Self::resize_handle(id, DragMode::ResizeTopLeft, entity_id, cx))
-            .child(Self::resize_handle(id, DragMode::ResizeTopRight, entity_id, cx))
-            .child(Self::resize_handle(id, DragMode::ResizeBottomLeft, entity_id, cx))
-            .child(Self::resize_handle(id, DragMode::ResizeBottomRight, entity_id, cx))
+            .child(Self::resize_handle(id, DragMode::ResizeLeft, entity_id, cx, connect_mode))
+            .child(Self::resize_handle(id, DragMode::ResizeRight, entity_id, cx, connect_mode))
+            .child(Self::resize_handle(id, DragMode::ResizeTop, entity_id, cx, connect_mode))
+            .child(Self::resize_handle(id, DragMode::ResizeBottom, entity_id, cx, connect_mode))
+            .child(Self::resize_handle(id, DragMode::ResizeTopLeft, entity_id, cx, connect_mode))
+            .child(Self::resize_handle(id, DragMode::ResizeTopRight, entity_id, cx, connect_mode))
+            .child(Self::resize_handle(id, DragMode::ResizeBottomLeft, entity_id, cx, connect_mode))
+            .child(Self::resize_handle(id, DragMode::ResizeBottomRight, entity_id, cx, connect_mode))
     }
 }
 

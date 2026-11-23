@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use auri_protocol::{Request, Response};
 
 use auro::gpui::{
-    AnyElement, AnyWindowHandle, App, Bounds, ClickEvent, Context, CursorStyle, Entity, MouseButton, MouseDownEvent, Pixels, Point, Render,
+    AnyElement, AnyWindowHandle, App, Bounds, ClickEvent, Context, CursorStyle, Entity, FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent, PathBuilder, Pixels, Point, Render,
     ScrollWheelEvent, Size, Subscription, WeakEntity, Window, canvas, fill, px, rgb, svg,
 };
 use auro::prelude::*;
@@ -138,6 +138,69 @@ fn card_target(workspace: &WorkspaceState, target: &str) -> ConnectionTarget {
 /// Note ids are already canonical; there is no display name to resolve.
 fn note_target(target: &str) -> u64 {
     target.parse::<u64>().unwrap_or(u64::MAX)
+}
+
+/// A connection starts only from a selected card and never targets itself.
+/// Notes are valid targets, but `selected` is a card id by construction.
+fn connect_target(
+    selected: Option<TerminalId>,
+    clicked: ConnectionTarget,
+) -> Option<(TerminalId, ConnectionTarget)> {
+    let from = selected?;
+    match clicked {
+        ConnectionTarget::Card(id) if id == from => None,
+        target => Some((from, target)),
+    }
+}
+
+fn start_connect(mode: &mut Option<TerminalId>, source: TerminalId) {
+    *mode = Some(source);
+}
+
+/// Resolve the target click and leave the mode in one step, including no-ops.
+fn finish_connect(
+    mode: &mut Option<TerminalId>,
+    clicked: ConnectionTarget,
+) -> Option<(TerminalId, ConnectionTarget)> {
+    let edge = connect_target(*mode, clicked)?;
+    *mode = None;
+    Some(edge)
+}
+
+/// Escape and empty-canvas clicks share the same cancel path.
+fn stop_connect(mode: &mut Option<TerminalId>) -> bool {
+    mode.take().is_some()
+}
+
+/// Canvas-local centre of a persisted card, in world coordinates.
+fn connection_anchor(bounds: CardBounds, zoom: f32, offset_x: f32, offset_y: f32) -> Point<Pixels> {
+    Point::new(
+        px((bounds.x + bounds.width * 0.5) * zoom + offset_x),
+        px((bounds.y + bounds.height * 0.5) * zoom + offset_y),
+    )
+}
+/// Persisted geometry of either endpoint; stale edges to removed cards are skipped.
+fn connection_bounds(workspace: &WorkspaceState, target: ConnectionTarget) -> Option<CardBounds> {
+    match target {
+        ConnectionTarget::Card(id) => workspace
+            .canvas
+            .agent(id)
+            .map(|agent| agent.bounds)
+            .or_else(|| {
+                workspace
+                    .canvas
+                    .terminals()
+                    .iter()
+                    .find(|terminal| terminal.id == id)
+                    .and_then(|terminal| terminal.bounds)
+            }),
+        ConnectionTarget::Note(id) => workspace
+            .canvas
+            .notes()
+            .iter()
+            .find(|note| note.id == id)
+            .map(|note| note.bounds),
+    }
 }
 
 fn action_for_request(workspace: &WorkspaceState, request: &Request) -> Action {
@@ -937,6 +1000,10 @@ pub struct Canvas {
     /// Survives menu dismissal so an agent choice is never downgraded to a terminal.
     pending_agent: Option<AgentKind>,
     placing_text: bool,
+    /// Gives Escape a focus path even when the island button owns the click.
+    connect_focus: FocusHandle,
+    /// Source card of the user's in-progress connection gesture.
+    connecting_from: Option<TerminalId>,
     zoom: f32,
     offset_x: f32,
     offset_y: f32,
@@ -971,6 +1038,8 @@ impl Canvas {
             placing: false,
             pending_agent: None,
             placing_text: false,
+            connecting_from: None,
+            connect_focus: cx.focus_handle(),
             zoom: 1.0,
             offset_x: 0.0,
             offset_y: 0.0,
@@ -1602,6 +1671,7 @@ impl Canvas {
         self.error = None;
         self.agent_menu = None;
         self.custom_dialog = None;
+        self.cancel_connect(cx);
         cx.notify();
     }
 
@@ -1614,6 +1684,7 @@ impl Canvas {
         self.error = None;
         self.agent_menu = None;
         self.custom_dialog = None;
+        self.cancel_connect(cx);
         cx.notify();
     }
 
@@ -1624,6 +1695,74 @@ impl Canvas {
         self.menu.close();
         self.custom_dialog = None;
         cx.notify();
+    }
+    /// Mirror connection mode into live cards: crosshair cursor, source
+    /// highlight, and target clicks taking priority over normal selection.
+    /// Deferred because a target click arrives while that card is being updated.
+    fn sync_connect_mode(&self, cx: &mut Context<Self>) {
+        let connecting = self.connecting_from.is_some();
+        let source = self.connecting_from;
+        let cards = self
+            .store
+            .active()
+            .and_then(|id| self.cards.get(&id))
+            .cloned()
+            .unwrap_or_default();
+        let notes = self
+            .store
+            .active()
+            .and_then(|id| self.notes.get(&id))
+            .cloned()
+            .unwrap_or_default();
+        cx.defer(move |cx| {
+            for (id, card) in cards {
+                card.update(cx, |card, cx| {
+                    card.set_connect_mode(connecting, Some(id) == source, cx)
+                });
+            }
+            for (_, note) in notes {
+                note.update(cx, |note, cx| note.set_connect_mode(connecting, cx));
+            }
+        });
+    }
+
+    /// Start an edge from the selected card. The island never starts one itself.
+    pub fn begin_connect(&mut self, source: TerminalId, cx: &mut Context<Self>) {
+        if self.connecting_from == Some(source) {
+            return;
+        }
+        start_connect(&mut self.connecting_from, source);
+        self.placing = false;
+        self.placing_text = false;
+        cx.notify();
+        self.sync_connect_mode(cx);
+    }
+
+    /// A second click either inserts one bidirectional edge or is a no-op.
+    /// Both paths leave connection mode.
+    pub fn complete_connect(&mut self, target: ConnectionTarget, cx: &mut Context<Self>) {
+        let Some((from, to)) = finish_connect(&mut self.connecting_from, target) else {
+            return;
+        };
+        let inserted = self
+            .store
+            .active()
+            .and_then(|id| self.store.workspace_mut(id))
+            .is_some_and(|workspace| workspace.canvas.connect(from, to));
+        if inserted {
+            self.finish_store_change(cx);
+        } else {
+            cx.notify();
+        }
+        self.sync_connect_mode(cx);
+    }
+
+    /// Escape and empty-canvas clicks both abandon the gesture without saving.
+    pub fn cancel_connect(&mut self, cx: &mut Context<Self>) {
+        if stop_connect(&mut self.connecting_from) {
+            cx.notify();
+            self.sync_connect_mode(cx);
+        }
     }
     fn place_terminal(
         &mut self,
@@ -2948,6 +3087,28 @@ impl Render for Canvas {
         let offset_x = self.offset_x;
         let offset_y = self.offset_y;
         let placing_text = self.placing_text;
+        let connecting = self.connecting_from.is_some();
+        let selected_card = active
+            .and_then(|id| self.store.workspaces().iter().find(|workspace| workspace.id == id))
+            .and_then(|workspace| workspace.canvas.selected());
+        let edges: Vec<(Point<Pixels>, Point<Pixels>)> = active
+            .and_then(|id| self.store.workspaces().iter().find(|workspace| workspace.id == id))
+            .map(|workspace| {
+                workspace
+                    .canvas
+                    .connections()
+                    .iter()
+                    .filter_map(|edge| {
+                        let from = connection_bounds(workspace, ConnectionTarget::Card(edge.from))?;
+                        let to = connection_bounds(workspace, edge.to)?;
+                        Some((
+                            connection_anchor(from, zoom, offset_x, offset_y),
+                            connection_anchor(to, zoom, offset_x, offset_y),
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         let submenu = self.menu.submenu;
         let agent_list = self.menu.agent_list;
         let agent_list_anchor = self.menu.agent_list_anchor;
@@ -3007,6 +3168,34 @@ impl Render for Canvas {
         } else {
             add_note.disabled(true)
         };
+        let connect = ComponentButton::new("connect-card")
+            .tooltip("Conectar a outro cartão")
+            .child(canvas_icon("bolt.svg"))
+            .w(px(28.0))
+            .h(px(28.0))
+            .p_0()
+            .rounded(px(8.0))
+            .with_variant(ButtonVariant::Ghost);
+        let connect = if selected_card.is_some() {
+            connect.on_click(cx.listener(|this, _, window, cx| {
+                let Some(id) = this.store.active() else {
+                    return;
+                };
+                let Some(source) = this
+                    .store
+                    .workspaces()
+                    .iter()
+                    .find(|workspace| workspace.id == id)
+                    .and_then(|workspace| workspace.canvas.selected())
+                else {
+                    return;
+                };
+                this.begin_connect(source, cx);
+                window.focus(&this.connect_focus);
+            }))
+        } else {
+            connect.disabled(true)
+        };
         let cards: Vec<_> = active
             .and_then(|id| self.cards.get(&id))
             .map(|group| {
@@ -3025,12 +3214,20 @@ impl Render for Canvas {
                     .collect()
             })
             .unwrap_or_default();
+        let connect_focus = self.connect_focus.clone();
 
         div()
             .size_full()
             .flex()
             .flex_row()
             .bg(rgb(COLOR_BASE))
+            .track_focus(&connect_focus)
+            .capture_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape" && this.connecting_from.is_some() {
+                    this.cancel_connect(cx);
+                    cx.stop_propagation();
+                }
+            }))
             .child(self.drawer.clone())
             .child(
                 div()
@@ -3103,6 +3300,28 @@ impl Render for Canvas {
                                             ));
                                             y += step;
                                         }
+                                        for (from, to) in &edges {
+                                            let start = Point::new(
+                                                px(f32::from(origin.x) + f32::from(from.x)),
+                                                px(f32::from(origin.y) + f32::from(from.y)),
+                                            );
+                                            let end = Point::new(
+                                                px(f32::from(origin.x) + f32::from(to.x)),
+                                                px(f32::from(origin.y) + f32::from(to.y)),
+                                            );
+                                            let mut path = PathBuilder::stroke(px(CONNECTION_LINE_WIDTH));
+                                            path.move_to(start);
+                                            path.line_to(end);
+                                            if let Ok(path) = path
+                                                .dash_array(&[
+                                                    px(CONNECTION_DASH_LENGTH),
+                                                    px(CONNECTION_DASH_GAP),
+                                                ])
+                                                .build()
+                                            {
+                                                window.paint_path(path, rgb(CONNECTION_LINE_COLOR));
+                                            }
+                                        }
                                     },
                                 )
                                 .absolute()
@@ -3110,6 +3329,20 @@ impl Render for Canvas {
                                 .top(px(0.0))
                                 .size_full(),
                             )
+                            .when(connecting, |area| {
+                                area.child(
+                                    div()
+                                        .absolute()
+                                        .left(px(0.0))
+                                        .top(px(0.0))
+                                        .size_full()
+                                        .cursor(CursorStyle::Crosshair)
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(|this, _, _, cx| this.cancel_connect(cx)),
+                                        ),
+                                )
+                            })
                             .when(show_workspace_notice, |area| {
                                 area.child(
                                     div()
@@ -3464,7 +3697,8 @@ impl Render for Canvas {
                             .border_color(rgb(COLOR_BORDER))
                             .child(add_agent)
                             .child(add)
-                            .child(add_note),
+                            .child(add_note)
+                            .child(div().id("island-connect").child(connect)),
                     )
                     .children(self.error.iter().map(|message| {
                         div()
@@ -4440,5 +4674,77 @@ mod dispatch_tests {
 
         assert_eq!(screen_output(&lines, None), "old\nping");
         assert_eq!(screen_output(&lines, Some(1)), "ping");
+    }
+}
+#[cfg(test)]
+mod connect_tests {
+    use super::*;
+    use canvas_types::CanvasState;
+
+    fn bounds() -> CardBounds {
+        CardBounds { x: 0.0, y: 0.0, width: 100.0, height: 100.0 }
+    }
+
+    #[test]
+    fn island_connect_without_a_selected_card_does_nothing() {
+        let mut mode = None;
+
+        assert_eq!(connect_target(mode, ConnectionTarget::Card(2)), None);
+        assert_eq!(mode, None, "no selection leaves connection mode off");
+
+        start_connect(&mut mode, 1);
+        assert_eq!(mode, Some(1), "a selected card becomes the source");
+        assert_eq!(
+            connect_target(mode, ConnectionTarget::Card(1)),
+            None,
+            "the source card cannot target itself"
+        );
+    }
+
+    #[test]
+    fn second_click_inserts_one_edge_and_duplicates_are_ignored() {
+        let mut state = CanvasState::new();
+        let from = state.add_agent(AgentKind::Claude, bounds()).id;
+        let to = state.add_agent(AgentKind::Codex, bounds()).id;
+        let mut mode = None;
+        start_connect(&mut mode, from);
+
+        let (source, target) = connect_target(mode, ConnectionTarget::Card(to)).expect("valid target");
+        assert_eq!((source, target), (from, ConnectionTarget::Card(to)));
+        assert!(state.connect(source, target));
+        assert!(!state.connect(source, target), "the same edge is not inserted twice");
+        assert_eq!(state.connections().len(), 1);
+
+        assert!(finish_connect(&mut mode, ConnectionTarget::Card(to)).is_some());
+        assert_eq!(mode, None, "a completed gesture leaves connection mode");
+    }
+
+    #[test]
+    fn escape_and_empty_canvas_click_clear_connection_mode() {
+        let mut mode = Some(5);
+
+        assert!(stop_connect(&mut mode));
+        assert_eq!(mode, None, "Escape clears the source");
+        assert_eq!(connect_target(mode, ConnectionTarget::Card(6)), None);
+
+        start_connect(&mut mode, 5);
+        assert!(stop_connect(&mut mode));
+        assert_eq!(mode, None, "an empty-canvas click clears the source");
+    }
+
+    #[test]
+    fn notes_can_be_targets_but_never_start_a_connection() {
+        let mut state = CanvasState::new();
+        let card = state.add_agent(AgentKind::Pi, bounds()).id;
+        let note = state.add_note("oi".into(), bounds()).id;
+        let mut mode = None;
+
+        start_connect(&mut mode, card);
+        let (source, target) = connect_target(mode, ConnectionTarget::Note(note)).expect("note target");
+        assert!(state.connect(source, target));
+        assert!(state.connected(card, ConnectionTarget::Note(note)));
+        assert_eq!(connect_target(None, ConnectionTarget::Note(note)), None);
+        assert!(finish_connect(&mut mode, ConnectionTarget::Note(note)).is_some());
+        assert_eq!(mode, None);
     }
 }

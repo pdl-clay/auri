@@ -4,7 +4,7 @@ use auro::gpui::{
     Pixels, Point, Render, ScrollWheelEvent, Size, Subscription, WeakEntity, Window, div, px, rgb,
 };
 use auro::prelude::*;
-use canvas_types::WorkspaceId;
+use canvas_types::{ConnectionTarget, WorkspaceId};
 use gpui_component::input::{Input, InputState};
 
 use crate::card::scroll_delta;
@@ -55,6 +55,7 @@ pub struct TextCard {
     pub workspace_id: WorkspaceId,
     pub bounds: Bounds<Pixels>,
     pub selected: bool,
+    connect_mode: bool,
     number: usize,
     input: Entity<InputState>,
     canvas: WeakEntity<Canvas>,
@@ -109,6 +110,7 @@ impl TextCard {
             _text_subscription: text_subscription,
             selected: false,
             number: 1,
+            connect_mode: false,
         }
     }
 
@@ -123,6 +125,13 @@ impl TextCard {
     pub fn set_selected(&mut self, selected: bool, cx: &mut Context<Self>) {
         if self.selected != selected {
             self.selected = selected;
+            cx.notify();
+        }
+    }
+    /// In connection mode a note click completes an edge instead of focusing.
+    pub fn set_connect_mode(&mut self, connecting: bool, cx: &mut Context<Self>) {
+        if self.connect_mode != connecting {
+            self.connect_mode = connecting;
             cx.notify();
         }
     }
@@ -168,6 +177,12 @@ impl TextCard {
             let _ = canvas.update(cx, |canvas, cx| canvas.select_note(self.workspace_id, self.id, cx));
         }
         self.focus_input(window, cx);
+    }
+    /// Route a target click to the canvas before any note selection or drag.
+    fn complete_connect(&self, cx: &mut App) {
+        let canvas = self.canvas.clone();
+        let id = self.id;
+        let _ = canvas.update(cx, |canvas, cx| canvas.complete_connect(ConnectionTarget::Note(id), cx));
     }
 
     fn begin_drag(&mut self, mode: DragMode, position: Point<Pixels>) {
@@ -217,6 +232,7 @@ impl Render for TextCard {
         let id = self.id;
         let workspace_id = self.workspace_id;
         let selected = self.selected;
+        let connect_mode = self.connect_mode;
         let canvas = self.canvas.clone();
         let scroll_canvas = self.canvas.clone();
         let bounds_canvas = self.canvas.clone();
@@ -230,7 +246,14 @@ impl Render for TextCard {
             .id(("text-card", id))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, _, window, cx| this.select_and_focus(window, cx)),
+                cx.listener(move |this, _, window, cx| {
+                    if this.connect_mode {
+                        this.complete_connect(cx);
+                        cx.stop_propagation();
+                        return;
+                    }
+                    this.select_and_focus(window, cx);
+                }),
             )
             .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
             .on_mouse_up(
@@ -272,6 +295,7 @@ impl Render for TextCard {
             .when(!selected, |card| {
                 card.border_1().border_color(rgb(COLOR_BORDER))
             })
+            .when(connect_mode, |card| card.cursor(CursorStyle::Crosshair))
             .text_color(rgb(COLOR_NOTE_FG))
             .child(
                 div()
@@ -304,6 +328,10 @@ impl Render for TextCard {
                         MouseButton::Left,
                         cx.listener(|this, event: &MouseDownEvent, window, cx| {
                             cx.stop_propagation();
+                            if this.connect_mode {
+                                this.complete_connect(cx);
+                                return;
+                            }
                             this.select_and_focus(window, cx);
                             this.begin_drag(DragMode::Move, event.position);
                         }),
@@ -335,12 +363,16 @@ impl Render for TextCard {
                     .bottom_0()
                     .w(px(HANDLE))
                     .h(px(HANDLE))
-                    .cursor(CursorStyle::ResizeUpRightDownLeft)
+                    .cursor(if connect_mode { CursorStyle::Crosshair } else { CursorStyle::ResizeUpRightDownLeft })
                     .id(("text-card-resize", id))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, event: &MouseDownEvent, window, cx| {
                             cx.stop_propagation();
+                            if this.connect_mode {
+                                this.complete_connect(cx);
+                                return;
+                            }
                             this.select_and_focus(window, cx);
                             this.begin_drag(DragMode::ResizeBottomRight, event.position);
                         }),
