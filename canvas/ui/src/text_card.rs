@@ -85,6 +85,7 @@ impl TextCard {
             let mut input = InputState::new(window, cx)
                 .multi_line(true)
                 .placeholder("Escreva aqui...");
+            input.text_color = Some(rgb(COLOR_NOTE_FG).into());
             if !text.is_empty() {
                 input.set_value(text, window, cx);
             }
@@ -222,6 +223,10 @@ impl TextCard {
             ),
         };
         self.bounds = next;
+        let canvas = self.canvas.clone();
+        cx.defer(move |cx| {
+            let _ = canvas.update(cx, |_, cx| cx.notify());
+        });
         cx.notify(entity_id);
     }
 
@@ -253,6 +258,7 @@ impl Render for TextCard {
                         return;
                     }
                     this.select_and_focus(window, cx);
+                    cx.stop_propagation();
                 }),
             )
             .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
@@ -353,6 +359,8 @@ impl Render for TextCard {
                             .appearance(false)
                             .bordered(false)
                             .focus_bordered(false)
+                            .text_color(rgb(COLOR_NOTE_FG))
+                            .when(connect_mode, |input| input.cursor(CursorStyle::Crosshair))
                             .h_full(),
                     ),
             )

@@ -34,3 +34,8 @@ debug-assertions = false
 # Its own workspace: a parent manifest must never capture the generated app.
 [workspace]
 members = [".", "ui", "types", "protocol", "auri-cli"]
+
+# Local patch: per-Input text colour for sticky notes (0.5.1 hardcodes the
+# global theme foreground). See vendor/gpui-component/PATCHES.md.
+[patch.crates-io]
+gpui-component = { path = "vendor/gpui-component" }

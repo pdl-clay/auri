@@ -406,6 +406,10 @@ impl TerminalCard {
             }
         };
         self.bounds = Bounds::new(Point::new(px(nx), px(ny)), Size::new(px(nw), px(nh)));
+        let canvas = self.canvas.clone();
+        cx.defer(move |cx| {
+            let _ = canvas.update(cx, |_, cx| cx.notify());
+        });
         // The terminal view resizes its PTY from its own measured metrics on
         // the next paint; doing it here as well would resize twice per event.
         let now = Instant::now();
@@ -527,6 +531,7 @@ impl Render for TerminalCard {
                     }
                     let _ =
                         select_canvas.update(cx, |canvas, cx| canvas.select(workspace_id, id, cx));
+                    cx.stop_propagation();
                 }),
             )
             .on_mouse_down(
@@ -649,6 +654,7 @@ impl Render for TerminalCard {
                             }
                             this.terminal.read(cx).focus_handle().focus(window);
                             this.begin_drag(DragMode::Move, event.position);
+                            cx.stop_propagation();
                         }),
                     )
                     .on_drag(DragToken::new(DragMode::Move, entity_id), |token, _, _, cx| {

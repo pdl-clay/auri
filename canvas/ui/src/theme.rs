@@ -11,7 +11,7 @@ pub const COLOR_UNLOADED_ICON: u32 = 0x4E5052;
 pub const COLOR_ACCENT: u32 = 0xC9A227;
 pub const COLOR_DANGER: u32 = 0xE06C63;
 pub const COLOR_SELECTION: u32 = 0x7E96AE;
-pub const COLOR_GRID: u32 = 0x2D2F32;
+pub const COLOR_GRID: u32 = 0x3B3E42;
 pub const COLOR_SUBTLE: u32 = 0x424446;
 pub const COLOR_NOTE_BG: u32 = 0xD8CBA6;
 pub const COLOR_NOTE_FG: u32 = 0x2A2721;
@@ -60,8 +60,21 @@ pub const MIN_TERMINAL_WIDTH: f32 = 320.;
 pub const MIN_TERMINAL_HEIGHT: f32 = 200.;
 pub const CARD_WIDTH: f32 = 640.;
 pub const CARD_HEIGHT: f32 = 400.;
-pub const GRID_STEP: f32 = 24.;
+pub const GRID_STEP: f32 = 36.;
 pub const CARD_GAP: f32 = 1.;
+
+// Zoom island and minimap. All visual dimensions live here, never inline.
+pub const RADIUS_ISLAND: f32 = 20.;
+pub const ZOOM_CONTROL_SIZE: f32 = 24.;
+pub const ZOOM_PERCENT_WIDTH: f32 = 38.;
+pub const MINIMAP_WIDTH: f32 = 232.;
+pub const MINIMAP_HEIGHT: f32 = 152.;
+pub const MINIMAP_PADDING: f32 = 10.;
+pub const MINIMAP_MARGIN_RIGHT: f32 = 12.;
+pub const MINIMAP_MARGIN_BOTTOM: f32 = 52.;
+pub const MINIMAP_WORLD_PADDING: f32 = 24.;
+pub const MINIMAP_ITEM_MIN_SIZE: f32 = 2.;
+pub const MINIMAP_ITEM_RADIUS: f32 = 2.;
 
 // Connection gesture and persisted edges.
 pub const CONNECTION_LINE_COLOR: u32 = 0x9AB4CE;

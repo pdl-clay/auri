@@ -69,13 +69,9 @@ fn filter_matches(name: &str, query: &str) -> bool {
     name.to_lowercase().contains(&query.to_lowercase())
 }
 
-/// Rows show every card in a workspace: terminals and agents together.
+/// Rows show every saved card in a workspace, loaded or not.
 fn workspace_item_count(workspace: &WorkspaceState) -> usize {
-    if workspace.unloaded {
-        0
-    } else {
-        workspace.canvas.terminals().len() + workspace.canvas.agents().len()
-    }
+    workspace.canvas.terminals().len() + workspace.canvas.agents().len()
 }
 
 #[derive(Clone, Copy)]
@@ -1166,7 +1162,7 @@ mod tests {
 
         let mut unloaded = loaded.clone();
         unloaded.unloaded = true;
-        assert_eq!(workspace_item_count(&unloaded), 0);
+        assert_eq!(workspace_item_count(&unloaded), 3);
     }
 
     #[test]

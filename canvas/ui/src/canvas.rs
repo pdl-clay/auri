@@ -121,6 +121,14 @@ fn ask_header_name(name: &str) -> String {
     }
 }
 
+
+/// Damped spring for one connection line: sag follows the endpoints and
+/// overshoots slightly when a card moves, like a real cord.
+#[derive(Clone, Default)]
+struct RopeState {
+    sag: f32,
+    velocity: f32,
+}
 /// Live identity for the host listener. `tokens` maps a one-time token to the
 /// workspace-local card id; `homes` remembers its workspace so an id reused in
 /// another workspace cannot borrow its authority. `writers` holds the shared
@@ -271,6 +279,29 @@ fn connection_bounds(workspace: &WorkspaceState, target: ConnectionTarget) -> Op
             .iter()
             .find(|note| note.id == id)
             .map(|note| note.bounds),
+    }
+}
+
+/// Live geometry from card entities, so a connection follows a card mid-drag.
+fn live_connection_bounds(
+    canvas: &Canvas,
+    workspace_id: WorkspaceId,
+    target: ConnectionTarget,
+    cx: &App,
+) -> Option<CardBounds> {
+    match target {
+        ConnectionTarget::Card(id) => canvas
+            .cards
+            .get(&workspace_id)?
+            .iter()
+            .find(|(card_id, _)| *card_id == id)
+            .map(|(_, card)| card_bounds(&card.read(cx).bounds)),
+        ConnectionTarget::Note(id) => canvas
+            .notes
+            .get(&workspace_id)?
+            .iter()
+            .find(|(note_id, _)| *note_id == id)
+            .map(|(_, note)| card_bounds(&note.read(cx).bounds)),
     }
 }
 
@@ -1111,9 +1142,13 @@ pub struct Canvas {
     connect_focus: FocusHandle,
     /// Source card of the user's in-progress connection gesture.
     connecting_from: Option<TerminalId>,
+    /// Spring state for each connection, indexed by edge order.
+    ropes: Vec<RopeState>,
     zoom: f32,
     offset_x: f32,
     offset_y: f32,
+    /// The overview map is a view-only overlay; it never changes persisted data.
+    minimap_open: bool,
     menu: MenuState,
     selected_note: NoteSelection,
     agent_menu: Option<AgentMenu>,
@@ -1153,8 +1188,10 @@ impl Canvas {
             connecting_from: None,
             connect_focus: cx.focus_handle(),
             zoom: 1.0,
+            ropes: Vec::new(),
             offset_x: 0.0,
             offset_y: 0.0,
+            minimap_open: false,
             menu: MenuState::default(),
             selected_note: NoteSelection::default(),
             agent_menu: None,
@@ -1730,26 +1767,35 @@ impl Canvas {
         shift: bool,
         cx: &mut Context<Self>,
     ) {
-        if control {
+        let (zoom, offset_x, offset_y) = if control {
             let drawer_width = self.drawer.read(cx).drawer_width();
             let local_x = f32::from(position.x) - drawer_width;
             let local_y = f32::from(position.y);
-            let (zoom, offset_x, offset_y) = zoom_at(
+            zoom_at(
                 self.zoom,
                 self.offset_x,
                 self.offset_y,
                 local_x,
                 local_y,
                 zoom_factor(dy),
-            );
-            self.zoom = zoom;
-            self.offset_x = offset_x;
-            self.offset_y = offset_y;
+            )
         } else if shift {
-            self.offset_x -= dx + dy;
+            (self.zoom, self.offset_x - dx - dy, self.offset_y)
         } else {
-            self.offset_y = pan_vertical(self.offset_y, dy);
-        }
+            (
+                self.zoom,
+                self.offset_x,
+                pan_vertical(self.offset_y, dy),
+            )
+        };
+        self.set_viewport(zoom, offset_x, offset_y, cx);
+    }
+
+    /// Apply a zoom level and pan offset to the live cards and the grid.
+    fn set_viewport(&mut self, zoom: f32, offset_x: f32, offset_y: f32, cx: &mut Context<Self>) {
+        self.zoom = zoom;
+        self.offset_x = offset_x;
+        self.offset_y = offset_y;
         let (zoom, offset_x, offset_y) = (self.zoom, self.offset_x, self.offset_y);
         let cards: Vec<Entity<TerminalCard>> = self
             .cards
@@ -1770,6 +1816,114 @@ impl Canvas {
             }
         });
         cx.notify();
+    }
+
+    /// Zoom around the centre of the visible canvas (the stage right of the drawer).
+    fn zoom_by(&mut self, factor: f32, window: &Window, cx: &mut Context<Self>) {
+        let (stage_w, stage_h) = self.stage_size(window, cx);
+        let (zoom, offset_x, offset_y) = zoom_at(
+            self.zoom,
+            self.offset_x,
+            self.offset_y,
+            stage_w * 0.5,
+            stage_h * 0.5,
+            factor,
+        );
+        self.set_viewport(zoom, offset_x, offset_y, cx);
+    }
+
+    /// Size of the canvas viewport, excluding the workspace drawer.
+    fn stage_size(&self, window: &Window, cx: &Context<Self>) -> (f32, f32) {
+        let size = window.viewport_size();
+        let drawer_width = self.drawer.read(cx).drawer_width();
+        (
+            (f32::from(size.width) - drawer_width).max(1.0),
+            f32::from(size.height).max(1.0),
+        )
+    }
+
+    /// Overview panel: every card plus the current viewport, click to recenter.
+    fn minimap_panel(
+        &self,
+        items: &[MinimapItem],
+        geometry: &MinimapGeometry,
+        view: CardBounds,
+        stage_w: f32,
+        stage_h: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let geometry = *geometry;
+        let drawer_width = self.drawer.read(cx).drawer_width();
+        let mut panel = div()
+            .id("canvas-minimap")
+            .absolute()
+            .left(px(geometry.panel_x))
+            .top(px(geometry.panel_y))
+            .w(px(MINIMAP_WIDTH))
+            .h(px(MINIMAP_HEIGHT))
+            .rounded(px(RADIUS_DIALOG))
+            .bg(rgb(COLOR_PANEL))
+            .border_1()
+            .border_color(rgb(COLOR_BORDER))
+            .overflow_hidden()
+            .cursor(CursorStyle::PointingHand)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    let local_x = f32::from(event.position.x) - drawer_width - geometry.panel_x;
+                    let local_y = f32::from(event.position.y) - geometry.panel_y;
+                    let (world_x, world_y) = minimap_world_at(&geometry, local_x, local_y);
+                    let zoom = this.zoom.max(0.01);
+                    let offset_x = stage_w * 0.5 - world_x * zoom;
+                    let offset_y = stage_h * 0.5 - world_y * zoom;
+                    this.set_viewport(zoom, offset_x, offset_y, cx);
+                }),
+            );
+        if items.is_empty() {
+            panel = panel.child(
+                div()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_xs()
+                    .text_color(rgb(COLOR_MUTED))
+                    .child("Sem cartões"),
+            );
+        } else {
+            for item in items {
+                let width = (item.bounds.width * geometry.scale).max(MINIMAP_ITEM_MIN_SIZE);
+                let height = (item.bounds.height * geometry.scale).max(MINIMAP_ITEM_MIN_SIZE);
+                let mut rect = div()
+                    .absolute()
+                    .left(px(minimap_local_x(&geometry, item.bounds.x)))
+                    .top(px(minimap_local_y(&geometry, item.bounds.y)))
+                    .w(px(width))
+                    .h(px(height))
+                    .rounded(px(MINIMAP_ITEM_RADIUS))
+                    .bg(rgb(item.color));
+                if item.selected {
+                    rect = rect.border_1().border_color(rgb(COLOR_FOREGROUND));
+                }
+                panel = panel.child(rect);
+            }
+        }
+        let view_width = (view.width * geometry.scale).max(MINIMAP_ITEM_MIN_SIZE);
+        let view_height = (view.height * geometry.scale).max(MINIMAP_ITEM_MIN_SIZE);
+        panel
+            .child(
+                div()
+                    .absolute()
+                    .left(px(minimap_local_x(&geometry, view.x)))
+                    .top(px(minimap_local_y(&geometry, view.y)))
+                    .w(px(view_width))
+                    .h(px(view_height))
+                    .rounded(px(MINIMAP_ITEM_RADIUS))
+                    .border_1()
+                    .border_color(rgb(COLOR_ACCENT)),
+            )
+            .into_any_element()
     }
 
     /// Enter placement mode: the next canvas click decides where the terminal opens.
@@ -2510,6 +2664,27 @@ impl Canvas {
         cx.notify();
     }
 
+    /// Empty-canvas clicks drop both terminal and note selection.
+    fn clear_all_selection(&mut self, cx: &mut Context<Self>) {
+        let active = self.store.active();
+        let had_terminal = active
+            .and_then(|id| self.store.workspaces().iter().find(|workspace| workspace.id == id))
+            .is_some_and(|workspace| workspace.canvas.selected().is_some());
+        let had_note = self.selected_note.get().is_some();
+        if !had_terminal && !had_note {
+            return;
+        }
+        if let Some(id) = active {
+            if let Some(workspace) = self.store.workspace_mut(id) {
+                workspace.canvas.clear_selection();
+            }
+            self.sync_card_selection(id, cx);
+            self.persist_store(cx);
+        }
+        self.clear_note_selection(cx);
+        cx.notify();
+    }
+
     /// Select a sticky note; terminal selection lives in the store, so clear it there.
     pub fn select_note(&mut self, workspace_id: WorkspaceId, id: u64, cx: &mut Context<Self>) {
         let had_terminal_selection = self
@@ -2894,6 +3069,90 @@ fn zoom_at(
     (next, local_x - world_x * next, local_y - world_y * next)
 }
 
+/// One canvas card as drawn in the overview map.
+#[derive(Copy, Clone, Debug, PartialEq)]
+struct MinimapItem {
+    bounds: CardBounds,
+    color: u32,
+    selected: bool,
+}
+
+/// Scale and panel placement that fit every card plus the current viewport.
+#[derive(Copy, Clone, Debug, PartialEq)]
+struct MinimapGeometry {
+    panel_x: f32,
+    panel_y: f32,
+    min_x: f32,
+    min_y: f32,
+    max_x: f32,
+    max_y: f32,
+    scale: f32,
+    content_x: f32,
+    content_y: f32,
+}
+
+fn minimap_geometry(
+    items: &[MinimapItem],
+    view: CardBounds,
+    stage_w: f32,
+    stage_h: f32,
+) -> MinimapGeometry {
+    let mut min_x = view.x;
+    let mut min_y = view.y;
+    let mut max_x = view.x + view.width.max(1.0);
+    let mut max_y = view.y + view.height.max(1.0);
+    for item in items {
+        min_x = min_x.min(item.bounds.x);
+        min_y = min_y.min(item.bounds.y);
+        max_x = max_x.max(item.bounds.x + item.bounds.width.max(1.0));
+        max_y = max_y.max(item.bounds.y + item.bounds.height.max(1.0));
+    }
+    let min_x = min_x - MINIMAP_WORLD_PADDING;
+    let min_y = min_y - MINIMAP_WORLD_PADDING;
+    let max_x = max_x + MINIMAP_WORLD_PADDING;
+    let max_y = max_y + MINIMAP_WORLD_PADDING;
+    let world_w = (max_x - min_x).max(1.0);
+    let world_h = (max_y - min_y).max(1.0);
+    let panel_x = (stage_w - MINIMAP_MARGIN_RIGHT - MINIMAP_WIDTH).max(SPACE_WIDE);
+    let panel_y = (stage_h - MINIMAP_MARGIN_BOTTOM - MINIMAP_HEIGHT).max(SPACE_WIDE);
+    let content_w = (MINIMAP_WIDTH - MINIMAP_PADDING * 2.0).max(1.0);
+    let content_h = (MINIMAP_HEIGHT - MINIMAP_PADDING * 2.0).max(1.0);
+    let scale = (content_w / world_w).min(content_h / world_h);
+    let content_x = MINIMAP_PADDING + (content_w - world_w * scale) * 0.5;
+    let content_y = MINIMAP_PADDING + (content_h - world_h * scale) * 0.5;
+    MinimapGeometry {
+        panel_x,
+        panel_y,
+        min_x,
+        min_y,
+        max_x,
+        max_y,
+        scale,
+        content_x,
+        content_y,
+    }
+}
+
+/// Panel-local x for a world point.
+fn minimap_local_x(geometry: &MinimapGeometry, world_x: f32) -> f32 {
+    geometry.content_x + (world_x - geometry.min_x) * geometry.scale
+}
+
+/// Panel-local y for a world point.
+fn minimap_local_y(geometry: &MinimapGeometry, world_y: f32) -> f32 {
+    geometry.content_y + (world_y - geometry.min_y) * geometry.scale
+}
+
+/// World point under a click inside the overview panel, clamped to its bounds.
+fn minimap_world_at(geometry: &MinimapGeometry, local_x: f32, local_y: f32) -> (f32, f32) {
+    let world_x = geometry.min_x + (local_x - geometry.content_x) / geometry.scale;
+    let world_y = geometry.min_y + (local_y - geometry.content_y) / geometry.scale;
+    (
+        world_x.clamp(geometry.min_x, geometry.max_x),
+        world_y.clamp(geometry.min_y, geometry.max_y),
+    )
+}
+
 /// Centered creation form, built on the same root dialog overlay as the
 /// workspace form so canvas menus cannot swallow its clicks.
 fn custom_agent_dialog(
@@ -3240,29 +3499,91 @@ impl Render for Canvas {
         let selected_card = active
             .and_then(|id| self.store.workspaces().iter().find(|workspace| workspace.id == id))
             .and_then(|workspace| workspace.canvas.selected());
-        let edges: Vec<(Point<Pixels>, Point<Pixels>)> = active
-            .and_then(|id| self.store.workspaces().iter().find(|workspace| workspace.id == id))
+        let workspace_ref = active
+            .and_then(|id| self.store.workspaces().iter().find(|workspace| workspace.id == id));
+        let connections = workspace_ref
+            .map(|workspace| workspace.canvas.connections().to_vec())
+            .unwrap_or_default();
+        let minimap_items: Vec<MinimapItem> = workspace_ref
             .map(|workspace| {
-                workspace
-                    .canvas
-                    .connections()
-                    .iter()
-                    .filter_map(|edge| {
-                        let from = connection_bounds(workspace, ConnectionTarget::Card(edge.from))?;
-                        let to = connection_bounds(workspace, edge.to)?;
-                        Some((
-                            connection_anchor(from, zoom, offset_x, offset_y),
-                            connection_anchor(to, zoom, offset_x, offset_y),
-                        ))
-                    })
-                    .collect()
+                let selected = workspace.canvas.selected();
+                let mut items = Vec::new();
+                for terminal in workspace.canvas.terminals() {
+                    if let Some(bounds) = terminal.bounds {
+                        items.push(MinimapItem {
+                            bounds,
+                            color: COLOR_SELECTION,
+                            selected: selected == Some(terminal.id),
+                        });
+                    }
+                }
+                for agent in workspace.canvas.agents() {
+                    let icon = resolve_agent_details(&self.store, agent.kind).2;
+                    items.push(MinimapItem {
+                        bounds: agent.bounds,
+                        color: agent_color(icon),
+                        selected: selected == Some(agent.id),
+                    });
+                }
+                for note in workspace.canvas.notes() {
+                    items.push(MinimapItem {
+                        bounds: note.bounds,
+                        color: COLOR_NOTE_BG,
+                        selected: false,
+                    });
+                }
+                items
             })
             .unwrap_or_default();
+        let live: Vec<Option<(Point<Pixels>, Point<Pixels>)>> = connections
+            .iter()
+            .map(|edge| {
+                let from = live_connection_bounds(self, active.unwrap_or_default(), ConnectionTarget::Card(edge.from), cx)
+                    .or_else(|| workspace_ref.and_then(|workspace| connection_bounds(workspace, ConnectionTarget::Card(edge.from))))?;
+                let to = live_connection_bounds(self, active.unwrap_or_default(), edge.to, cx)
+                    .or_else(|| workspace_ref.and_then(|workspace| connection_bounds(workspace, edge.to)))?;
+                Some((
+                    connection_anchor(from, zoom, offset_x, offset_y),
+                    connection_anchor(to, zoom, offset_x, offset_y),
+                ))
+            })
+            .collect();
+        let mut ropes = std::mem::take(&mut self.ropes);
+        ropes.resize(live.len(), RopeState::default());
+        let mut edges: Vec<(Point<Pixels>, Point<Pixels>, f32)> = Vec::new();
+        for (index, pair) in live.into_iter().enumerate() {
+            let Some((from, to)) = pair else {
+                continue;
+            };
+            let dx = f32::from(to.x - from.x);
+            let dy = f32::from(to.y - from.y);
+            let target_sag = (dx * dx + dy * dy).sqrt() * 0.10;
+            let rope = &mut ropes[index];
+            rope.velocity = (rope.velocity + (target_sag - rope.sag) * 0.30) * 0.72;
+            rope.sag += rope.velocity;
+            edges.push((from, to, rope.sag));
+        }
+        let settling = ropes.iter().any(|rope| rope.velocity.abs() > 0.05);
+        self.ropes = ropes;
+        if settling {
+            window.request_animation_frame();
+        }
         let submenu = self.menu.submenu;
         let agent_list = self.menu.agent_list;
         let agent_list_anchor = self.menu.agent_list_anchor;
         let agent_menu = self.agent_menu.clone();
         let drawer_width = self.drawer.read(cx).drawer_width();
+        let viewport_size = window.viewport_size();
+        let stage_w = (f32::from(viewport_size.width) - drawer_width).max(1.0);
+        let stage_h = f32::from(viewport_size.height).max(1.0);
+        let zoom_scale = zoom.max(0.01);
+        let view = CardBounds {
+            x: -offset_x / zoom_scale,
+            y: -offset_y / zoom_scale,
+            width: stage_w / zoom_scale,
+            height: stage_h / zoom_scale,
+        };
+        let minimap_geom = minimap_geometry(&minimap_items, view, stage_w, stage_h);
         let context_menu = self.menu.context_menu.map(|position| {
             (
                 (f32::from(position.x) - drawer_width).max(SPACE_NORMAL),
@@ -3345,6 +3666,49 @@ impl Render for Canvas {
         } else {
             connect.disabled(true)
         };
+        let map_button = ComponentButton::new("toggle-minimap")
+            .tooltip(if self.minimap_open {
+                "Fechar mapa do canvas"
+            } else {
+                "Ver mapa do canvas"
+            })
+            .child(canvas_icon("map.svg"))
+            .w(px(ZOOM_CONTROL_SIZE))
+            .h(px(ZOOM_CONTROL_SIZE))
+            .p_0()
+            .rounded(px(RADIUS_CHIP))
+            .with_variant(ButtonVariant::Ghost);
+        let map_button = if active.is_some() {
+            map_button.on_click(cx.listener(|this, _, _, cx| {
+                this.minimap_open = !this.minimap_open;
+                cx.notify();
+            }))
+        } else {
+            map_button.disabled(true)
+        };
+        let zoom_out = ComponentButton::new("zoom-out")
+            .tooltip("Diminuir zoom")
+            .child(canvas_icon("minus.svg"))
+            .w(px(ZOOM_CONTROL_SIZE))
+            .h(px(ZOOM_CONTROL_SIZE))
+            .p_0()
+            .rounded(px(RADIUS_CHIP))
+            .with_variant(ButtonVariant::Ghost)
+            .on_click(cx.listener(|this, _, window, cx| this.zoom_by(1.0 / 1.25, window, cx)));
+        let zoom_in = ComponentButton::new("zoom-in")
+            .tooltip("Aumentar zoom")
+            .child(canvas_icon("plus.svg"))
+            .w(px(ZOOM_CONTROL_SIZE))
+            .h(px(ZOOM_CONTROL_SIZE))
+            .p_0()
+            .rounded(px(RADIUS_CHIP))
+            .with_variant(ButtonVariant::Ghost)
+            .on_click(cx.listener(|this, _, window, cx| this.zoom_by(1.25, window, cx)));
+        let minimap = if self.minimap_open && active.is_some() {
+            Some(self.minimap_panel(&minimap_items, &minimap_geom, view, stage_w, stage_h, cx))
+        } else {
+            None
+        };
         let cards: Vec<_> = active
             .and_then(|id| self.cards.get(&id))
             .map(|group| {
@@ -3396,6 +3760,10 @@ impl Render for Canvas {
                                 this.apply_scroll(event.position, dx, dy, event.modifiers.control, event.modifiers.shift, cx);
                                 cx.stop_propagation();
                             }))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| this.clear_all_selection(cx)),
+                            )
                             .on_mouse_down(
                                 MouseButton::Right,
                                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
@@ -3449,7 +3817,7 @@ impl Render for Canvas {
                                             ));
                                             y += step;
                                         }
-                                        for (from, to) in &edges {
+                                        for (from, to, sag) in &edges {
                                             let start = Point::new(
                                                 px(f32::from(origin.x) + f32::from(from.x)),
                                                 px(f32::from(origin.y) + f32::from(from.y)),
@@ -3458,9 +3826,13 @@ impl Render for Canvas {
                                                 px(f32::from(origin.x) + f32::from(to.x)),
                                                 px(f32::from(origin.y) + f32::from(to.y)),
                                             );
+                                            let control = Point::new(
+                                                px((f32::from(start.x) + f32::from(end.x)) * 0.5),
+                                                px((f32::from(start.y) + f32::from(end.y)) * 0.5 + *sag),
+                                            );
                                             let mut path = PathBuilder::stroke(px(CONNECTION_LINE_WIDTH));
                                             path.move_to(start);
-                                            path.line_to(end);
+                                            path.curve_to(end, control);
                                             if let Ok(path) = path
                                                 .dash_array(&[
                                                     px(CONNECTION_DASH_LENGTH),
@@ -3602,6 +3974,9 @@ impl Render for Canvas {
                                 )
                             })
                             .when_some(context_menu, |area, (x, y)| {
+                                let x = x;
+                                let y = y;
+                                let drawer_width = drawer_width;
                                 area.child(
                                     div()
                                         .absolute()
@@ -3640,11 +4015,20 @@ impl Render for Canvas {
                                                 .px(px(SPACE_NORMAL))
                                                 .rounded(px(RADIUS_CHIP))
                                                 .hover(|style| style.bg(rgb(COLOR_BORDER)))
-                                                .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                                                .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
+                                                    let mouse = window.mouse_position();
+                                                    let mx = f32::from(mouse.x) - drawer_width;
+                                                    let my = f32::from(mouse.y);
+                                                    let over_submenu = mx >= x + CONTEXT_MENU_WIDTH + SUBMENU_GAP
+                                                        && mx <= x + 2.0 * CONTEXT_MENU_WIDTH + SUBMENU_GAP
+                                                        && my >= y && my <= y + CONTEXT_MENU_ITEM_HEIGHT * 4.0;
                                                     if *hovered {
                                                         this.menu.submenu = true;
-                                                        cx.notify();
+                                                    } else if !over_submenu {
+                                                        this.menu.submenu = false;
+                                                        this.menu.agent_list = false;
                                                     }
+                                                    cx.notify();
                                                 }))
                                                 .on_mouse_down(
                                                     MouseButton::Left,
@@ -3693,11 +4077,19 @@ impl Render for Canvas {
                                                     .rounded(px(RADIUS_CHIP))
                                                     .hover(|style| style.bg(rgb(COLOR_BORDER)))
                                                     .when(option == AddOption::Agent, |item| {
-                                                        item.on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                                                        item.on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
+                                                            let mouse = window.mouse_position();
+                                                            let mx = f32::from(mouse.x) - drawer_width;
+                                                            let my = f32::from(mouse.y);
+                                                            let over_agent_list = mx >= x + 2.0 * (CONTEXT_MENU_WIDTH + SUBMENU_GAP)
+                                                                && mx <= x + 3.0 * CONTEXT_MENU_WIDTH + 2.0 * SUBMENU_GAP
+                                                                && my >= y && my <= y + CONTEXT_MENU_ITEM_HEIGHT * 8.0;
                                                             if *hovered {
                                                                 this.menu.open_context_agent_list();
-                                                                cx.notify();
+                                                            } else if !over_agent_list {
+                                                                this.menu.agent_list = false;
                                                             }
+                                                            cx.notify();
                                                         }))
                                                     })
                                                     .on_mouse_down(
@@ -3847,7 +4239,9 @@ impl Render for Canvas {
                             .child(add_agent)
                             .child(add)
                             .child(add_note)
-                            .child(div().id("island-connect").child(connect)),
+                            .when(selected_card.is_some(), |island| {
+                                island.child(div().id("island-connect").child(connect))
+                            }),
                     )
                     .children(self.error.iter().map(|message| {
                         div()
@@ -3861,27 +4255,37 @@ impl Render for Canvas {
                             .child(message.clone())
                     })),
             )
+            .children(minimap)
             .child(
                 div()
                     .absolute()
-                    .bottom(px(12.0))
-                    .right(px(12.0))
+                    .bottom(px(SPACE_WIDE))
+                    .right(px(SPACE_WIDE))
                     .flex()
                     .items_center()
-                    .gap_2()
-                    .rounded(px(20.0))
+                    .gap_1()
+                    .rounded(px(RADIUS_ISLAND))
                     .bg(rgb(COLOR_ELEVATED))
                     .border_1()
                     .border_color(rgb(COLOR_BORDER))
-                    .px_3()
-                    .py_1()
-                    .child(div().text_xs().text_color(rgb(COLOR_MUTED)).child("Zoom"))
+                    .p_1()
+                    .child(map_button)
                     .child(
                         div()
+                            .w(px(1.0))
+                            .h(px(16.0))
+                            .bg(rgb(COLOR_BORDER)),
+                    )
+                    .child(zoom_out)
+                    .child(
+                        div()
+                            .min_w(px(ZOOM_PERCENT_WIDTH))
                             .text_sm()
                             .text_color(rgb(COLOR_FOREGROUND))
+                            .text_center()
                             .child(format!("{}%", (zoom * 100.0).round() as i32)),
-                    ),
+                    )
+                    .child(zoom_in),
             )
             .children(gpui_component::Root::render_dialog_layer(window, cx))
     }
