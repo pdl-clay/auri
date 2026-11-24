@@ -4,11 +4,13 @@
 //! before any state changes. Authority comes from the stored [`AgentState::admin`]
 //! bit and the workspace's user-drawn edges — never from a card's display name.
 
+#[cfg(test)]
 use std::path::PathBuf;
 
-use canvas_types::{
-    AgentKind, AgentState, CanvasState, ConnectionTarget, TerminalId, WorkspaceIcon, WorkspaceState,
-};
+#[cfg(test)]
+use canvas_types::{AgentKind, CanvasState, WorkspaceIcon};
+
+use canvas_types::{AgentState, ConnectionTarget, TerminalId, WorkspaceState};
 
 /// A live agent card making a request. `admin` is the role snapshot taken when
 /// the token was resolved; [`authorize`] re-reads the persisted role so a toggle
