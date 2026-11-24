@@ -148,6 +148,8 @@ pub fn run() {
             ("bolt.svg", include_bytes!("../../icons/bolt.svg")),
             ("globe.svg", include_bytes!("../../icons/globe.svg")),
             ("plus.svg", include_bytes!("../../icons/plus.svg")),
+            ("minus.svg", include_bytes!("../../icons/minus.svg")),
+            ("map.svg", include_bytes!("../../icons/map.svg")),
             ("search.svg", include_bytes!("../../icons/search.svg")),
             ("x.svg", include_bytes!("../../icons/x.svg")),
             ("terminal.svg", include_bytes!("../../icons/terminal.svg")),

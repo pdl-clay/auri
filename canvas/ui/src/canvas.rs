@@ -1782,11 +1782,7 @@ impl Canvas {
         } else if shift {
             (self.zoom, self.offset_x - dx - dy, self.offset_y)
         } else {
-            (
-                self.zoom,
-                self.offset_x,
-                pan_vertical(self.offset_y, dy),
-            )
+            (self.zoom, self.offset_x, pan_vertical(self.offset_y, dy))
         };
         self.set_viewport(zoom, offset_x, offset_y, cx);
     }
@@ -4460,6 +4456,74 @@ mod tests {
         assert_eq!(zoom, 1.25);
         assert_eq!((400.0 - offset_x) / zoom, 400.0);
         assert_eq!((300.0 - offset_y) / zoom, 300.0);
+    }
+
+    #[test]
+    fn minimap_fits_cards_and_the_viewport() {
+        let items = [MinimapItem {
+            bounds: CardBounds {
+                x: -100.0,
+                y: -50.0,
+                width: 200.0,
+                height: 100.0,
+            },
+            color: COLOR_SELECTION,
+            selected: false,
+        }];
+        let view = CardBounds {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 600.0,
+        };
+
+        let geometry = minimap_geometry(&items, view, 1200.0, 800.0);
+
+        assert!(geometry.scale > 0.0);
+        assert!(geometry.panel_x >= SPACE_WIDE);
+        assert!(geometry.panel_x + MINIMAP_WIDTH <= 1200.0);
+        assert!(geometry.panel_y + MINIMAP_HEIGHT <= 800.0);
+        assert!(minimap_local_x(&geometry, items[0].bounds.x) >= MINIMAP_PADDING);
+        assert!(minimap_local_y(&geometry, items[0].bounds.y) >= MINIMAP_PADDING);
+        assert!(
+            minimap_local_x(&geometry, view.x + view.width) <= MINIMAP_WIDTH - MINIMAP_PADDING + 0.01
+        );
+        assert!(
+            minimap_local_y(&geometry, view.y + view.height) <= MINIMAP_HEIGHT - MINIMAP_PADDING + 0.01
+        );
+    }
+
+    #[test]
+    fn minimap_click_maps_to_world_and_clamps() {
+        let items = [MinimapItem {
+            bounds: CardBounds {
+                x: 100.0,
+                y: 100.0,
+                width: 300.0,
+                height: 200.0,
+            },
+            color: COLOR_SELECTION,
+            selected: false,
+        }];
+        let view = CardBounds {
+            x: 0.0,
+            y: 0.0,
+            width: 640.0,
+            height: 400.0,
+        };
+        let geometry = minimap_geometry(&items, view, 1000.0, 700.0);
+
+        let (world_x, world_y) = minimap_world_at(
+            &geometry,
+            minimap_local_x(&geometry, 250.0),
+            minimap_local_y(&geometry, 200.0),
+        );
+        assert!((world_x - 250.0).abs() < 0.01);
+        assert!((world_y - 200.0).abs() < 0.01);
+
+        let (clamped_x, clamped_y) = minimap_world_at(&geometry, -100.0, -100.0);
+        assert_eq!(clamped_x, geometry.min_x);
+        assert_eq!(clamped_y, geometry.min_y);
     }
 
     fn groups_for(store: &WorkspaceStore) -> CardGroups {
