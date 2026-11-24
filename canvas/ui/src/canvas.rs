@@ -39,7 +39,7 @@ type NoteGroups = HashMap<WorkspaceId, Vec<(u64, Entity<TextCard>)>>;
 /// never lives in the config, logs or canvas state — only in one PTY's env and
 /// in this in-memory registry.
 fn random_token() -> String {
-    use rand::RngCore;
+    use rand::Rng;
 
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut bytes = [0u8; 32];
