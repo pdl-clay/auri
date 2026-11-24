@@ -12,6 +12,8 @@ rede e sem exigir patch nos CLIs de agente.
 > Ferramenta pessoal, open-source sob MIT. Veja [NOTICE.md](NOTICE.md): issues
 > e PRs são bem-vindos, mas não há compromisso de suporte.
 
+<img src="docs/screenshots/canvas.png" alt="Canvas do Auri com dois agentes conectados por uma linha tracejada">
+
 ## O que já funciona
 
 - **Canvas**: cartões de agente, terminais e notas com drag, resize, zoom e
