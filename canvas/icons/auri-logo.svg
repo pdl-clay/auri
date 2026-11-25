@@ -1,0 +1,106 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1200" viewBox="0 0 1200 1200">
+<defs>
+  <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0" stop-color="#1D2A3D"/>
+    <stop offset="1" stop-color="#0B1220"/>
+  </linearGradient>
+  <linearGradient id="shell" x1="0" y1="0" x2="0.9" y2="1">
+    <stop offset="0" stop-color="#FF896B"/>
+    <stop offset="1" stop-color="#E94F38"/>
+  </linearGradient>
+  <linearGradient id="screen" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0" stop-color="#20364A"/>
+    <stop offset="1" stop-color="#122333"/>
+  </linearGradient>
+  <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+    <feGaussianBlur stdDeviation="22"/>
+  </filter>
+</defs>
+
+<!-- app tile -->
+<rect x="70" y="70" width="1060" height="1060" rx="250" fill="url(#bg)"/>
+<rect x="72" y="72" width="1056" height="1056" rx="248" fill="none" stroke="#40516A" stroke-opacity=".55" stroke-width="5"/>
+
+<!-- subtle canvas connection graph -->
+<g fill="none" stroke="#55D6D2" stroke-width="13" stroke-linecap="round" opacity=".62">
+  <path d="M250 370 L365 455 L490 365"/>
+  <path d="M835 365 L950 455 L1030 380"/>
+  <path d="M260 790 L365 710 L470 790"/>
+  <path d="M850 790 L950 710 L1040 790"/>
+</g>
+<g fill="#55D6D2" opacity=".95">
+  <circle cx="250" cy="370" r="19"/><circle cx="490" cy="365" r="19"/>
+  <circle cx="1030" cy="380" r="19"/><circle cx="260" cy="790" r="19"/>
+  <circle cx="470" cy="790" r="19"/><circle cx="1040" cy="790" r="19"/>
+</g>
+
+<!-- crab shadow -->
+<ellipse cx="600" cy="890" rx="300" ry="48" fill="#000" opacity=".3" filter="url(#shadow)"/>
+
+<!-- rear legs -->
+<g fill="none" stroke="#E95B43" stroke-width="42" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M410 675 L315 755 L260 850"/>
+  <path d="M455 730 L390 830 L365 920"/>
+  <path d="M790 675 L885 755 L940 850"/>
+  <path d="M745 730 L810 830 L835 920"/>
+</g>
+<g fill="none" stroke="#FF9274" stroke-width="15" stroke-linecap="round" opacity=".8">
+  <path d="M410 675 L315 755 L260 850"/>
+  <path d="M790 675 L885 755 L940 850"/>
+</g>
+
+<!-- arms and claws -->
+<g stroke="#E95B43" stroke-width="34" stroke-linecap="round" stroke-linejoin="round" fill="url(#shell)">
+  <path d="M390 520 C320 485 270 440 245 385"/>
+  <path d="M810 520 C880 485 930 440 955 385"/>
+  <path d="M245 385 C185 350 155 390 175 445 C190 490 245 495 278 455"/>
+  <path d="M955 385 C1015 350 1045 390 1025 445 C1010 490 955 495 922 455"/>
+</g>
+<g fill="none" stroke="#FFB09A" stroke-width="13" stroke-linecap="round">
+  <path d="M190 408 Q220 425 247 410"/>
+  <path d="M1010 408 Q980 425 953 410"/>
+</g>
+
+<!-- central shell / terminal body -->
+<path d="M365 470 Q600 365 835 470 L860 690 Q600 820 340 690 Z" fill="url(#shell)" stroke="#FFAA91" stroke-width="12"/>
+<path d="M390 492 Q600 415 810 492 L827 665 Q600 770 373 665 Z" fill="#D94735" opacity=".55"/>
+
+<!-- terminal panel -->
+<rect x="420" y="505" width="360" height="225" rx="38" fill="url(#screen)" stroke="#FFC0AC" stroke-width="12"/>
+<path d="M420 548 H780" stroke="#496176" stroke-width="8"/>
+<circle cx="458" cy="527" r="9" fill="#FF8C70"/>
+<circle cx="488" cy="527" r="9" fill="#F5C36A"/>
+<circle cx="518" cy="527" r="9" fill="#55D6D2"/>
+<g fill="none" stroke="#55D6D2" stroke-width="17" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M500 600 L550 640 L500 680"/>
+  <path d="M590 680 H680"/>
+</g>
+
+<!-- eyes / antennae -->
+<g fill="none" stroke="#FF987C" stroke-width="28" stroke-linecap="round">
+  <path d="M505 445 L485 365"/>
+  <path d="M695 445 L715 365"/>
+</g>
+<g>
+  <circle cx="480" cy="345" r="47" fill="#FF8C70"/>
+  <circle cx="720" cy="345" r="47" fill="#FF8C70"/>
+  <circle cx="480" cy="345" r="25" fill="#F4F1EA"/>
+  <circle cx="720" cy="345" r="25" fill="#F4F1EA"/>
+  <circle cx="488" cy="345" r="13" fill="#122333"/>
+  <circle cx="712" cy="345" r="13" fill="#122333"/>
+</g>
+
+<!-- small side shell plates -->
+<path d="M365 575 Q315 590 330 650 Q350 680 385 675" fill="#F36A4C" stroke="#FFAA91" stroke-width="10"/>
+<path d="M835 575 Q885 590 870 650 Q850 680 815 675" fill="#F36A4C" stroke="#FFAA91" stroke-width="10"/>
+
+<!-- connected agent nodes around the terminal -->
+<g fill="#55D6D2" stroke="#122333" stroke-width="10">
+  <circle cx="315" cy="570" r="28"/>
+  <circle cx="885" cy="570" r="28"/>
+</g>
+<g stroke="#122333" stroke-width="9" stroke-linecap="round">
+  <path d="M304 570 H326 M315 559 V581"/>
+  <path d="M874 570 H896 M885 559 V581"/>
+</g>
+</svg>

@@ -4,6 +4,9 @@
 
 ### Adicionado
 
+- Logo principal do Auri (caranguejo com terminal), com fonte SVG e PNG em
+  `canvas/icons/`, usado no bundle, na página do projeto e no instalador.
+
 - Clique na linha tracejada abre um popover ancorado no ponto clicado com as
   duas pontas da ligação, a indicação bidirecional e o botão de remover.
 - Regressões de UI com dispatch real do GPUI e estado visual `connection-popover`.
@@ -43,6 +46,9 @@
 
 ### Corrigido
 
+- O instalador registra o app com `Exec` absoluto, `TryExec` e ícone no tema
+  `hicolor`, para que Auri apareça na busca do GNOME e do KDE Plasma sem
+  depender de `~/.local/bin` estar no PATH.
 - Trocar de workspace pela barra lateral durante o gesto de conexão não
   cancela mais a ligação, e clicar no cartão ou nota daquele workspace conclui
   a aresta cruzada em vez de criar uma aresta local inválida.

@@ -10,7 +10,7 @@ width = 960
 height = 640
 
 [bundle]
-# A 512x512 placeholder shipped by `auro new`; replace it with the app's own icon.
+# Ícone principal do Auri (ver também icons/auri-logo.svg).
 icon = ["icons/icon.png"]
 
 [updater]

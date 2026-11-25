@@ -1,3 +1,5 @@
+<img src="canvas/icons/icon.png" alt="Logo do Auri" width="128">
+
 # Auri
 
 **Canvas desktop para agentes CLI, terminais e notas conectados pelo usuário.**

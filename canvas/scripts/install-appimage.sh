@@ -96,6 +96,12 @@ local_or_url() {
     esac
 }
 
+if [[ -n "$icon" ]]; then
+    icon_source="$icon"
+    icon="$tmp/icon"
+    local_or_url "$icon_source" "$icon"
+fi
+
 manifest_field() {
     jq -r "$2 // empty" "$1"
 }
@@ -166,11 +172,16 @@ install_exec() {
 }
 
 install_desktop() {
-    local apps="$data_dir/applications" icon_name='' safe_name
-    mkdir -p "$apps" "$data_dir/icons"
+    local apps="$data_dir/applications" icon_name='' safe_name icons_root
+    mkdir -p "$apps"
     if [[ -n "$icon" ]]; then
-        icon_name="${exec_name}.png"
-        install -m 0644 "$tmp/icon" "$data_dir/icons/$icon_name"
+        icon_name="$exec_name"
+        icons_root="$data_dir/icons/hicolor/512x512/apps"
+        mkdir -p "$icons_root"
+        install -m 0644 "$tmp/icon" "$icons_root/$icon_name.png"
+        if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+            gtk-update-icon-cache -q -f -t "$data_dir/icons/hicolor" >/dev/null 2>&1 || true
+        fi
     fi
     safe_name="$(printf '%s' "$name" | tr '\n\r\t' '   ' | cut -c1-128)"
     cat > "$apps/${exec_name}.desktop.tmp.$$" <<EOF
@@ -178,10 +189,12 @@ install_desktop() {
 Type=Application
 Name=$safe_name
 Comment=$safe_name — AppImage
-Exec=$exec_name
+TryExec=$install_dir/$exec_name
+Exec="$install_dir/$exec_name"
 Icon=${icon_name:-$exec_name}
 Terminal=false
-Categories=Utility;Development;
+Categories=Development;
+Keywords=AppImage;Canvas;Agentes;
 StartupNotify=true
 EOF
     mv -f "$apps/${exec_name}.desktop.tmp.$$" "$apps/${exec_name}.desktop"
@@ -246,7 +259,7 @@ if [[ -z "$source" ]]; then
         cli_file="$tmp/cli"
     fi
 
-    if [[ -n "$icon_url" ]] && curl -fL -o "$tmp/icon" "$icon_url" 2>/dev/null; then
+    if [[ -z "$icon" && -n "$icon_url" ]] && curl -fL -o "$tmp/icon" "$icon_url" 2>/dev/null; then
         icon="$tmp/icon"
     else
         warn "ícone não disponível na release; entrada .desktop usará o nome do app"
