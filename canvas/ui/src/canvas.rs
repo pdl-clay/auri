@@ -490,7 +490,8 @@ fn proxy_cards(
             .and_then(|item| item.canvas.proxy_position(&key));
         let centre = stored.unwrap_or(ProxyPlacement {
             x: bounds.x + bounds.width * 0.5,
-            y: bounds.y + bounds.height * 0.5,
+            y: (bounds.y - PROXY_CARD_HEIGHT * 0.5 - PROXY_CARD_GAP)
+                .max(PROXY_CARD_HEIGHT * 0.5 + SPACE_NORMAL),
         });
         let stage_centre = Point::new(
             px(centre.x * zoom + offset_x),
@@ -503,10 +504,10 @@ fn proxy_cards(
             target,
             centre,
             bounds: CardBounds {
-                x: f32::from(stage_centre.x) - PROXY_CARD_WIDTH * 0.5,
-                y: f32::from(stage_centre.y) - PROXY_CARD_HEIGHT * 0.5,
-                width: PROXY_CARD_WIDTH,
-                height: PROXY_CARD_HEIGHT,
+                x: f32::from(stage_centre.x) - PROXY_CARD_WIDTH * zoom * 0.5,
+                y: f32::from(stage_centre.y) - PROXY_CARD_HEIGHT * zoom * 0.5,
+                width: PROXY_CARD_WIDTH * zoom,
+                height: PROXY_CARD_HEIGHT * zoom,
             },
         });
     }
@@ -2749,35 +2750,19 @@ impl Canvas {
     }
 
     /// Start an edge from the selected card or note. The island never starts one itself.
-    /// Only an administrator agent source gets the cross-workspace step.
+    /// The human owns the gesture, so any selected card or note can cross workspaces.
     pub fn begin_connect(&mut self, source: ConnectionTarget, cx: &mut Context<Self>) {
         if self.connecting_from == Some(source) {
             return;
         }
         start_connect(&mut self.connecting_from, source);
-        self.cross_connect = self
-            .store
-            .active()
-            .filter(|active| self.source_is_admin_in(*active, source))
-            .map(|owner| ConnectSource { owner });
+        self.cross_connect = self.store.active().map(|owner| ConnectSource { owner });
         self.placing = false;
         self.placing_text = false;
         cx.notify();
         self.sync_connect_mode(cx);
     }
 
-    /// Admin check against the workspace that actually owns the source card.
-    fn source_is_admin_in(&self, workspace_id: WorkspaceId, source: ConnectionTarget) -> bool {
-        let ConnectionTarget::Card(id) = source else {
-            return false;
-        };
-        self.store
-            .workspaces()
-            .iter()
-            .find(|item| item.id == workspace_id)
-            .and_then(|workspace| workspace.canvas.agent(id))
-            .is_some_and(|agent| agent.admin)
-    }
 
     /// Right-click on a card or note: show the same gesture as the island bolt.
     pub fn open_connect_menu(
@@ -2813,9 +2798,9 @@ impl Canvas {
     /// A second click either inserts one bidirectional edge or is a no-op.
     /// Both paths leave connection mode and clear the captured source.
     pub fn complete_connect(&mut self, target: ConnectionTarget, cx: &mut Context<Self>) {
-        // After the drawer switches workspace, a click on the real card must
-        // finish the cross edge. Only an admin gesture captures a source
-        // workspace; local gestures keep the original single-workspace path.
+        // After the drawer switches workspace, a click on the real card finishes
+        // the cross edge; a gesture that stayed in its own workspace takes the
+        // original local path.
         if let Some(source) = self.cross_connect
             && let Some(active) = self.store.active()
             && active != source.owner
@@ -2857,8 +2842,7 @@ impl Canvas {
         };
         let source_workspace = gesture.owner;
         let valid = source_workspace != workspace_id
-            && self.store.workspaces().iter().any(|item| item.id == workspace_id)
-            && self.source_is_admin_in(source_workspace, from);
+            && self.store.workspaces().iter().any(|item| item.id == workspace_id);
         if !valid {
             self.cancel_connect(cx);
             return;
@@ -2892,10 +2876,9 @@ impl Canvas {
         }
     }
 
-    /// A drawer activation changes the active workspace, but the cross gesture
-    /// keeps the source captured at start time. The activated workspace becomes
-    /// the target by simply being active. A normal agent has no captured source
-    /// workspace, so moving away from its source cancels the gesture.
+    /// A drawer activation changes the active workspace, but the gesture keeps
+    /// the source captured at start time. The activated workspace is the target;
+    /// a gesture with no captured source workspace is abandoned.
     fn cancel_connect_for_activation(&mut self, id: WorkspaceId, cx: &mut Context<Self>) {
         self.connection_popover = None;
         if self.store.active().is_some_and(|active| active != id) {
@@ -4592,8 +4575,8 @@ impl Render for Canvas {
                         proxy.edge == edge && proxy.workspace == workspace_id && proxy.target == target
                     }) {
                         return Some(Point::new(
-                            px(proxy.bounds.x + PROXY_CARD_WIDTH * 0.5),
-                            px(proxy.bounds.y + PROXY_CARD_HEIGHT * 0.5),
+                            px(proxy.bounds.x + proxy.bounds.width * 0.5),
+                            px(proxy.bounds.y + proxy.bounds.height * 0.5),
                         ));
                     }
                 }
@@ -4829,12 +4812,12 @@ impl Render for Canvas {
                         .absolute()
                         .left(px(proxy.bounds.x))
                         .top(px(proxy.bounds.y))
-                        .w(px(PROXY_CARD_WIDTH))
-                        .h(px(PROXY_CARD_HEIGHT))
+                        .w(px(proxy.bounds.width))
+                        .h(px(proxy.bounds.height))
                         .flex()
                         .items_center()
-                        .gap(px(PROXY_CARD_GAP))
-                        .px(px(PROXY_CARD_PADDING))
+                        .gap(px(PROXY_CARD_GAP * zoom))
+                        .px(px(PROXY_CARD_PADDING * zoom))
                         .rounded(px(PROXY_CARD_RADIUS))
                         .bg(rgb(COLOR_ELEVATED))
                         .border_1()
@@ -4872,8 +4855,8 @@ impl Render for Canvas {
                         .child(
                             svg()
                                 .path(end.icon)
-                                .w(px(PROXY_CARD_ICON_SIZE))
-                                .h(px(PROXY_CARD_ICON_SIZE))
+                                .w(px(PROXY_CARD_ICON_SIZE * zoom))
+                                .h(px(PROXY_CARD_ICON_SIZE * zoom))
                                 .text_color(rgb(end.color)),
                         )
                         .child(
@@ -4881,10 +4864,10 @@ impl Render for Canvas {
                                 .flex()
                                 .flex_col()
                                 .gap(px(SPACE_TIGHT))
-                                .child(div().text_size(px(FONT_PROXY_NAME)).child(end.name))
+                                .child(div().text_size(px(FONT_PROXY_NAME * zoom)).child(end.name))
                                 .child(
                                     div()
-                                        .text_size(px(FONT_PROXY_SUBTITLE))
+                                        .text_size(px(FONT_PROXY_SUBTITLE * zoom))
                                         .text_color(rgb(COLOR_PROXY_SUBTITLE))
                                         .child(workspace.name.clone()),
                                 ),
@@ -4976,9 +4959,9 @@ impl Render for Canvas {
                                             // continues behind it, but the proxy is not a control.
                                             if proxy_hits.iter().any(|proxy| {
                                                 stage_x >= proxy.bounds.x
-                                                    && stage_x <= proxy.bounds.x + PROXY_CARD_WIDTH
+                                                    && stage_x <= proxy.bounds.x + proxy.bounds.width
                                                     && y >= proxy.bounds.y
-                                                    && y <= proxy.bounds.y + PROXY_CARD_HEIGHT
+                                                    && y <= proxy.bounds.y + proxy.bounds.height
                                             }) {
                                                 return;
                                             }
@@ -7859,6 +7842,36 @@ pub(crate) mod test_support {
                     .count()
             })
             .sum()
+    }
+
+    /// Default proxy geometry derived from the store, before any user drag.
+    pub(crate) fn proxy_centres(
+        canvas: &Canvas,
+        cx: &App,
+    ) -> Vec<(WorkspaceId, ConnectionTarget, ProxyPlacement)> {
+        let Some(active) = canvas.store.active() else {
+            return Vec::new();
+        };
+        let edges = visible_edges(&canvas.store, active);
+        proxy_cards(
+            canvas,
+            &canvas.store,
+            active,
+            &edges,
+            canvas.zoom,
+            canvas.offset_x,
+            canvas.offset_y,
+            cx,
+        )
+        .into_iter()
+        .map(|proxy| (proxy.workspace, proxy.target, proxy.centre))
+        .collect()
+    }
+
+    /// Change only the zoom level, keeping the pan offset stable.
+    pub(crate) fn set_zoom(canvas: &mut Canvas, zoom: f32, cx: &mut Context<Canvas>) {
+        let (offset_x, offset_y) = (canvas.offset_x, canvas.offset_y);
+        canvas.set_viewport(zoom, offset_x, offset_y, cx);
     }
 
     /// Activate a workspace without rebuilding its PTYs: rendering proxies only

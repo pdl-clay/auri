@@ -22,8 +22,9 @@ shows the relationship and a pulse when a signal passes.
 
 - A connection may cross workspace boundaries. Agents, terminals and notes can
   be endpoints.
-- Only an **administrator** can create a cross-workspace connection. A normal
-  agent cannot open the picker or connect itself.
+- The human owns the UI gesture: any selected agent, terminal or note can start
+  a cross-workspace connection. CLI requests still need a stored edge and the
+  normal permission matrix.
 - The creation gesture is the existing one: press the island's bolt, or
   right-click a card and press `Conectar`, then choose another workspace and an
   item inside it.
@@ -53,17 +54,17 @@ These are mine, not decisions the user confirmed:
    workspaces filter the same stored edge to render their side of it.
 3. **Removal authority.** The user removes the edge from the rope popover in
    either workspace; there is no `auri connect` or `auri disconnect` CLI verb.
-   Adding an edge remains a canvas gesture owned by the user, gated on the
-   initiating agent being an administrator.
+   Adding an edge remains a canvas gesture owned by the human; the source
+   card's CLI role does not gate it.
 4. **Auto-load failure.** If the target workspace cannot be loaded, the request
    fails with a typed error to the sender; no half-open connection is staged.
 5. **Proxy inertness.** The proxy card has no click, hover action, focus target
    or selection state. This is a deliberate exception to the usual rule that a
    visible control should respond.
-6. **Admin gate.** The cross-workspace option appears only when the selected
-   source is an **administrator agent card**. The human is trusted, but the UI
-   gate follows the source card's role; plain terminals and normal agents can
-   be targets but cannot start a cross-workspace edge.
+6. **No UI admin gate.** The drawer is the workspace selector for any selected
+   source. Administrator remains a CLI permission, not a requirement to draw
+   an edge. A cross edge is refused only when it would point at the source
+   workspace itself or at a workspace that no longer exists.
 7. **Auto-load semantics.** Load-on-demand does **not** switch the active
    workspace. It creates the target workspace's live PTYs in the background,
    waits for their writers to be registered, then delivers the bytes. Agents
@@ -83,7 +84,7 @@ These are mine, not decisions the user confirmed:
 
 ## Goals
 
-1. An admin can connect a local agent/terminal/note to an item in another
+1. Any selected agent, terminal or note can connect to an item in another
    workspace using the existing UI gesture.
 2. Connected endpoints can exchange `auri ask` messages in both directions,
    including normal agents on either side.

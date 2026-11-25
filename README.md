@@ -52,6 +52,20 @@ cargo run --release
 auro dev --dir canvas
 ```
 
+## Instalação no Linux (release estável)
+
+```bash
+curl -fLO https://github.com/pdl-clay/auri/releases/latest/download/install-appimage.sh
+chmod +x install-appimage.sh
+./install-appimage.sh
+```
+
+O script verifica a assinatura Ed25519 dos manifestos com a chave pública
+fixada em `Auro.toml`, confere tamanho e SHA-256, e instala o AppImage como
+`~/.local/bin/auri-canvas`, o CLI `auri` como `~/.local/bin/auri` e uma entrada
+no menu do desktop. Use `--help` para instalar um AppImage arbitrário ou
+escolher outro diretório.
+
 O estado fica em `$XDG_CONFIG_HOME/auro-canvas/workspaces.json`
 (padrão: `~/.config/auro-canvas/workspaces.json`). A primeira vez o canvas
 abre sem nada carregado; clique no espaço de trabalho na lateral para carregar

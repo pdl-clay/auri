@@ -767,11 +767,10 @@ fn cross_workspace_store(with_edge: bool) -> WorkspaceStore {
     serde_json::from_str(&json).expect("cross-workspace fixture")
 }
 
-/// The cross-workspace gesture must follow the source card's role: a normal
-/// agent keeps the old local-only gesture; an administrator captures its source
-/// workspace so a drawer switch can target another workspace.
+/// The human owns the gesture: any selected card, admin or not, can follow the
+/// drawer into another workspace and become a cross-workspace source.
 #[test]
-fn cross_workspace_gesture_requires_an_admin_source() {
+fn cross_workspace_gesture_is_available_to_any_selected_card() {
     use auro::gpui::Modifiers;
 
     use crate::canvas::Canvas;
@@ -787,7 +786,7 @@ fn cross_workspace_gesture_requires_an_admin_source() {
             None,
             cx,
         );
-        canvas.select(1, 2, cx);
+        canvas.select(1, 2, cx); // "Helper" is a normal agent
         canvas
     });
     vcx.run_until_parked();
@@ -799,43 +798,45 @@ fn cross_workspace_gesture_requires_an_admin_source() {
     vcx.run_until_parked();
     assert_eq!(
         vcx.read(|cx| test_support::connect_state(view.read(cx)).0),
-        Some(ConnectionTarget::Card(2)),
-        "the normal agent still starts the ordinary gesture"
-    );
-    assert!(
-        !vcx.read(|cx| test_support::cross_connect_open(view.read(cx))),
-        "a normal agent must not capture a cross-workspace source"
-    );
-    assert!(
-        vcx.debug_bounds("connection-workspace-picker").is_none(),
-        "there is no second workspace picker anywhere"
-    );
-
-    vcx.update(|_, cx| {
-        view.update(cx, |canvas, cx| {
-            canvas.cancel_connect(cx);
-            canvas.select(1, 1, cx);
-        })
-    });
-    vcx.run_until_parked();
-    let bolt = vcx
-        .debug_bounds("island-connect")
-        .expect("the admin card exposes the bolt");
-    vcx.simulate_click(bolt.center(), Modifiers::none());
-    vcx.run_until_parked();
-    assert_eq!(
-        vcx.read(|cx| test_support::connect_state(view.read(cx)).0),
-        Some(ConnectionTarget::Card(1)),
-        "the admin card starts the same gesture"
+        Some(ConnectionTarget::Card(2))
     );
     assert!(
         vcx.read(|cx| test_support::cross_connect_open(view.read(cx))),
-        "only an administrator source may cross into another workspace"
+        "a normal agent can start a cross-workspace gesture"
     );
     assert!(
         vcx.debug_bounds("connection-workspace-picker").is_none(),
         "the drawer is the only workspace selector"
     );
+
+    vcx.update(|window, cx| {
+        view.update(cx, |canvas, cx| {
+            test_support::activate_via_drawer(canvas, 2, window, cx)
+        })
+    });
+    vcx.run_until_parked();
+    assert!(
+        vcx.read(|cx| test_support::cross_connect_open(view.read(cx))),
+        "switching workspace must keep the gesture alive for a normal agent"
+    );
+
+    vcx.update(|_, cx| {
+        view.update(cx, |canvas, cx| {
+            canvas.complete_connect(ConnectionTarget::Card(4), cx)
+        })
+    });
+    vcx.run_until_parked();
+    assert!(
+        vcx.read(|cx| test_support::cross_connected(
+            view.read(cx),
+            1,
+            ConnectionTarget::Card(2),
+            2,
+            ConnectionTarget::Card(4)
+        )),
+        "the click must store a workspace-qualified edge from the normal agent"
+    );
+    assert_eq!(vcx.read(|cx| test_support::cross_edge_count(view.read(cx))), 1);
 }
 
 #[test]
@@ -1255,6 +1256,83 @@ fn proxy_does_not_steal_clicks_from_an_overlapping_card() {
     assert_eq!(vcx.read(|cx| test_support::cross_edge_count(view.read(cx))), 1);
 }
 
+/// A proxy centred on a large remote card would be painted underneath it and
+/// never seen. The default position must sit just outside that card.
+#[test]
+fn proxy_default_position_sits_outside_the_remote_card() {
+    use crate::canvas::Canvas;
+    use crate::config::LoadOutcome;
+
+    let mut cx = cross_test_cx();
+    let store = cross_workspace_store(true);
+    let (view, vcx) = cx.add_window_view(|window, cx| {
+        Canvas::new(
+            store.clone(),
+            LoadOutcome::Fresh,
+            window.window_handle(),
+            None,
+            cx,
+        )
+    });
+    vcx.run_until_parked();
+
+    let proxies = vcx.read(|cx| test_support::proxy_centres(view.read(cx), cx));
+    let (_, _, centre) = proxies
+        .iter()
+        .find(|(workspace, _, _)| *workspace == 2)
+        .expect("Auri renders a proxy for the Auro agent");
+    let remote = store
+        .workspaces()
+        .iter()
+        .find(|workspace| workspace.id == 2)
+        .and_then(|workspace| workspace.canvas.agent(4))
+        .expect("remote agent");
+    assert!(
+        centre.y + crate::theme::PROXY_CARD_HEIGHT * 0.5 <= remote.bounds.y,
+        "the proxy must sit above the remote card, not be hidden behind it: {centre:?} vs {:?}",
+        remote.bounds
+    );
+}
+
+#[test]
+fn proxy_scales_with_zoom_like_other_cards() {
+    use crate::canvas::Canvas;
+    use crate::config::LoadOutcome;
+
+    let mut cx = cross_test_cx();
+    let store = cross_workspace_store(true);
+    let (view, vcx) = cx.add_window_view(|window, cx| {
+        Canvas::new(
+            store.clone(),
+            LoadOutcome::Fresh,
+            window.window_handle(),
+            None,
+            cx,
+        )
+    });
+    vcx.run_until_parked();
+
+    let full = vcx
+        .debug_bounds("proxy-card-2-c4")
+        .expect("proxy at 100% zoom")
+        .size
+        .width;
+    vcx.update(|_, cx| {
+        view.update(cx, |canvas, cx| test_support::set_zoom(canvas, 0.5, cx))
+    });
+    vcx.run_until_parked();
+    let half = vcx
+        .debug_bounds("proxy-card-2-c4")
+        .expect("proxy at 50% zoom")
+        .size
+        .width;
+    let ratio = f32::from(half) / f32::from(full);
+    assert!(
+        (ratio - 0.5).abs() < 0.02,
+        "the proxy must scale like terminals and agents: full={full:?} half={half:?} ratio={ratio}"
+    );
+}
+
 /// Cancelling after the cross gesture followed the user into another workspace
 /// must clear the source card there, not only the now-active workspace.
 #[test]
@@ -1468,9 +1546,10 @@ fn proxy_card_moves_when_dragged() {
     let moved = vcx
         .read(|cx| test_support::proxy_position(view.read(cx), 1, "2:c4"))
         .expect("the drag stores the proxy centre on the viewing workspace");
+    let drawer_width = vcx.read(|cx| test_support::drawer_width(view.read(cx), cx));
     assert!(
-        moved.x > 840.0 && moved.y > 430.0,
-        "the proxy must follow the drag: moved={moved:?}"
+        moved.x > before_x - drawer_width + 100.0 && moved.y > before_y + 60.0,
+        "the proxy must follow the drag: stage=({before_x:?} - {drawer_width}, {before_y}) moved={moved:?}"
     );
     assert_eq!(
         vcx.read(|cx| test_support::cross_edge_count(view.read(cx))),

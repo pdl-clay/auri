@@ -17,4 +17,4 @@ icon = ["icons/icon.png"]
 provider = "github"
 repository = "pdl-clay/auri"
 public-key = "d+Ltt6kOIF9kp5raaYtZTOEnZ1r3NjJr/D+UE8vKUi8="
-include-prereleases = true
+include-prereleases = false

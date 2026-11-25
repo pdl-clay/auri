@@ -16,6 +16,15 @@ itens só entram quando eu preciso deles ou quando alguém contribui.
 - Renderer de terminal com cache por linha e damage tracking.
 - Suítes de regressão de código e visual (goldens).
 
+## v0.1.1 — entregue
+
+- Conexões entre workspaces com proxy na ponta remota, endereços `id@workspace`
+  no CLI e carregamento do workspace remoto sob demanda.
+- Popover da aresta, scrollback nos terminais e skill instalada automaticamente.
+- Atualização automática via GitHub Releases com manifesto assinado e canal
+  apenas de releases estáveis.
+- Instalador de AppImage com verificação de assinatura e SHA-256.
+
 ## Em consideração (sem prazo)
 
 - Nome persistido para notas e endereçamento mais estável no CLI.
@@ -27,7 +36,7 @@ itens só entram quando eu preciso deles ou quando alguém contribui.
 - Suportar nomes/caminhos com caracteres de controle em todos os pontos de
   entrada.
 - Adaptador MCP opcional sobre o mesmo CLI (não é prioridade).
-- Conexões entre workspaces e alcance transitório (não planejado para já).
+- Alcance transitório entre workspaces (não planejado para já).
 - Suporte explícito a macOS/Windows (o transporte hoje é Unix socket).
 
 ## Fora de escopo por decisão

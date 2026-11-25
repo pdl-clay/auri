@@ -1,6 +1,6 @@
 # Changelog
 
-## [Não publicado]
+## [v0.1.1] — 2026-11-25
 
 ### Adicionado
 
@@ -14,19 +14,24 @@
   `Conectar`, equivalente ao raio da ilha.
 - Atualização automática via GitHub Releases com o canal `GithubChannel` do
   Auro 0.1.0-alpha.15: manifest assinado verificado antes do download, staging,
-  apply de AppImage e restart helper. `include-prereleases = true` permite o
-  canal de teste; a chave privada de release fica fora do repositório e a
-  pública vai em `Auro.toml`. O estado fica em `$XDG_STATE_HOME/auri` (0700).
+  apply de AppImage e restart helper. O canal segue apenas releases estáveis
+  (`include-prereleases = false`); a chave privada de release fica fora do
+  repositório e a pública vai em `Auro.toml`. O estado fica em
+  `$XDG_STATE_HOME/auri` (0700).
+- Script `canvas/scripts/install-appimage.sh`: instala a release estável mais
+  recente, verificando a assinatura Ed25519 do manifesto Auro, o SHA-256 e o
+  tamanho de cada artefato antes de copiar o AppImage e o CLI para
+  `~/.local/bin`, com entrada `.desktop` e ícone. Também aceita um AppImage
+  local ou URL com `--manifest`/`--sha256`.
 - A skill `auri` agora é instalada automaticamente em `~/.agents/skills/auri/`
   (e em `~/.claude/skills/` quando essa pasta já existe), além da cópia em
   cache usada via `AURI_SKILL`. Cópias gerenciadas são atualizadas no startup;
   uma skill escrita pelo usuário nunca é sobrescrita.
-- Conexões entre workspaces: um administrador inicia o gesto no cartão de
-  origem, troca de workspace pela barra lateral e clica no cartão ou nota de
-  destino; a aresta fica qualificada pelos ids dos dois workspaces e aparece
-  como proxy na ponta remota. O proxy pode ser arrastado como uma janela e sua
-  posição fica salva no workspace que o exibe. A rope mostra os dois lados e o
-  popover remove a aresta de ambos.
+- Conexões entre workspaces: selecione a origem, troque de workspace pela barra
+  lateral e clique no cartão ou nota de destino; a aresta fica qualificada
+  pelos ids dos dois workspaces e aparece como proxy na ponta remota. O proxy
+  pode ser arrastado como uma janela e sua posição fica salva no workspace que
+  o exibe. A rope mostra os dois lados e o popover remove a aresta de ambos.
 - `auri list`, `auri ask` e `auri check` aceitam endereços `id@workspace` ou
   `id@id-do-workspace`. O acesso exige a aresta desenhada, e o ask-back usa o
   remetente qualificado do envelope. Renomear um workspace preserva as arestas
@@ -41,6 +46,15 @@
 - Trocar de workspace pela barra lateral durante o gesto de conexão não
   cancela mais a ligação, e clicar no cartão ou nota daquele workspace conclui
   a aresta cruzada em vez de criar uma aresta local inválida.
+- Qualquer cartão selecionado — agente normal, administrador, terminal ou nota —
+  pode iniciar uma conexão entre workspaces; o papel de admin continua valendo
+  apenas para comandos CLI.
+- O proxy da ponta remota fica logo acima do cartão remoto em vez de ser pintado
+  atrás dele, e aparece visível mesmo quando os cartões das duas workspaces
+  ocupam a mesma posição.
+- O card proxy agora tem tamanho lógico fixo como os demais cartões e escala
+  junto com o zoom, em vez de manter 240px na tela e parecer maior ao diminuir
+  o zoom.
 - Cancelar o gesto com um clique no canvas vazio limpa o destaque do cartão de
   origem mesmo quando ele ficou em outro workspace, devolvendo seleção e
   movimento normais.
