@@ -1742,4 +1742,66 @@ mod workspace_tests {
             ConnectionTarget::Note(4),
         ));
     }
+
+    #[test]
+    fn renaming_a_workspace_keeps_cross_edges_bound_to_ids() {
+        let mut store = WorkspaceStore::new();
+        let a = store.add("A".into(), WorkspaceIcon::Star, PathBuf::from("/a"));
+        let b = store.add("B".into(), WorkspaceIcon::Bolt, PathBuf::from("/b"));
+        let edge = Connection {
+            from: ConnectionTarget::Card(1),
+            to: ConnectionTarget::Card(4),
+            from_workspace: Some(a.id),
+            to_workspace: Some(b.id),
+        };
+        store.workspace_mut(a.id).unwrap().canvas.connections.push(edge);
+        store.workspace_mut(b.id).unwrap().update_details(
+            "B renomeado".into(),
+            WorkspaceIcon::Bolt,
+            WorkspaceColor::Brass,
+            PathBuf::from("/b"),
+        );
+
+        assert_eq!(store.workspaces()[1].name, "B renomeado");
+        assert!(store.connected_across(
+            a.id,
+            ConnectionTarget::Card(1),
+            b.id,
+            ConnectionTarget::Card(4),
+        ), "a rename must not detach an edge stored by workspace id");
+        let encoded = serde_json::to_string(&store).expect("renamed store saves");
+        assert!(encoded.contains("\"to_workspace\":2"));
+        assert_eq!(
+            serde_json::from_str::<WorkspaceStore>(&encoded).expect("renamed store reloads"),
+            store
+        );
+    }
+
+    #[test]
+    fn deleting_a_workspace_drops_one_sided_qualified_edges_from_other_workspaces() {
+        let mut store = WorkspaceStore::new();
+        let a = store.add("A".into(), WorkspaceIcon::Star, PathBuf::from("/a"));
+        let b = store.add("B".into(), WorkspaceIcon::Bolt, PathBuf::from("/b"));
+        let c = store.add("C".into(), WorkspaceIcon::Globe, PathBuf::from("/c"));
+        let to_deleted = Connection {
+            from: ConnectionTarget::Card(1),
+            to: ConnectionTarget::Card(2),
+            from_workspace: None,
+            to_workspace: Some(b.id),
+        };
+        let from_deleted = Connection {
+            from: ConnectionTarget::Card(3),
+            to: ConnectionTarget::Note(4),
+            from_workspace: Some(b.id),
+            to_workspace: None,
+        };
+        let local = Connection::local(ConnectionTarget::Card(5), ConnectionTarget::Note(6));
+        store.workspace_mut(a.id).unwrap().canvas.connections.extend([to_deleted, local]);
+        store.workspace_mut(c.id).unwrap().canvas.connections.push(from_deleted);
+
+        assert_eq!(store.remove(b.id).map(|workspace| workspace.id), Some(b.id));
+
+        assert_eq!(store.workspace_mut(a.id).unwrap().canvas.connections(), &[local]);
+        assert!(store.workspace_mut(c.id).unwrap().canvas.connections().is_empty());
+    }
 }

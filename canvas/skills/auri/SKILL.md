@@ -94,6 +94,11 @@ auri note write "7" "<new text>"        # replace the whole note
 auri note edit "7" "<old>" "<new>"      # substring replacement
 ```
 
+`auri list` may also print `note 7 @ workspace` for a connected note in
+another workspace. Those lines are informational only: the note verbs above
+take workspace-local ids, and qualified note verbs do not exist yet. Do not
+pass `7@workspace` to them; ask the user to connect a local note instead.
+
 `auri note create ["text"] [--name N]` and `auri note delete "<note>"` are
 administrator-only and destructive when deleting; use them only when asked.
 

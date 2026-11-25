@@ -7266,6 +7266,56 @@ mod connect_tests {
         );
     }
 
+    /// A connected admin and normal peer exchange real qualified asks; the
+    /// exact envelopes land in the two PTY write buffers, nowhere else.
+    #[test]
+    fn connected_admin_and_peer_exchange_qualified_asks_in_both_directions() {
+        let mut harness = test_support::PeerHarness::new(true, true);
+        assert_eq!(harness.active(), Some(1));
+
+        assert_eq!(
+            harness.run(Request::Ask { target: "2@auro".into(), raw: b"ping".to_vec() }),
+            Response::Ok(String::new())
+        );
+        assert_eq!(harness.written(), "auri from Writer <1@auri>\nping\r");
+        assert_eq!(
+            harness.run_as_peer(Request::Ask { target: "1@auri".into(), raw: b"pong".to_vec() }),
+            Response::Ok(String::new())
+        );
+        assert_eq!(harness.peer_written(), "auri from Leitor <2@auro>\npong\r");
+        assert_eq!(harness.active(), Some(1), "cross-workspace asks keep the active workspace");
+    }
+
+    /// Review Focus: renaming changes the name suffix, not the stored edge or
+    /// the canonical `id@workspace-id` address.
+    #[test]
+    fn renamed_workspace_rejects_its_old_name_but_id_addresses_still_work() {
+        let mut harness = test_support::PeerHarness::new(true, true);
+        harness.rename_peer("Auro Novo");
+
+        assert_eq!(
+            harness.run(Request::Ask { target: "2@auro".into(), raw: b"ping".to_vec() }),
+            Response::Err("unknown_target".into())
+        );
+        assert!(harness.written().is_empty(), "the old name must not reach the peer");
+
+        assert_eq!(
+            harness.run(Request::Ask { target: "2@2".into(), raw: b"ping".to_vec() }),
+            Response::Ok(String::new())
+        );
+        assert_eq!(harness.written(), "auri from Writer <1@auri>\nping\r");
+        assert_eq!(
+            harness.run_as_peer(Request::Ask { target: "1@auri".into(), raw: b"pong".to_vec() }),
+            Response::Ok(String::new())
+        );
+        assert!(
+            harness.peer_written().starts_with("auri from Leitor <2@auro novo>\npong\r"),
+            "the ask-back address follows the renamed workspace: {:?}",
+            harness.peer_written()
+        );
+        assert_eq!(harness.active(), Some(1));
+    }
+
     #[test]
     fn local_card_name_containing_at_stays_local() {
         let mut store = WorkspaceStore::new();
@@ -7318,35 +7368,31 @@ mod connect_tests {
         vcx.run_until_parked();
 
         let token = vcx.update(|_, cx| view.update(cx, |canvas, cx| {
-            canvas
-                .spawn_cli_card(1, 3, CardKind::Terminal, Some("echo LOCAL_LINE".into()), cx)
-                .expect("local card");
-            canvas
-                .spawn_cli_card(2, 2, CardKind::Terminal, Some("echo PEER_LINE".into()), cx)
-                .expect("peer card");
+            canvas.spawn_cli_card(1, 3, CardKind::Terminal, None, cx).expect("local card");
+            canvas.spawn_cli_card(2, 2, CardKind::Terminal, None, cx).expect("peer card");
+            // Feed the visible screens synchronously: a real check must read the
+            // peer's emulator, not the caller's, without waiting on a shell.
+            for (workspace, id, line) in [(1, 3, "LOCAL_LINE"), (2, 2, "PEER_LINE")] {
+                let card = canvas
+                    .cards
+                    .get(&workspace)
+                    .and_then(|cards| cards.iter().find(|(card_id, _)| *card_id == id))
+                    .expect("spawned card");
+                card.1
+                    .update(cx, |card, cx| card.terminal.update(cx, |terminal, _| {
+                        terminal.feed_bytes_for_test(line.as_bytes())
+                    }));
+            }
             canvas.registry.issue(1, 1)
         }));
-
-        // The PTY feeds the terminal view asynchronously; poll until its output
-        // is visible instead of assuming one event loop turn is enough.
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let peer = loop {
-            vcx.run_until_parked();
-            let response = vcx.update(|window, cx| view.update(cx, |canvas, cx| {
-                canvas.handle_request(
-                    &token,
-                    Request::Check { target: "2@auro".into(), lines: None },
-                    window,
-                    cx,
-                )
-            }));
-            if matches!(&response, Response::Ok(lines) if lines.contains("PEER_LINE"))
-                || Instant::now() >= deadline
-            {
-                break response;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        };
+        let peer = vcx.update(|window, cx| view.update(cx, |canvas, cx| {
+            canvas.handle_request(
+                &token,
+                Request::Check { target: "2@auro".into(), lines: None },
+                window,
+                cx,
+            )
+        }));
         let Response::Ok(lines) = &peer else {
             panic!("a connected qualified check must read the peer screen: {peer:?}");
         };
@@ -7534,7 +7580,7 @@ mod connect_tests {
         });
         vcx.run_until_parked();
         vcx.update(|_, cx| {
-            view.update(cx, |canvas, cx| {
+            view.update(cx, |canvas, _cx| {
                 canvas.pulse_connection(1, 2, 1, ConnectionTarget::Card(4));
                 canvas.pulse_connection(1, 1, 1, ConnectionTarget::Card(4));
             })
@@ -7613,7 +7659,7 @@ mod admin_toggle_tests {
 
     #[test]
     fn selecting_admin_changes_only_the_form_state() {
-        let (mut workspace, id) = workspace_with_agent();
+        let (workspace, id) = workspace_with_agent();
         let mut form = form_for(&workspace, id);
         let before = form.clone();
 
@@ -8166,6 +8212,22 @@ pub(crate) mod test_support {
 
         pub(crate) fn peer_written(&self) -> String {
             String::from_utf8(self.peer_written.lock().expect("test buffer").clone()).expect("utf8 envelope")
+        }
+
+        pub(crate) fn active(&self) -> Option<WorkspaceId> {
+            self.store.active()
+        }
+
+        pub(crate) fn rename_peer(&mut self, name: &str) {
+            self.store
+                .workspace_mut(2)
+                .expect("peer workspace")
+                .update_details(
+                    name.into(),
+                    WorkspaceIcon::Folder,
+                    WorkspaceColor::Brass,
+                    PathBuf::from("/auro"),
+                );
         }
     }
 

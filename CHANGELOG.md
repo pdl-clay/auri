@@ -21,6 +21,18 @@
   (e em `~/.claude/skills/` quando essa pasta já existe), além da cópia em
   cache usada via `AURI_SKILL`. Cópias gerenciadas são atualizadas no startup;
   uma skill escrita pelo usuário nunca é sobrescrita.
+- Conexões entre workspaces: um administrador escolhe o workspace e o cartão
+  ou nota de destino no canvas; a aresta fica qualificada pelos ids dos dois
+  workspaces e aparece como proxy na ponta remota. A rope mostra os dois lados
+  e o popover remove a aresta de ambos.
+- `auri list`, `auri ask` e `auri check` aceitam endereços `id@workspace` ou
+  `id@id-do-workspace`. O acesso exige a aresta desenhada, e o ask-back usa o
+  remetente qualificado do envelope. Renomear um workspace preserva as arestas
+  (que são ligadas por id); excluí-lo remove as arestas cruzadas dos demais.
+- Atender um ask ou check em workspace ainda não carregado reconstrói os
+  cartões dele em segundo plano sem mudar o workspace ativo.
+- Arestas antigas com `from` inteiro continuam sendo lidas e são regravadas no
+  formato objeto (`from: {"Card": id}`) quando o canvas é salvo novamente.
 
 ### Corrigido
 

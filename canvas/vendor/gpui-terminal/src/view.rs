@@ -873,6 +873,13 @@ impl TerminalView {
         })
     }
 
+    /// Feed bytes straight into the emulator for deterministic tests: no PTY
+    /// thread, timer or executor turn is involved.
+    #[doc(hidden)]
+    pub fn feed_bytes_for_test(&mut self, bytes: &[u8]) {
+        self.state.process_bytes(bytes);
+    }
+
     /// (display_offset, history_size, screen_lines) for the scrollbar thumb.
     pub fn scroll_info(&self) -> (usize, usize, usize) {
         let term = self.state.term_arc();

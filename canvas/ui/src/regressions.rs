@@ -492,7 +492,7 @@ impl auro::gpui::Render for ScrollProbe {
     fn render(
         &mut self,
         _window: &mut auro::gpui::Window,
-        cx: &mut auro::gpui::Context<Self>,
+        _cx: &mut auro::gpui::Context<Self>,
     ) -> impl auro::gpui::IntoElement {
         use auro::gpui::{InteractiveElement, ParentElement, Styled, div};
         let counted = self.wheels.clone();
@@ -509,7 +509,7 @@ impl auro::gpui::Render for ScrollProbe {
 /// canvas's pan handler sitting on an ancestor.
 #[test]
 fn wheel_over_terminal_scrolls_history_not_canvas() {
-    use auro::gpui::{AppContext, InteractiveElement, Modifiers, ParentElement, Point, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase, div, px};
+    use auro::gpui::{AppContext, Modifiers, Point, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase, px};
     use gpui_terminal::{TerminalConfig, TerminalView};
     use std::io::Cursor;
     use std::sync::Arc;
