@@ -75,6 +75,16 @@ impl<'de> Deserialize<'de> for Connection {
 }
 
 impl Connection {
+    /// Build a local edge: both endpoints belong to the workspace storing it.
+    pub fn local(from: ConnectionTarget, to: ConnectionTarget) -> Self {
+        Self {
+            from,
+            to,
+            from_workspace: None,
+            to_workspace: None,
+        }
+    }
+
     /// True when both endpoints are explicitly qualified with different
     /// workspace ids. Unqualified endpoints stay local to the storing workspace.
     pub fn is_cross_workspace(&self) -> bool {
@@ -546,12 +556,7 @@ impl CanvasState {
         if from == to || self.connected_between(from, to) {
             return false;
         }
-        self.connections.push(Connection {
-            from,
-            to,
-            from_workspace: None,
-            to_workspace: None,
-        });
+        self.connections.push(Connection::local(from, to));
         true
     }
 
@@ -1451,6 +1456,9 @@ mod workspace_tests {
         let encoded = serde_json::to_string(&edge).unwrap();
         assert!(!encoded.contains("workspace"));
         assert_eq!(serde_json::from_str::<Connection>(&encoded).unwrap(), edge);
+        let local = Connection::local(ConnectionTarget::Card(1), ConnectionTarget::Note(2));
+        assert_eq!(local, edge);
+        assert_eq!(serde_json::to_string(&local).unwrap(), json);
     }
 
     #[test]
