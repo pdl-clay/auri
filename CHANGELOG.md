@@ -21,10 +21,12 @@
   (e em `~/.claude/skills/` quando essa pasta já existe), além da cópia em
   cache usada via `AURI_SKILL`. Cópias gerenciadas são atualizadas no startup;
   uma skill escrita pelo usuário nunca é sobrescrita.
-- Conexões entre workspaces: um administrador escolhe o workspace e o cartão
-  ou nota de destino no canvas; a aresta fica qualificada pelos ids dos dois
-  workspaces e aparece como proxy na ponta remota. A rope mostra os dois lados
-  e o popover remove a aresta de ambos.
+- Conexões entre workspaces: um administrador inicia o gesto no cartão de
+  origem, troca de workspace pela barra lateral e clica no cartão ou nota de
+  destino; a aresta fica qualificada pelos ids dos dois workspaces e aparece
+  como proxy na ponta remota. O proxy pode ser arrastado como uma janela e sua
+  posição fica salva no workspace que o exibe. A rope mostra os dois lados e o
+  popover remove a aresta de ambos.
 - `auri list`, `auri ask` e `auri check` aceitam endereços `id@workspace` ou
   `id@id-do-workspace`. O acesso exige a aresta desenhada, e o ask-back usa o
   remetente qualificado do envelope. Renomear um workspace preserva as arestas
@@ -36,6 +38,12 @@
 
 ### Corrigido
 
+- Trocar de workspace pela barra lateral durante o gesto de conexão não
+  cancela mais a ligação, e clicar no cartão ou nota daquele workspace conclui
+  a aresta cruzada em vez de criar uma aresta local inválida.
+- Cancelar o gesto com um clique no canvas vazio limpa o destaque do cartão de
+  origem mesmo quando ele ficou em outro workspace, devolvendo seleção e
+  movimento normais.
 - Cabeçalho dos cartões e blocos de nota reduzido para 32px, com alvo do ×
   de 24px e o mesmo tamanho de glifo de antes.
 - Clique no raio da ilha não limpa mais a seleção antes de iniciar a conexão.

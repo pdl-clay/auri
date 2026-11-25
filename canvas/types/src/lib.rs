@@ -4,6 +4,7 @@
 //! the framework-specific entities separately.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 fn default_next_id() -> u64 {
@@ -153,6 +154,13 @@ pub struct CardBounds {
     pub y: f32,
     pub width: f32,
     pub height: f32,
+}
+
+/// World-space centre of a proxy card in the workspace that displays it.
+#[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProxyPlacement {
+    pub x: f32,
+    pub y: f32,
 }
 
 /// Persisted text block: its content and its canvas geometry.
@@ -327,6 +335,10 @@ pub struct CanvasState {
     agents: Vec<AgentState>,
     #[serde(default)]
     connections: Vec<Connection>,
+    /// World-space positions for proxies the user has moved; absent means the
+    /// proxy keeps following the remote endpoint.
+    #[serde(default)]
+    proxy_positions: HashMap<String, ProxyPlacement>,
     #[serde(default)]
     selected: Option<TerminalId>,
     #[serde(default = "default_next_id")]
@@ -355,6 +367,7 @@ impl CanvasState {
             notes: Vec::new(),
             agents: Vec::new(),
             connections: Vec::new(),
+            proxy_positions: HashMap::new(),
             selected: None,
             next_id: 1,
         }
@@ -585,6 +598,19 @@ impl CanvasState {
     /// The stored edges, in insertion order.
     pub fn connections(&self) -> &[Connection] {
         &self.connections
+    }
+
+    pub fn proxy_position(&self, key: &str) -> Option<ProxyPlacement> {
+        self.proxy_positions.get(key).copied()
+    }
+
+    /// Record a user-moved proxy; returns false when it did not move.
+    pub fn set_proxy_position(&mut self, key: String, position: ProxyPlacement) -> bool {
+        if self.proxy_positions.get(&key) == Some(&position) {
+            return false;
+        }
+        self.proxy_positions.insert(key, position);
+        true
     }
 
     /// Add one edge between a card and another card or note. Self edges and

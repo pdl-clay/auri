@@ -290,6 +290,11 @@ impl TerminalCard {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn connect_flags(&self) -> (bool, bool) {
+        (self.connect_mode, self.connect_source)
+    }
+
     /// Attach or replace the agent shown in the card header.
     pub fn set_agent(
         &mut self,

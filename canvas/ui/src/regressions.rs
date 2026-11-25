@@ -722,7 +722,7 @@ fn spawned_cards_open_large() {
     assert!(CARD_HEIGHT >= 540.0, "a new terminal needs room to read: {CARD_HEIGHT}px");
 }
 
-// --- Cross-workspace picker, proxy card and rope removal -------------------
+// --- Cross-workspace gesture, proxy card and rope removal -------------------
 
 fn cross_test_cx() -> auro::gpui::TestAppContext {
     use auro::gpui::TestAppContext;
@@ -767,10 +767,11 @@ fn cross_workspace_store(with_edge: bool) -> WorkspaceStore {
     serde_json::from_str(&json).expect("cross-workspace fixture")
 }
 
-/// The cross-workspace step must follow the source card's role: a normal agent
-/// keeps the old local-only gesture; an administrator gets a workspace picker.
+/// The cross-workspace gesture must follow the source card's role: a normal
+/// agent keeps the old local-only gesture; an administrator captures its source
+/// workspace so a drawer switch can target another workspace.
 #[test]
-fn cross_workspace_picker_is_offered_only_to_an_admin_source() {
+fn cross_workspace_gesture_requires_an_admin_source() {
     use auro::gpui::Modifiers;
 
     use crate::canvas::Canvas;
@@ -802,8 +803,12 @@ fn cross_workspace_picker_is_offered_only_to_an_admin_source() {
         "the normal agent still starts the ordinary gesture"
     );
     assert!(
+        !vcx.read(|cx| test_support::cross_connect_open(view.read(cx))),
+        "a normal agent must not capture a cross-workspace source"
+    );
+    assert!(
         vcx.debug_bounds("connection-workspace-picker").is_none(),
-        "a normal agent must not see the cross-workspace picker"
+        "there is no second workspace picker anywhere"
     );
 
     vcx.update(|_, cx| {
@@ -824,68 +829,12 @@ fn cross_workspace_picker_is_offered_only_to_an_admin_source() {
         "the admin card starts the same gesture"
     );
     assert!(
-        vcx.debug_bounds("connection-workspace-picker").is_some(),
-        "only an administrator source gets the workspace step"
-    );
-}
-
-/// Real dispatch through the picker: workspace first, endpoint second; the
-/// resulting edge is workspace-qualified and leaves connection mode.
-#[test]
-fn picker_chooses_a_workspace_then_an_endpoint() {
-    use auro::gpui::Modifiers;
-
-    use crate::canvas::Canvas;
-    use crate::config::LoadOutcome;
-
-    let mut cx = cross_test_cx();
-    let store = cross_workspace_store(false);
-    let (view, vcx) = cx.add_window_view(|window, cx| {
-        let mut canvas = Canvas::new(
-            store.clone(),
-            LoadOutcome::Fresh,
-            window.window_handle(),
-            None,
-            cx,
-        );
-        canvas.select(1, 1, cx);
-        canvas
-    });
-    vcx.run_until_parked();
-
-    let bolt = vcx.debug_bounds("island-connect").expect("admin bolt");
-    vcx.simulate_click(bolt.center(), Modifiers::none());
-    vcx.run_until_parked();
-    let workspace = vcx
-        .debug_bounds("connection-target-2")
-        .expect("the picker offers Auro as a target workspace");
-    vcx.simulate_click(workspace.center(), Modifiers::none());
-    vcx.run_until_parked();
-    let endpoint = vcx
-        .debug_bounds("connection-endpoint-2-c4")
-        .expect("the workspace step lists Auro's card 4");
-    vcx.simulate_click(endpoint.center(), Modifiers::none());
-    vcx.run_until_parked();
-
-    assert!(
-        vcx.read(|cx| test_support::cross_connected(
-            view.read(cx),
-            1,
-            ConnectionTarget::Card(1),
-            2,
-            ConnectionTarget::Card(4)
-        )),
-        "the picker stores one edge with both workspaces qualified"
-    );
-    assert_eq!(vcx.read(|cx| test_support::cross_edge_count(view.read(cx))), 1);
-    assert_eq!(vcx.read(|cx| test_support::connect_state(view.read(cx)).0), None);
-    assert!(
-        !vcx.read(|cx| test_support::connect_picker_open(view.read(cx))),
-        "choosing the endpoint closes the picker"
+        vcx.read(|cx| test_support::cross_connect_open(view.read(cx))),
+        "only an administrator source may cross into another workspace"
     );
     assert!(
-        vcx.debug_bounds("proxy-card-2-c4").is_some(),
-        "the new edge renders its remote endpoint as a proxy"
+        vcx.debug_bounds("connection-workspace-picker").is_none(),
+        "the drawer is the only workspace selector"
     );
 }
 
@@ -991,7 +940,7 @@ fn clicking_a_proxy_card_changes_nothing() {
             test_support::selection_state(canvas),
             test_support::connect_state(canvas),
             test_support::connection_popover_open(canvas),
-            test_support::connect_picker_open(canvas),
+            test_support::cross_connect_open(canvas),
             test_support::cross_edge_count(canvas),
         )
     });
@@ -1003,13 +952,12 @@ fn clicking_a_proxy_card_changes_nothing() {
             test_support::selection_state(canvas),
             test_support::connect_state(canvas),
             test_support::connection_popover_open(canvas),
-            test_support::connect_picker_open(canvas),
+            test_support::cross_connect_open(canvas),
             test_support::cross_edge_count(canvas),
         )
     });
     assert_eq!(before, after, "the proxy must be completely inert");
     assert!(vcx.debug_bounds("connection-popover").is_none());
-    assert!(vcx.debug_bounds("connection-workspace-picker").is_none());
 }
 
 /// The same stored edge renders a proxy on both sides, and the existing rope
@@ -1130,10 +1078,10 @@ fn overlapping_proxy_store() -> WorkspaceStore {
     serde_json::from_str(json).expect("overlapping-proxy fixture")
 }
 
-/// Activating the target workspace from the drawer while the picker is open
-/// must keep the gesture alive and show that workspace's endpoints.
+/// Activating the target workspace from the drawer is the workspace step: the
+/// gesture stays alive without rendering a second workspace menu.
 #[test]
-fn activation_during_picker_keeps_the_gesture_and_target_workspace() {
+fn drawer_activation_keeps_the_cross_gesture_alive() {
     use auro::gpui::Modifiers;
 
     use crate::canvas::Canvas;
@@ -1164,13 +1112,19 @@ fn activation_during_picker_keeps_the_gesture_and_target_workspace() {
     });
     vcx.run_until_parked();
     assert!(
-        vcx.read(|cx| test_support::connect_picker_open(view.read(cx))),
-        "activation must not close the workspace picker"
+        vcx.read(|cx| test_support::cross_connect_open(view.read(cx))),
+        "activation must not close the cross-workspace gesture"
     );
-    let endpoint = vcx
-        .debug_bounds("connection-endpoint-2-c4")
-        .expect("the activated workspace's endpoints are selectable");
-    vcx.simulate_click(endpoint.center(), Modifiers::none());
+    assert!(
+        vcx.debug_bounds("connection-workspace-picker").is_none(),
+        "the drawer is the only workspace selector"
+    );
+
+    vcx.update(|_, cx| {
+        view.update(cx, |canvas, cx| {
+            canvas.complete_connect(ConnectionTarget::Card(4), cx)
+        })
+    });
     vcx.run_until_parked();
     assert!(
         vcx.read(|cx| test_support::cross_connected(
@@ -1300,3 +1254,228 @@ fn proxy_does_not_steal_clicks_from_an_overlapping_card() {
     assert!(!vcx.read(|cx| test_support::connection_popover_open(view.read(cx))));
     assert_eq!(vcx.read(|cx| test_support::cross_edge_count(view.read(cx))), 1);
 }
+
+/// Cancelling after the cross gesture followed the user into another workspace
+/// must clear the source card there, not only the now-active workspace.
+#[test]
+fn empty_canvas_cancel_clears_a_source_left_in_another_workspace() {
+    use auro::gpui::{Modifiers, MouseButton, Point, px};
+
+    use crate::canvas::Canvas;
+    use crate::config::LoadOutcome;
+
+    let mut cx = cross_test_cx();
+    let store = cross_workspace_store(false);
+    let (view, vcx) = cx.add_window_view(|window, cx| {
+        let mut canvas = Canvas::new(
+            store.clone(),
+            LoadOutcome::Fresh,
+            window.window_handle(),
+            None,
+            cx,
+        );
+        test_support::mount_agent_for_test(&mut canvas, 1, 1, cx);
+        canvas.select(1, 1, cx);
+        canvas
+    });
+    vcx.run_until_parked();
+
+    let bolt = vcx.debug_bounds("island-connect").expect("admin bolt");
+    vcx.simulate_click(bolt.center(), Modifiers::none());
+    vcx.run_until_parked();
+    vcx.update(|window, cx| {
+        view.update(cx, |canvas, cx| test_support::activate_via_drawer(canvas, 2, window, cx))
+    });
+    vcx.run_until_parked();
+
+    vcx.simulate_click(Point::new(px(900.0), px(600.0)), Modifiers::none());
+    vcx.run_until_parked();
+    assert_eq!(
+        vcx.read(|cx| test_support::connect_state(view.read(cx)).0),
+        None,
+        "an empty-canvas press cancels the gesture"
+    );
+
+    vcx.update(|window, cx| {
+        view.update(cx, |canvas, cx| test_support::activate_via_drawer(canvas, 1, window, cx))
+    });
+    vcx.run_until_parked();
+    assert_eq!(
+        vcx.read(|cx| test_support::card_connect_flags(view.read(cx), 1, 1, cx)),
+        Some((false, false)),
+        "returning to the source workspace must clear its connection highlight"
+    );
+    let (drawer_width, before) = vcx.read(|cx| {
+        let canvas = view.read(cx);
+        (
+            test_support::drawer_width(canvas, cx),
+            test_support::agent_bounds(canvas, 1, 1).expect("source card"),
+        )
+    });
+    let grab = Point::new(
+        px(drawer_width + before.x + before.width * 0.5),
+        px(before.y + 16.0),
+    );
+    let grab_x = f32::from(grab.x);
+    let grab_y = f32::from(grab.y);
+    vcx.simulate_mouse_down(grab, MouseButton::Left, Modifiers::none());
+    vcx.run_until_parked();
+    vcx.simulate_mouse_move(
+        Point::new(px(grab_x + 60.0), px(grab_y + 40.0)),
+        Some(MouseButton::Left),
+        Modifiers::none(),
+    );
+    vcx.run_until_parked();
+    vcx.simulate_mouse_move(
+        Point::new(px(grab_x + 120.0), px(grab_y + 80.0)),
+        Some(MouseButton::Left),
+        Modifiers::none(),
+    );
+    vcx.run_until_parked();
+    vcx.simulate_mouse_up(
+        Point::new(px(grab_x + 120.0), px(grab_y + 80.0)),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    vcx.run_until_parked();
+    let after = vcx.read(|cx| test_support::agent_bounds(view.read(cx), 1, 1).unwrap());
+    assert!(
+        after.x > before.x + 50.0 && after.y > before.y + 30.0,
+        "the source card must be movable after the cancel: before={before:?} after={after:?}"
+    );
+}
+
+/// A card in the workspace reached through the drawer must complete the cross
+/// edge, not fall back to a local edge in the newly active workspace.
+#[test]
+fn clicking_the_activated_workspace_card_creates_the_cross_edge() {
+    use auro::gpui::{Modifiers, Point, px};
+
+    use crate::canvas::Canvas;
+    use crate::config::LoadOutcome;
+
+    let mut cx = cross_test_cx();
+    let store = cross_workspace_store(false);
+    let (view, vcx) = cx.add_window_view(|window, cx| {
+        let mut canvas = Canvas::new(
+            store.clone(),
+            LoadOutcome::Fresh,
+            window.window_handle(),
+            None,
+            cx,
+        );
+        test_support::mount_agent_for_test(&mut canvas, 1, 1, cx);
+        test_support::mount_agent_for_test(&mut canvas, 2, 4, cx);
+        canvas.select(1, 1, cx);
+        canvas
+    });
+    vcx.run_until_parked();
+
+    let bolt = vcx.debug_bounds("island-connect").expect("admin bolt");
+    vcx.simulate_click(bolt.center(), Modifiers::none());
+    vcx.run_until_parked();
+    vcx.update(|window, cx| {
+        view.update(cx, |canvas, cx| test_support::activate_via_drawer(canvas, 2, window, cx))
+    });
+    vcx.run_until_parked();
+    assert_eq!(
+        vcx.read(|cx| test_support::card_connect_flags(view.read(cx), 2, 4, cx)),
+        Some((true, false)),
+        "the activated workspace card is armed as a connection target"
+    );
+
+    let (drawer_width, target) = vcx.read(|cx| {
+        let canvas = view.read(cx);
+        (
+            test_support::drawer_width(canvas, cx),
+            test_support::agent_bounds(canvas, 2, 4).expect("target card"),
+        )
+    });
+    vcx.simulate_click(
+        Point::new(
+            px(drawer_width + target.x + target.width * 0.5),
+            px(target.y + 16.0),
+        ),
+        Modifiers::none(),
+    );
+    vcx.run_until_parked();
+
+    assert!(
+        vcx.read(|cx| test_support::cross_connected(
+            view.read(cx),
+            1,
+            ConnectionTarget::Card(1),
+            2,
+            ConnectionTarget::Card(4)
+        )),
+        "the click must create the workspace-qualified edge"
+    );
+    assert!(!vcx.read(|cx| test_support::cross_connect_open(view.read(cx))));
+    assert!(
+        vcx.debug_bounds("proxy-card-1-c1").is_some(),
+        "the new edge shows the source workspace as a proxy"
+    );
+}
+
+/// The proxy is a window-like representation: dragging it moves its persisted
+/// position without touching the edge or either workspace's real cards.
+#[test]
+fn proxy_card_moves_when_dragged() {
+    use auro::gpui::{Modifiers, MouseButton, Point, px};
+
+    use crate::canvas::Canvas;
+    use crate::config::LoadOutcome;
+
+    let mut cx = cross_test_cx();
+    let store = cross_workspace_store(true);
+    let (view, vcx) = cx.add_window_view(|window, cx| {
+        Canvas::new(
+            store.clone(),
+            LoadOutcome::Fresh,
+            window.window_handle(),
+            None,
+            cx,
+        )
+    });
+    vcx.run_until_parked();
+
+    let before = vcx
+        .debug_bounds("proxy-card-2-c4")
+        .expect("proxy for the remote endpoint")
+        .center();
+    let before_x = f32::from(before.x);
+    let before_y = f32::from(before.y);
+    vcx.simulate_mouse_down(before, MouseButton::Left, Modifiers::none());
+    vcx.simulate_mouse_move(
+        Point::new(px(before_x + 70.0), px(before_y + 40.0)),
+        Some(MouseButton::Left),
+        Modifiers::none(),
+    );
+    vcx.run_until_parked();
+    vcx.simulate_mouse_move(
+        Point::new(px(before_x + 140.0), px(before_y + 90.0)),
+        Some(MouseButton::Left),
+        Modifiers::none(),
+    );
+    vcx.run_until_parked();
+    vcx.simulate_mouse_up(
+        Point::new(px(before_x + 140.0), px(before_y + 90.0)),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    vcx.run_until_parked();
+
+    let moved = vcx
+        .read(|cx| test_support::proxy_position(view.read(cx), 1, "2:c4"))
+        .expect("the drag stores the proxy centre on the viewing workspace");
+    assert!(
+        moved.x > 840.0 && moved.y > 430.0,
+        "the proxy must follow the drag: moved={moved:?}"
+    );
+    assert_eq!(
+        vcx.read(|cx| test_support::cross_edge_count(view.read(cx))),
+        1,
+        "moving the proxy never mutates the edge"
+    );
+}
+

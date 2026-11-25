@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use auri_protocol::{Request, Response};
 
 use auro::gpui::{
-    AnyElement, AnyWindowHandle, App, Bounds, ClickEvent, Context, CursorStyle, ElementId, Entity, FocusHandle, Hsla, KeyDownEvent, MouseButton, MouseDownEvent, PathBuilder, Pixels, Point, Render,
+    AnyElement, AnyWindowHandle, App, Bounds, ClickEvent, Context, CursorStyle, DragMoveEvent, ElementId, Entity, FocusHandle, Hsla, KeyDownEvent, MouseButton, MouseDownEvent, PathBuilder, Pixels, Point, Render,
     ScrollWheelEvent, Size, Subscription, WeakEntity, Window, canvas, fill, px, rgb, svg,
 };
 use auro::prelude::*;
@@ -21,7 +21,7 @@ use gpui_component::{
     switch::Switch,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
-use canvas_types::{AgentIcon, AgentKind, AgentState, CardBounds, Connection, ConnectionTarget, NoteState, TerminalId, TerminalState, WorkspaceColor, WorkspaceIcon, WorkspaceId, WorkspaceState, WorkspaceStore};
+use canvas_types::{AgentIcon, AgentKind, AgentState, CardBounds, Connection, ConnectionTarget, NoteState, ProxyPlacement, TerminalId, TerminalState, WorkspaceColor, WorkspaceIcon, WorkspaceId, WorkspaceState, WorkspaceStore};
 
 use crate::card::{TerminalCard, scroll_delta, terminal_grid, write_shared, SharedPtyWriter};
 use crate::text_card::TextCard;
@@ -233,6 +233,7 @@ struct ConnectionPulse {
     reverse: bool,
 }
 
+#[cfg(test)]
 fn connection_edge_matches(edge: &Connection, a: ConnectionTarget, b: ConnectionTarget) -> bool {
     (edge.from == a && edge.to == b) || (edge.from == b && edge.to == a)
 }
@@ -368,22 +369,50 @@ impl VisibleEdge {
     }
 }
 
-/// Workspace step of the connect picker. `owner` is captured when the gesture
-/// starts, so activation changes cannot reattribute its source to another
-/// workspace. `workspace` is the chosen target of the second step.
+/// Captured owner of an administrator's cross-workspace gesture. The target
+/// workspace comes from the drawer, so no second workspace picker exists.
 #[derive(Clone, Copy)]
-struct ConnectPicker {
+struct ConnectSource {
     owner: WorkspaceId,
-    workspace: Option<WorkspaceId>,
 }
 
 /// Stage-local geometry of one remote endpoint's proxy card.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct ProxyCard {
     edge: usize,
+    key: String,
     workspace: WorkspaceId,
     target: ConnectionTarget,
+    /// World-space centre, either the remote card's or the user's stored one.
+    centre: ProxyPlacement,
     bounds: CardBounds,
+}
+
+/// Drag payload for a proxy card; GPUI broadcasts moves by type, so the key
+/// limits each move to the proxy that started it.
+#[derive(Clone)]
+struct ProxyDragToken {
+    key: String,
+}
+
+impl Render for ProxyDragToken {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
+
+struct ProxyDragStart {
+    key: String,
+    pointer: Point<Pixels>,
+    centre: ProxyPlacement,
+    zoom: f32,
+}
+
+fn proxy_key(workspace: WorkspaceId, target: ConnectionTarget) -> String {
+    match target {
+        ConnectionTarget::Card(id) => format!("{workspace}:c{id}"),
+        ConnectionTarget::Note(id) => format!("{workspace}:n{id}"),
+    }
 }
 
 /// Every edge the active canvas can paint. A cross edge is stored once, in its
@@ -453,14 +482,29 @@ fn proxy_cards(
         else {
             continue;
         };
-        let centre = connection_anchor(bounds, zoom, offset_x, offset_y);
+        let key = proxy_key(workspace, target);
+        let stored = store
+            .workspaces()
+            .iter()
+            .find(|item| item.id == active)
+            .and_then(|item| item.canvas.proxy_position(&key));
+        let centre = stored.unwrap_or(ProxyPlacement {
+            x: bounds.x + bounds.width * 0.5,
+            y: bounds.y + bounds.height * 0.5,
+        });
+        let stage_centre = Point::new(
+            px(centre.x * zoom + offset_x),
+            px(centre.y * zoom + offset_y),
+        );
         proxies.push(ProxyCard {
             edge: index,
+            key,
             workspace,
             target,
+            centre,
             bounds: CardBounds {
-                x: f32::from(centre.x) - PROXY_CARD_WIDTH * 0.5,
-                y: f32::from(centre.y) - PROXY_CARD_HEIGHT * 0.5,
+                x: f32::from(stage_centre.x) - PROXY_CARD_WIDTH * 0.5,
+                y: f32::from(stage_centre.y) - PROXY_CARD_HEIGHT * 0.5,
                 width: PROXY_CARD_WIDTH,
                 height: PROXY_CARD_HEIGHT,
             },
@@ -1697,7 +1741,9 @@ pub struct Canvas {
     /// Right-click shortcut for the connect gesture on cards and notes.
     connect_menu: Option<ConnectMenu>,
     /// Workspace step shown only for an administrator source.
-    connect_picker: Option<ConnectPicker>,
+    cross_connect: Option<ConnectSource>,
+    /// In-progress proxy drag; the pointer delta is converted back to world space.
+    proxy_drag: Option<ProxyDragStart>,
     /// Edges painted this frame; the inspector and pulses use the same indices.
     visible_edges: Vec<VisibleEdge>,
     zoom: f32,
@@ -1748,7 +1794,8 @@ impl Canvas {
             edge_hits: Vec::new(),
             pulses: Vec::new(),
             connection_popover: None,
-            connect_picker: None,
+            cross_connect: None,
+            proxy_drag: None,
             visible_edges: Vec::new(),
             offset_x: 0.0,
             offset_y: 0.0,
@@ -2343,10 +2390,15 @@ impl Canvas {
     }
 
     fn persist_store(&mut self, cx: &mut Context<Self>) {
-        self.error = match config::save(&persisted_snapshot(&self.store)) {
-            Ok(()) => None,
-            Err(error) => Some(format!("Não foi possível salvar os espaços: {error}")),
-        };
+        // Unit tests exercise the same gesture paths as the app; letting them
+        // save would overwrite the developer's real workspaces.json.
+        #[cfg(not(test))]
+        {
+            self.error = match config::save(&persisted_snapshot(&self.store)) {
+                Ok(()) => None,
+                Err(error) => Some(format!("Não foi possível salvar os espaços: {error}")),
+            };
+        }
         cx.notify();
     }
 
@@ -2645,36 +2697,39 @@ impl Canvas {
         self.custom_dialog = None;
         cx.notify();
     }
-    /// Mirror connection mode into live cards: crosshair cursor, source
-    /// highlight, and target clicks taking priority over normal selection.
-    /// Deferred because a target click arrives while that card is being updated.
+    /// Mirror connection mode into every loaded card: crosshair cursor,
+    /// source highlight, and target clicks taking priority over normal
+    /// selection. A workspace switch must clear the old source and arm the new
+    /// workspace, so this updates all groups rather than only the active one.
     fn sync_connect_mode(&self, cx: &mut Context<Self>) {
         let connecting = self.connecting_from.is_some();
         let source = self.connecting_from;
-        let cards = self
-            .store
-            .active()
-            .and_then(|id| self.cards.get(&id))
-            .cloned()
-            .unwrap_or_default();
-        let notes = self
-            .store
-            .active()
-            .and_then(|id| self.notes.get(&id))
-            .cloned()
-            .unwrap_or_default();
+        let source_workspace = self.connect_source_workspace();
+        let cards = self.cards.clone();
+        let notes = self.notes.clone();
         cx.defer(move |cx| {
-            for (id, card) in cards {
-                card.update(cx, |card, cx| {
-                    card.set_connect_mode(connecting, Some(ConnectionTarget::Card(id)) == source, cx)
-                });
+            for (workspace_id, group) in cards {
+                for (id, card) in group {
+                    let is_source =
+                        source == Some(ConnectionTarget::Card(id)) && Some(workspace_id) == source_workspace;
+                    card.update(cx, |card, cx| card.set_connect_mode(connecting, is_source, cx))
+                }
             }
-            for (id, note) in notes {
-                note.update(cx, |note, cx| {
-                    note.set_connect_mode(connecting, Some(ConnectionTarget::Note(id)) == source, cx)
-                });
+            for (workspace_id, group) in notes {
+                for (id, note) in group {
+                    let is_source =
+                        source == Some(ConnectionTarget::Note(id)) && Some(workspace_id) == source_workspace;
+                    note.update(cx, |note, cx| note.set_connect_mode(connecting, is_source, cx))
+                }
             }
         });
+    }
+
+    /// The workspace that owns the source endpoint for the current gesture.
+    fn connect_source_workspace(&self) -> Option<WorkspaceId> {
+        self.cross_connect
+            .map(|source| source.owner)
+            .or_else(|| self.store.active())
     }
 
     /// Selection at click time: the island must not act on a stale render-time value.
@@ -2700,11 +2755,11 @@ impl Canvas {
             return;
         }
         start_connect(&mut self.connecting_from, source);
-        self.connect_picker = self
+        self.cross_connect = self
             .store
             .active()
             .filter(|active| self.source_is_admin_in(*active, source))
-            .map(|owner| ConnectPicker { owner, workspace: None });
+            .map(|owner| ConnectSource { owner });
         self.placing = false;
         self.placing_text = false;
         cx.notify();
@@ -2756,12 +2811,22 @@ impl Canvas {
     }
 
     /// A second click either inserts one bidirectional edge or is a no-op.
-    /// Both paths leave connection mode and close the workspace picker.
+    /// Both paths leave connection mode and clear the captured source.
     pub fn complete_connect(&mut self, target: ConnectionTarget, cx: &mut Context<Self>) {
+        // After the drawer switches workspace, a click on the real card must
+        // finish the cross edge. Only an admin gesture captures a source
+        // workspace; local gestures keep the original single-workspace path.
+        if let Some(source) = self.cross_connect
+            && let Some(active) = self.store.active()
+            && active != source.owner
+        {
+            self.complete_cross_connect(active, target, cx);
+            return;
+        }
         let Some((from, to)) = finish_connect(&mut self.connecting_from, target) else {
             return;
         };
-        self.connect_picker = None;
+        self.cross_connect = None;
         let inserted = self
             .store
             .active()
@@ -2775,24 +2840,6 @@ impl Canvas {
         self.sync_connect_mode(cx);
     }
 
-    /// Advance the picker from workspaces to the endpoints inside one of them.
-    pub fn choose_picker_workspace(
-        &mut self,
-        workspace_id: WorkspaceId,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(picker) = self.connect_picker else {
-            return;
-        };
-        let valid = picker.owner != workspace_id
-            && self.store.workspaces().iter().any(|item| item.id == workspace_id);
-        if !valid {
-            return;
-        }
-        self.connect_picker = Some(ConnectPicker { owner: picker.owner, workspace: Some(workspace_id) });
-        cx.notify();
-    }
-
     /// Finish the two-step gesture by storing one edge whose endpoints are
     /// qualified with their workspace ids. Both canvases then render it from
     /// the same record, so removing it updates both sides.
@@ -2802,22 +2849,22 @@ impl Canvas {
         target: ConnectionTarget,
         cx: &mut Context<Self>,
     ) {
-        let Some(picker) = self.connect_picker else {
+        let Some(gesture) = self.cross_connect else {
             return;
         };
-        let Some(source) = self.connecting_from else {
+        let Some(from) = self.connecting_from else {
             return;
         };
-        let source_workspace = picker.owner;
+        let source_workspace = gesture.owner;
         let valid = source_workspace != workspace_id
             && self.store.workspaces().iter().any(|item| item.id == workspace_id)
-            && self.source_is_admin_in(source_workspace, source);
+            && self.source_is_admin_in(source_workspace, from);
         if !valid {
             self.cancel_connect(cx);
             return;
         }
         let edge = Connection {
-            from: source,
+            from,
             to: target,
             from_workspace: Some(source_workspace),
             to_workspace: Some(workspace_id),
@@ -2827,7 +2874,7 @@ impl Canvas {
             .workspace_mut(source_workspace)
             .is_some_and(|workspace| workspace.canvas.connect_qualified(edge));
         self.connecting_from = None;
-        self.connect_picker = None;
+        self.cross_connect = None;
         if inserted {
             self.finish_store_change(cx);
         } else {
@@ -2839,22 +2886,23 @@ impl Canvas {
     /// Escape and empty-canvas clicks both abandon the gesture without saving.
     pub fn cancel_connect(&mut self, cx: &mut Context<Self>) {
         if stop_connect(&mut self.connecting_from) {
-            self.connect_picker = None;
+            self.cross_connect = None;
             cx.notify();
             self.sync_connect_mode(cx);
         }
     }
 
-    /// A drawer activation changes the active workspace, but the picker keeps
-    /// the source captured at start time. Treat the activated workspace as the
-    /// target step instead of throwing the gesture away.
+    /// A drawer activation changes the active workspace, but the cross gesture
+    /// keeps the source captured at start time. The activated workspace becomes
+    /// the target by simply being active. A normal agent has no captured source
+    /// workspace, so moving away from its source cancels the gesture.
     fn cancel_connect_for_activation(&mut self, id: WorkspaceId, cx: &mut Context<Self>) {
         self.connection_popover = None;
         if self.store.active().is_some_and(|active| active != id) {
-            if let Some(picker) = self.connect_picker
-                && picker.owner != id
-            {
-                self.connect_picker = Some(ConnectPicker { owner: picker.owner, workspace: Some(id) });
+            if self.cross_connect.is_some() {
+                self.sync_connect_mode(cx);
+            } else if self.connecting_from.is_some() {
+                self.cancel_connect(cx);
             }
             cx.notify();
         }
@@ -3690,8 +3738,46 @@ impl Canvas {
         }
     }
 
+    /// Move the proxy from the pointer delta, in world units, and keep its
+    /// stored centre on the active workspace canvas.
+    fn drag_proxy(
+        &mut self,
+        key: &str,
+        event: &DragMoveEvent<ProxyDragToken>,
+        cx: &mut Context<Self>,
+    ) {
+        if event.drag(cx).key != key {
+            return;
+        }
+        let Some(start) = self.proxy_drag.as_ref() else {
+            return;
+        };
+        if start.key != key {
+            return;
+        }
+        let (pointer, centre, zoom) =
+            (start.pointer, start.centre, start.zoom.max(0.01));
+        let dx = (f32::from(event.event.position.x) - f32::from(pointer.x)) / zoom;
+        let dy = (f32::from(event.event.position.y) - f32::from(pointer.y)) / zoom;
+        let moved = ProxyPlacement { x: centre.x + dx, y: centre.y + dy };
+        if let Some(workspace_id) = self.store.active()
+            && let Some(workspace) = self.store.workspace_mut(workspace_id)
+            && workspace.canvas.set_proxy_position(key.to_string(), moved)
+        {
+            cx.notify();
+        }
+    }
+
+    fn commit_proxy_drag(&mut self, cx: &mut Context<Self>) {
+        if self.proxy_drag.take().is_some() {
+            self.persist_store(cx);
+            cx.notify();
+        }
+    }
+
     /// Capture every live card, including drags released outside its own bounds.
     fn commit_all_bounds(&mut self, cx: &mut Context<Self>) {
+        let proxy_moved = self.proxy_drag.take().is_some();
 
         for group in self.cards.values() {
             for (_, card) in group {
@@ -3728,7 +3814,7 @@ impl Canvas {
                 changed |= workspace.canvas.set_note_text(id, text);
             }
         }
-        if changed {
+        if changed || proxy_moved {
             self.persist_store(cx);
         }
     }
@@ -3758,6 +3844,7 @@ impl Canvas {
         }
         self.clear_note_selection(cx);
         self.finish_store_change(cx);
+        self.sync_connect_mode(cx);
         cx.notify();
     }
 
@@ -3774,6 +3861,7 @@ impl Canvas {
         let canvas = cx.weak_entity();
         let result = self.rebuild_workspace(id, window, cx, canvas, false);
         self.finish_store_change(cx);
+        self.sync_connect_mode(cx);
         cx.notify();
         result
     }
@@ -4451,7 +4539,6 @@ impl Render for Canvas {
         let proxies = active
             .map(|id| proxy_cards(self, &self.store, id, &visible, zoom, offset_x, offset_y, cx))
             .unwrap_or_default();
-        let connect_picker = self.connect_picker;
         let connection_popover = self.connection_popover.clone().and_then(|menu| {
             let state = |id| self.store.workspaces().iter().find(|workspace| workspace.id == id);
             let from_ws = menu.connection.from_workspace.unwrap_or(menu.owner);
@@ -4712,8 +4799,8 @@ impl Render for Canvas {
             })
             .unwrap_or_default();
 
-        // Proxies are inert render-only siblings: no handlers, no hover, no
-        // focus handle and no selection state. Their rope is the control.
+        // Proxies are window-like representations: a press can drag their
+        // stored centre, but never selects a card or changes the edge.
         let proxy_elements: Vec<_> = proxies
             .iter()
             .filter_map(|proxy| {
@@ -4729,6 +4816,9 @@ impl Render for Canvas {
                     ConnectionTarget::Note(id) => ('n', id),
                 };
                 let key = format!("{kind}{numeric_id}");
+                let drag_key = proxy.key.clone();
+                let start_key = proxy.key.clone();
+                let start_centre = proxy.centre;
                 Some(
                     div()
                         .id(ElementId::named_usize(
@@ -4749,6 +4839,35 @@ impl Render for Canvas {
                         .bg(rgb(COLOR_ELEVATED))
                         .border_1()
                         .border_color(rgb(COLOR_PROXY_BORDER))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                this.proxy_drag = Some(ProxyDragStart {
+                                    key: start_key.clone(),
+                                    pointer: event.position,
+                                    centre: start_centre,
+                                    zoom,
+                                });
+                                cx.stop_propagation();
+                            }),
+                        )
+                        .on_drag(
+                            ProxyDragToken { key: drag_key.clone() },
+                            |token, _, _, cx| cx.new(|_| token.clone()),
+                        )
+                        .on_drag_move(cx.listener(
+                            move |this, event: &DragMoveEvent<ProxyDragToken>, _, cx| {
+                                this.drag_proxy(&drag_key, event, cx)
+                            },
+                        ))
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| this.commit_proxy_drag(cx)),
+                        )
+                        .on_mouse_up_out(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| this.commit_proxy_drag(cx)),
+                        )
                         .text_color(rgb(COLOR_FOREGROUND))
                         .child(
                             svg()
@@ -4773,55 +4892,6 @@ impl Render for Canvas {
                 )
             })
             .collect();
-        let picker_workspaces: Vec<_> = match connect_picker {
-            Some(_) => self
-                .store
-                .workspaces()
-                .iter()
-                .filter(|workspace| Some(workspace.id) != active)
-                .map(|workspace| (workspace.id, workspace.name.clone()))
-                .collect(),
-            None => Vec::new(),
-        };
-        let picker_endpoints: Vec<_> = match connect_picker.and_then(|picker| picker.workspace) {
-            Some(workspace_id) => self
-                .store
-                .workspaces()
-                .iter()
-                .find(|workspace| workspace.id == workspace_id)
-                .map(|workspace| {
-                    workspace
-                        .canvas
-                        .agents()
-                        .iter()
-                        .map(|agent| ConnectionTarget::Card(agent.id))
-                        .chain(
-                            workspace
-                                .canvas
-                                .terminals()
-                                .iter()
-                                .map(|terminal| ConnectionTarget::Card(terminal.id)),
-                        )
-                        .chain(
-                            workspace
-                                .canvas
-                                .notes()
-                                .iter()
-                                .map(|note| ConnectionTarget::Note(note.id)),
-                        )
-                        .map(|target| {
-                            let end = connection_end(&self.store, workspace, target);
-                            let key = match target {
-                                ConnectionTarget::Card(id) => format!("c{id}"),
-                                ConnectionTarget::Note(id) => format!("n{id}"),
-                            };
-                            (workspace_id, key, target, end.name, end.icon, end.color)
-                        })
-                        .collect()
-                })
-                .unwrap_or_default(),
-            None => Vec::new(),
-        };
         let connect_focus = self.connect_focus.clone();
         // Rope hit testing is the only interaction with a proxy; the element
         // itself has no handlers and never occludes a real card above it.
@@ -5652,94 +5722,6 @@ impl Render for Canvas {
                                                         .child("Conectar"),
                                                 ),
                                         ),
-                                )
-                            })
-                            .when_some(connect_picker, |area, picker| {
-                                area.child(
-                                    div()
-                                        .id("connection-workspace-picker")
-                                        .debug_selector(|| "connection-workspace-picker".to_string())
-                                        .absolute()
-                                        .left(px(SPACE_PANEL))
-                                        .top(px(SPACE_PANEL + CONTEXT_MENU_ITEM_HEIGHT + SPACE_NORMAL))
-                                        .w(px(CONTEXT_MENU_WIDTH))
-                                        .flex()
-                                        .flex_col()
-                                        .gap(px(SUBMENU_GAP))
-                                        .p(px(SPACE_TIGHT))
-                                        .rounded(px(RADIUS_CONTROL))
-                                        .bg(rgb(COLOR_ELEVATED))
-                                        .border_1()
-                                        .border_color(rgb(COLOR_BORDER))
-                                        .occlude()
-                                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                                        .when(picker.workspace.is_none(), |panel| {
-                                            panel.children(picker_workspaces.into_iter().map(
-                                                |(id, name)| {
-                                                    div()
-                                                        .id(("connection-target", id))
-                                                        .debug_selector(move || {
-                                                            format!("connection-target-{id}")
-                                                        })
-                                                        .h(px(CONTEXT_MENU_ITEM_HEIGHT))
-                                                        .flex()
-                                                        .items_center()
-                                                        .px(px(SPACE_NORMAL))
-                                                        .rounded(px(RADIUS_CHIP))
-                                                        .hover(|style| style.bg(rgb(COLOR_BORDER)))
-                                                        .on_mouse_down(
-                                                            MouseButton::Left,
-                                                            |_, _, cx| cx.stop_propagation(),
-                                                        )
-                                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                                            this.choose_picker_workspace(id, cx);
-                                                        }))
-                                                        .child(name)
-                                                },
-                                            ))
-                                        })
-                                        .when_some(picker.workspace, |panel, workspace_id| {
-                                            panel.children(
-                                                picker_endpoints
-                                                    .into_iter()
-                                                    .filter(|(id, ..)| *id == workspace_id)
-                                                    .map(|(id, key, target, name, icon, color)| {
-                                                        div()
-                                                            .id(ElementId::named_usize(
-                                                                format!("connection-endpoint-{id}"),
-                                                                match target {
-                                                                    ConnectionTarget::Card(value)
-                                                                    | ConnectionTarget::Note(value) => value as usize,
-                                                                },
-                                                            ))
-                                                            .debug_selector(move || {
-                                                                format!("connection-endpoint-{id}-{key}")
-                                                            })
-                                                            .h(px(CONTEXT_MENU_ITEM_HEIGHT))
-                                                            .flex()
-                                                            .items_center()
-                                                            .gap(px(SPACE_NORMAL))
-                                                            .px(px(SPACE_NORMAL))
-                                                            .rounded(px(RADIUS_CHIP))
-                                                            .hover(|style| style.bg(rgb(COLOR_BORDER)))
-                                                            .on_mouse_down(
-                                                                MouseButton::Left,
-                                                                |_, _, cx| cx.stop_propagation(),
-                                                            )
-                                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                                this.complete_cross_connect(id, target, cx);
-                                                            }))
-                                                            .child(
-                                                                svg()
-                                                                    .path(icon)
-                                                                    .w(px(ICON_SIZE))
-                                                                    .h(px(ICON_SIZE))
-                                                                    .text_color(rgb(color)),
-                                                            )
-                                                            .child(name)
-                                                    }),
-                                            )
-                                        }),
                                 )
                             })
                     ),
@@ -7974,8 +7956,8 @@ pub(crate) mod test_support {
             .unwrap_or_default()
     }
 
-    pub(crate) fn connect_picker_open(canvas: &Canvas) -> bool {
-        canvas.connect_picker.is_some()
+    pub(crate) fn cross_connect_open(canvas: &Canvas) -> bool {
+        canvas.cross_connect.is_some()
     }
 
 
@@ -8317,6 +8299,83 @@ pub(crate) mod test_support {
             .find(|workspace| workspace.id == workspace_id)
             .and_then(|workspace| workspace.canvas.notes().first())
             .map(|note| note.bounds)
+    }
+
+    pub(crate) fn agent_bounds(
+        canvas: &Canvas,
+        workspace_id: WorkspaceId,
+        id: TerminalId,
+    ) -> Option<CardBounds> {
+        canvas
+            .store
+            .workspaces()
+            .iter()
+            .find(|workspace| workspace.id == workspace_id)
+            .and_then(|workspace| workspace.canvas.agent(id))
+            .map(|agent| agent.bounds)
+    }
+
+    pub(crate) fn card_connect_flags(
+        canvas: &Canvas,
+        workspace_id: WorkspaceId,
+        id: TerminalId,
+        cx: &App,
+    ) -> Option<(bool, bool)> {
+        canvas
+            .cards
+            .get(&workspace_id)?
+            .iter()
+            .find(|(card_id, _)| *card_id == id)
+            .map(|(_, card)| card.read(cx).connect_flags())
+    }
+
+    pub(crate) fn proxy_position(
+        canvas: &Canvas,
+        workspace_id: WorkspaceId,
+        key: &str,
+    ) -> Option<ProxyPlacement> {
+        canvas
+            .store
+            .workspaces()
+            .iter()
+            .find(|workspace| workspace.id == workspace_id)
+            .and_then(|workspace| workspace.canvas.proxy_position(key))
+    }
+
+    /// Mount one saved agent with a live shell, without writing config.
+    pub(crate) fn mount_agent_for_test(
+        canvas: &mut Canvas,
+        workspace_id: WorkspaceId,
+        id: TerminalId,
+        cx: &mut Context<Canvas>,
+    ) {
+        let Some(workspace) = canvas
+            .store
+            .workspaces()
+            .iter()
+            .find(|workspace| workspace.id == workspace_id)
+        else {
+            return;
+        };
+        let Some(agent) = workspace.canvas.agent(id) else {
+            return;
+        };
+        let bounds = pixel_bounds(agent.bounds);
+        let root = workspace.root.clone();
+        let (kind, name) = (agent.kind, agent.name.clone());
+        let (cols, rows) = terminal_grid(&bounds);
+        let Ok(pty) = PtySession::spawn_shell_in(cols, rows, Some(&root)) else {
+            return;
+        };
+        let weak = cx.weak_entity();
+        let card = cx.new(|cx| {
+            TerminalCard::new(id, workspace_id, bounds, weak, root, pty, (cols, rows), cx)
+        });
+        card.update(cx, |card, cx| {
+            let icon = resolve_agent_details(&canvas.store, kind).2;
+            card.set_agent(kind, name, icon, cx);
+        });
+        canvas.cards.entry(workspace_id).or_default().push((id, card));
     }
 
 }
