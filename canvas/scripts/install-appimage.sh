@@ -115,8 +115,8 @@ verify_manifest() {
     [[ "$platform" == "$expected" ]] \
         || die "manifesto é para $platform, esta máquina é $expected"
 
-    # Auro assina os campos nesta ordem, sem o campo `signature`.
-    jq -c '{format,version,platform,url,size,sha256,notes,published_at}
+    # Auro assina os campos nesta ordem, sem o campo `signature` e sem nova linha.
+    jq -jc '{format,version,platform,url,size,sha256,notes,published_at}
            + (if has("delta") then {delta} else {} end)
            + (if has("rollout") then {rollout} else {} end)' \
         "$file" > "$tmp/payload.json"
