@@ -1130,10 +1130,10 @@ fn overlapping_proxy_store() -> WorkspaceStore {
     serde_json::from_str(json).expect("overlapping-proxy fixture")
 }
 
-/// Switching workspaces mid-picker must abandon the gesture: the source
-/// workspace is captured when it starts and is no longer active afterwards.
+/// Activating the target workspace from the drawer while the picker is open
+/// must keep the gesture alive and show that workspace's endpoints.
 #[test]
-fn switching_workspace_mid_picker_cancels_the_gesture() {
+fn activation_during_picker_keeps_the_gesture_and_target_workspace() {
     use auro::gpui::Modifiers;
 
     use crate::canvas::Canvas;
@@ -1156,15 +1156,6 @@ fn switching_workspace_mid_picker_cancels_the_gesture() {
     let bolt = vcx.debug_bounds("island-connect").expect("admin bolt");
     vcx.simulate_click(bolt.center(), Modifiers::none());
     vcx.run_until_parked();
-    let workspace = vcx
-        .debug_bounds("connection-target-2")
-        .expect("the picker's workspace step");
-    vcx.simulate_click(workspace.center(), Modifiers::none());
-    vcx.run_until_parked();
-    assert!(
-        vcx.read(|cx| test_support::connect_picker_open(view.read(cx))),
-        "the picker has reached the endpoint step"
-    );
 
     vcx.update(|window, cx| {
         view.update(cx, |canvas, cx| {
@@ -1173,18 +1164,25 @@ fn switching_workspace_mid_picker_cancels_the_gesture() {
     });
     vcx.run_until_parked();
     assert!(
-        !vcx.read(|cx| test_support::connect_picker_open(view.read(cx))),
-        "activation cancels the picker"
+        vcx.read(|cx| test_support::connect_picker_open(view.read(cx))),
+        "activation must not close the workspace picker"
     );
-    assert_eq!(vcx.read(|cx| test_support::connect_state(view.read(cx)).0), None);
-
-    vcx.update(|_, cx| {
-        view.update(cx, |canvas, cx| {
-            canvas.complete_cross_connect(2, ConnectionTarget::Card(4), cx)
-        })
-    });
+    let endpoint = vcx
+        .debug_bounds("connection-endpoint-2-c4")
+        .expect("the activated workspace's endpoints are selectable");
+    vcx.simulate_click(endpoint.center(), Modifiers::none());
     vcx.run_until_parked();
-    assert_eq!(vcx.read(|cx| test_support::cross_edge_count(view.read(cx))), 0);
+    assert!(
+        vcx.read(|cx| test_support::cross_connected(
+            view.read(cx),
+            1,
+            ConnectionTarget::Card(1),
+            2,
+            ConnectionTarget::Card(4)
+        )),
+        "the source stays in its original workspace while the target is the activated one"
+    );
+    assert_eq!(vcx.read(|cx| test_support::cross_edge_count(view.read(cx))), 1);
 }
 
 /// The inspector must remove the edge it displayed, even if a store change

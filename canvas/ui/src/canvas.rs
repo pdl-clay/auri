@@ -2785,7 +2785,6 @@ impl Canvas {
             return;
         };
         let valid = picker.owner != workspace_id
-            && self.store.active() == Some(picker.owner)
             && self.store.workspaces().iter().any(|item| item.id == workspace_id);
         if !valid {
             return;
@@ -2810,8 +2809,7 @@ impl Canvas {
             return;
         };
         let source_workspace = picker.owner;
-        let valid = self.store.active() == Some(source_workspace)
-            && source_workspace != workspace_id
+        let valid = source_workspace != workspace_id
             && self.store.workspaces().iter().any(|item| item.id == workspace_id)
             && self.source_is_admin_in(source_workspace, source);
         if !valid {
@@ -2847,12 +2845,18 @@ impl Canvas {
         }
     }
 
-    /// A drawer row activation changes the source workspace, so any gesture
-    /// opened in the previous workspace must be abandoned, not reinterpreted.
+    /// A drawer activation changes the active workspace, but the picker keeps
+    /// the source captured at start time. Treat the activated workspace as the
+    /// target step instead of throwing the gesture away.
     fn cancel_connect_for_activation(&mut self, id: WorkspaceId, cx: &mut Context<Self>) {
+        self.connection_popover = None;
         if self.store.active().is_some_and(|active| active != id) {
-            self.connection_popover = None;
-            self.cancel_connect(cx);
+            if let Some(picker) = self.connect_picker
+                && picker.owner != id
+            {
+                self.connect_picker = Some(ConnectPicker { owner: picker.owner, workspace: Some(id) });
+            }
+            cx.notify();
         }
     }
 
