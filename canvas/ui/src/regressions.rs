@@ -167,3 +167,850 @@ fn old_config_regression_loads_without_connections() {
     assert_eq!(workspace.canvas.selected(), Some(1));
     assert_eq!(workspace.canvas.agents()[0].bounds.width, 640.0);
 }
+
+/// The window header is a single-line strip. A previous pass set it to 64px,
+/// which turned every card into a heavy framed panel; do not return to that.
+#[test]
+fn window_header_stays_a_compact_strip() {
+    use crate::theme::{CLOSE_BUTTON_SIZE, CLOSE_ICON_SIZE, TITLE_HEIGHT};
+
+    assert!(
+        TITLE_HEIGHT <= 32.0,
+        "the card header is a strip, not a row: {TITLE_HEIGHT}px"
+    );
+    assert!(
+        CLOSE_BUTTON_SIZE + 8.0 <= TITLE_HEIGHT,
+        "the close control needs 4px of air above and below inside the header"
+    );
+    assert!(
+        CLOSE_ICON_SIZE < CLOSE_BUTTON_SIZE,
+        "the × glyph must sit inside its hit target"
+    );
+}
+
+/// Workspace rows are text until hovered. A previous pass gave every row a
+/// filled panel, a border and 12px of air between them; keep the list tight.
+#[test]
+fn workspace_rows_stay_compact_and_chrome_free() {
+    use crate::theme::{
+        COLOR_PANEL, COLOR_ROW_BORDER_ACTIVE, COLOR_ROW_HOVER, WORKSPACE_ROW_GAP,
+        WORKSPACE_ROW_PAD_Y,
+    };
+
+    assert_eq!(WORKSPACE_ROW_GAP, 0.0, "workspace rows must touch vertically");
+    assert!(WORKSPACE_ROW_PAD_Y <= 3.0, "a row is text with minimal air: {WORKSPACE_ROW_PAD_Y}px");
+    assert_ne!(COLOR_ROW_HOVER, COLOR_PANEL, "hover must lift the row off the drawer");
+    assert_ne!(COLOR_ROW_BORDER_ACTIVE, 0, "the selected row keeps its subtle border");
+}
+
+/// The empty canvas is a quiet surface, not a bright grid. Keep the lines
+/// faint so cards and ropes carry the contrast.
+#[test]
+fn canvas_grid_stays_translucent() {
+    use crate::theme::{COLOR_GRID, COLOR_GRID_ALPHA};
+
+    assert_ne!(COLOR_GRID, 0, "the grid still exists");
+    assert!(
+        (0.15..=0.25).contains(&COLOR_GRID_ALPHA),
+        "grid lines should stay faint: {COLOR_GRID_ALPHA}"
+    );
+}
+
+/// Regression: the same island press must work for terminal and agent cards.
+/// The note test covers the UI-owned selection; this one covers the store's
+/// card selection, with no PTY entity needed because the island only asks the
+/// store which id is selected.
+#[test]
+fn island_connect_starts_from_a_selected_card() {
+    use crate::canvas::Canvas;
+    use crate::config::LoadOutcome;
+    use auro::gpui::{Modifiers, TestAppContext};
+
+    let mut cx = TestAppContext::single();
+    cx.update(|cx| {
+        gpui_component::init(cx);
+        gpui_component::theme::Theme::change(
+            gpui_component::theme::ThemeMode::Dark,
+            None,
+            cx,
+        );
+    });
+
+    let mut store = WorkspaceStore::new();
+    let workspace = store.add("Regressão".into(), WorkspaceIcon::Star, std::env::temp_dir());
+    let card_id = {
+        let workspace = store.workspace_mut(workspace.id).unwrap();
+        workspace.mark_loaded();
+        workspace.canvas.add_agent(AgentKind::Claude, bounds()).id
+    };
+
+    let (view, vcx) = cx.add_window_view(|window, cx| {
+        let handle = window.window_handle();
+        let mut canvas = Canvas::new(store.clone(), LoadOutcome::Fresh, handle, None, cx);
+        canvas.select(workspace.id, card_id, cx);
+        canvas
+    });
+    vcx.run_until_parked();
+
+    let bolt = vcx
+        .debug_bounds("island-connect")
+        .expect("a selected card must expose the bolt island button");
+    vcx.simulate_click(bolt.center(), Modifiers::none());
+    vcx.run_until_parked();
+
+    let (connecting_from, selected_note) =
+        vcx.read(|cx| test_support::connect_state(view.read(cx)));
+    assert_eq!(
+        connecting_from,
+        Some(ConnectionTarget::Card(card_id)),
+        "the bolt press must enter connection mode with the card as source"
+    );
+    assert_eq!(selected_note, None, "a card source never paints as a note");
+}
+
+/// Regression: clicking a note (or a card) and then the island's bolt cleared
+/// the selection on mouse-down, so the click handler saw no source, returned,
+/// and the bolt vanished. Real GPUI dispatch: select a note, press the bolt.
+#[test]
+fn island_connect_keeps_the_note_selection_and_starts_the_gesture() {
+    use crate::canvas::Canvas;
+    use crate::config::LoadOutcome;
+    use auro::gpui::{Modifiers, TestAppContext};
+
+    let mut cx = TestAppContext::single();
+    cx.update(|cx| {
+        gpui_component::init(cx);
+        gpui_component::theme::Theme::change(
+            gpui_component::theme::ThemeMode::Dark,
+            None,
+            cx,
+        );
+    });
+
+    let mut store = WorkspaceStore::new();
+    let workspace = store.add("Regressão".into(), WorkspaceIcon::Star, std::env::temp_dir());
+    let note_id = {
+        let workspace = store.workspace_mut(workspace.id).unwrap();
+        workspace.mark_loaded();
+        workspace
+            .canvas
+            .add_note("origem".into(), bounds())
+            .id
+    };
+
+    let (view, vcx) = cx.add_window_view(|window, cx| {
+        let handle = window.window_handle();
+        let mut canvas = Canvas::new(store.clone(), LoadOutcome::Fresh, handle, None, cx);
+        canvas.mount_note_for_test(workspace.id, note_id, window, cx);
+        canvas
+    });
+    vcx.run_until_parked();
+
+    let bolt = vcx
+        .debug_bounds("island-connect")
+        .expect("a selected note must expose the bolt island button");
+    vcx.simulate_click(bolt.center(), Modifiers::none());
+    vcx.run_until_parked();
+
+    let (connecting_from, selected_note) = vcx.read(|cx| test_support::connect_state(view.read(cx)));
+    assert_eq!(
+        connecting_from,
+        Some(ConnectionTarget::Note(note_id)),
+        "the bolt press must enter connection mode with the note as source"
+    );
+    assert_eq!(
+        selected_note,
+        Some((workspace.id, note_id)),
+        "the bolt press must not clear the selection before its click handler runs"
+    );
+}
+
+/// The click target must follow the painted curve, not its bounding box.
+#[test]
+fn rope_hit_test_follows_the_curve() {
+    let edges = [test_support::edge_hit(
+        7,
+        (0.0, 0.0),
+        (100.0, 100.0),
+        (200.0, 0.0),
+    )];
+    assert_eq!(
+        test_support::edge_hit_at(&edges, 100.0, 50.0),
+        Some(7),
+        "the midpoint of the quadratic curve is on the rope"
+    );
+    assert_eq!(
+        test_support::edge_hit_at(&edges, 100.0, 92.0),
+        None,
+        "empty space above the rope must not open the inspector"
+    );
+}
+
+/// Pressing a connection opens the inspector; its remove button deletes that
+/// edge and only that edge. Real GPUI dispatch through the canvas background.
+#[test]
+fn pressing_a_connection_opens_the_inspector_and_removes_it() {
+    use crate::canvas::Canvas;
+    use crate::config::LoadOutcome;
+    use auro::gpui::{Modifiers, Point, TestAppContext, px};
+
+    let mut cx = TestAppContext::single();
+    cx.update(|cx| {
+        gpui_component::init(cx);
+        gpui_component::theme::Theme::change(
+            gpui_component::theme::ThemeMode::Dark,
+            None,
+            cx,
+        );
+    });
+
+    let mut store = WorkspaceStore::new();
+    let workspace = store.add("Regressão".into(), WorkspaceIcon::Star, std::env::temp_dir());
+    let (first, second) = {
+        let workspace = store.workspace_mut(workspace.id).unwrap();
+        workspace.mark_loaded();
+        let first = workspace
+            .canvas
+            .add_note(
+                "origem".into(),
+                CardBounds { x: 40.0, y: 40.0, width: 220.0, height: 120.0 },
+            )
+            .id;
+        let second = workspace
+            .canvas
+            .add_note(
+                "destino".into(),
+                CardBounds { x: 400.0, y: 340.0, width: 220.0, height: 120.0 },
+            )
+            .id;
+        workspace.canvas.connect_note(first, ConnectionTarget::Note(second));
+        (first, second)
+    };
+
+    let (view, vcx) = cx.add_window_view(|window, cx| {
+        let handle = window.window_handle();
+        let mut canvas = Canvas::new(store.clone(), LoadOutcome::Fresh, handle, None, cx);
+        canvas.mount_note_for_test(workspace.id, first, window, cx);
+        canvas.mount_note_for_test(workspace.id, second, window, cx);
+        canvas
+    });
+    vcx.run_until_parked();
+    assert_eq!(vcx.read(|cx| test_support::connection_count(view.read(cx))), 1);
+
+    let (x, y, drawer_width) = vcx.read(|cx| {
+        let canvas = view.read(cx);
+        let point = test_support::edge_click_point(canvas, 0).expect("painted rope");
+        (point.0, point.1, test_support::drawer_width(canvas, cx))
+    });
+    vcx.simulate_click(Point::new(px(x + drawer_width), px(y)), Modifiers::none());
+    vcx.run_until_parked();
+    assert!(
+        vcx.read(|cx| test_support::connection_popover_open(view.read(cx))),
+        "pressing the rope opens the connection inspector"
+    );
+    assert!(vcx.debug_bounds("connection-popover").is_some());
+    assert!(vcx.debug_bounds("connection-remove").is_some());
+
+    let remove = vcx
+        .debug_bounds("connection-remove")
+        .expect("remove control inside the inspector");
+    vcx.simulate_click(remove.center(), Modifiers::none());
+    vcx.run_until_parked();
+    assert_eq!(
+        vcx.read(|cx| test_support::connection_count(view.read(cx))),
+        0,
+        "the inspector removes the pressed connection"
+    );
+    assert!(
+        !vcx.read(|cx| test_support::connection_popover_open(view.read(cx))),
+        "the inspector closes after removal"
+    );
+}
+
+/// The note's right-click menu is a second entry point to the same gesture as
+/// the island bolt. Real dispatch: right-click the note, click `Conectar`.
+#[test]
+fn right_click_menu_starts_connection_from_note() {
+    use crate::canvas::Canvas;
+    use crate::config::LoadOutcome;
+    use auro::gpui::{Modifiers, MouseButton, Point, TestAppContext, px};
+
+    let mut cx = TestAppContext::single();
+    cx.update(|cx| {
+        gpui_component::init(cx);
+        gpui_component::theme::Theme::change(
+            gpui_component::theme::ThemeMode::Dark,
+            None,
+            cx,
+        );
+    });
+
+    let mut store = WorkspaceStore::new();
+    let workspace = store.add("Regressão".into(), WorkspaceIcon::Star, std::env::temp_dir());
+    let note_id = {
+        let workspace = store.workspace_mut(workspace.id).unwrap();
+        workspace.mark_loaded();
+        workspace.canvas.add_note("origem".into(), bounds()).id
+    };
+
+    let (view, vcx) = cx.add_window_view(|window, cx| {
+        let handle = window.window_handle();
+        let mut canvas = Canvas::new(store.clone(), LoadOutcome::Fresh, handle, None, cx);
+        canvas.mount_note_for_test(workspace.id, note_id, window, cx);
+        canvas
+    });
+    vcx.run_until_parked();
+
+    let drawer_width = vcx.read(|cx| test_support::drawer_width(view.read(cx), cx));
+    vcx.simulate_mouse_down(
+        Point::new(px(drawer_width + 50.0), px(16.0)),
+        MouseButton::Right,
+        Modifiers::none(),
+    );
+    vcx.run_until_parked();
+    let item = vcx
+        .debug_bounds("connect-menu-item")
+        .expect("right-click on a note offers Conectar");
+    vcx.simulate_click(item.center(), Modifiers::none());
+    vcx.run_until_parked();
+    let (connecting_from, _) = vcx.read(|cx| test_support::connect_state(view.read(cx)));
+    assert_eq!(
+        connecting_from,
+        Some(ConnectionTarget::Note(note_id)),
+        "the menu's Conectar item must start the same gesture as the island bolt"
+    );
+}
+
+
+#[cfg(test)]
+struct ScrollProbe {
+    terminal: auro::gpui::Entity<gpui_terminal::TerminalView>,
+    wheels: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl auro::gpui::Render for ScrollProbe {
+    fn render(
+        &mut self,
+        _window: &mut auro::gpui::Window,
+        cx: &mut auro::gpui::Context<Self>,
+    ) -> impl auro::gpui::IntoElement {
+        use auro::gpui::{InteractiveElement, ParentElement, Styled, div};
+        let counted = self.wheels.clone();
+        div()
+            .size_full()
+            .on_scroll_wheel(move |_, _, cx| {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                cx.stop_propagation();
+            })
+            .child(self.terminal.clone())
+    }
+}
+/// Wheel over a terminal must scroll its history and must not reach the
+/// canvas's pan handler sitting on an ancestor.
+#[test]
+fn wheel_over_terminal_scrolls_history_not_canvas() {
+    use auro::gpui::{AppContext, InteractiveElement, Modifiers, ParentElement, Point, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase, div, px};
+    use gpui_terminal::{TerminalConfig, TerminalView};
+    use std::io::Cursor;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let mut cx = TestAppContext::single();
+    let mut bytes = Vec::new();
+    for line in 0..400 {
+        bytes.extend_from_slice(format!("linha {line}\r\n").as_bytes());
+    }
+    let terminal = cx.new(|cx| {
+        TerminalView::new(Vec::new(), Cursor::new(bytes), TerminalConfig::default(), cx)
+    });
+    let ancestor_wheels = Arc::new(AtomicUsize::new(0));
+    let (_view, vcx) = cx.add_window_view(|_, _| ScrollProbe {
+        terminal: terminal.clone(),
+        wheels: ancestor_wheels.clone(),
+    });
+    vcx.run_until_parked();
+
+    vcx.simulate_click(Point::new(px(120.0), px(120.0)), Modifiers::none());
+    vcx.run_until_parked();
+    let before = vcx.read(|cx| terminal.read(cx).scroll_info());
+    vcx.simulate_event(ScrollWheelEvent {
+        position: Point::new(px(120.0), px(120.0)),
+        delta: ScrollDelta::Lines(Point::new(0.0, -1.0)),
+        modifiers: Modifiers::none(),
+        touch_phase: TouchPhase::default(),
+    });
+    vcx.run_until_parked();
+    let after = vcx.read(|cx| terminal.read(cx).scroll_info());
+
+    assert!(after.0 > before.0, "wheel up moves into scrollback: {before:?} -> {after:?}");
+    assert_eq!(
+        ancestor_wheels.load(Ordering::SeqCst),
+        0,
+        "the terminal must stop the wheel before an ancestor pans the canvas"
+    );
+}
+
+/// A wheel event that cannot move the terminal (no history) must keep
+/// propagating: swallowing it leaves the enclosing scroll area frozen.
+#[test]
+fn wheel_without_history_reaches_the_enclosing_scroll_area() {
+    use auro::gpui::{AppContext, Modifiers, Point, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase, px};
+
+    let mut cx = TestAppContext::single();
+    let terminal = cx.new(|cx| {
+        gpui_terminal::TerminalView::new(
+            Vec::new(),
+            std::io::Cursor::new(Vec::new()),
+            gpui_terminal::TerminalConfig::default(),
+            cx,
+        )
+    });
+    let ancestor_wheels = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (_view, vcx) = cx.add_window_view(|_, _| ScrollProbe {
+        terminal: terminal.clone(),
+        wheels: ancestor_wheels.clone(),
+    });
+    vcx.run_until_parked();
+    vcx.simulate_event(ScrollWheelEvent {
+        position: Point::new(px(120.0), px(120.0)),
+        delta: ScrollDelta::Lines(Point::new(0.0, -1.0)),
+        modifiers: Modifiers::none(),
+        touch_phase: TouchPhase::default(),
+    });
+    vcx.run_until_parked();
+
+    assert_eq!(
+        ancestor_wheels.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "an unconsumed wheel must reach the scroll area behind the terminal"
+    );
+}
+
+/// One wheel notch is three lines regardless of canvas zoom. Converting a
+/// line delta through a fixed 16px budget rounds it to zero at large fonts,
+/// which is the frozen-scroll symptom at high zoom.
+#[test]
+fn wheel_lines_scroll_history_with_a_large_font() {
+    use auro::gpui::{AppContext, Modifiers, Point, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase, px};
+
+    let mut cx = TestAppContext::single();
+    let mut bytes = Vec::new();
+    for line in 0..400 {
+        bytes.extend_from_slice(format!("linha {line}\r\n").as_bytes());
+    }
+    let config = gpui_terminal::TerminalConfig {
+        font_size: px(64.0),
+        line_height_multiplier: 2.0,
+        ..gpui_terminal::TerminalConfig::default()
+    };
+    let terminal = cx.new(|cx| {
+        gpui_terminal::TerminalView::new(Vec::new(), std::io::Cursor::new(bytes), config, cx)
+    });
+    let (_view, vcx) = cx.add_window_view(|_, _| ScrollProbe {
+        terminal: terminal.clone(),
+        wheels: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+    });
+    let mut history_ready = false;
+    for _ in 0..50 {
+        vcx.run_until_parked();
+        if vcx.read(|cx| terminal.read(cx).scroll_info()).1 > 0 {
+            history_ready = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(history_ready, "the async PTY reader must load the history first");
+    let before = vcx.read(|cx| terminal.read(cx).scroll_info());
+    vcx.simulate_event(ScrollWheelEvent {
+        position: Point::new(px(120.0), px(120.0)),
+        delta: ScrollDelta::Lines(Point::new(0.0, -1.0)),
+        modifiers: Modifiers::none(),
+        touch_phase: TouchPhase::default(),
+    });
+    vcx.run_until_parked();
+    let after = vcx.read(|cx| terminal.read(cx).scroll_info());
+
+    assert!(after.0 > before.0, "one wheel notch must scroll history: {before:?} -> {after:?}");
+}
+
+/// Placement must honour the click in the upper half of the canvas. A previous
+/// pass always fell back to the "next to the last card" origin, pinning new
+/// cards to the lower half even when the click was near the top.
+#[test]
+fn placement_click_in_the_upper_half_spawns_the_card_there() {
+    use crate::canvas::Canvas;
+    use crate::config::LoadOutcome;
+    use auro::gpui::{Modifiers, MouseButton, MouseDownEvent, Point, TestAppContext, px};
+
+    let mut cx = TestAppContext::single();
+    cx.update(|cx| {
+        gpui_component::init(cx);
+        gpui_component::theme::Theme::change(
+            gpui_component::theme::ThemeMode::Dark,
+            None,
+            cx,
+        );
+    });
+    let mut store = WorkspaceStore::new();
+    let workspace = store.add("Regressão".into(), WorkspaceIcon::Star, std::env::temp_dir());
+    store.workspace_mut(workspace.id).unwrap().mark_loaded();
+
+    let (view, vcx) = cx.add_window_view(|window, cx| {
+        let mut canvas = Canvas::new(
+            store.clone(),
+            LoadOutcome::Fresh,
+            window.window_handle(),
+            None,
+            cx,
+        );
+        canvas.apply_scroll(Point::new(px(400.0), px(200.0)), 0.0, 600.0, false, false, cx);
+        canvas.begin_placement(cx);
+        canvas
+    });
+    vcx.run_until_parked();
+    vcx.simulate_event(MouseDownEvent {
+        button: MouseButton::Left,
+        position: Point::new(px(400.0), px(120.0)),
+        modifiers: Modifiers::none(),
+        click_count: 1,
+        first_mouse: true,
+    });
+    vcx.run_until_parked();
+
+    let placed = vcx.read(|cx| test_support::terminal_bounds(view.read(cx), workspace.id, cx));
+    let placed = placed.expect("the placement click must spawn a terminal");
+    let expected_y = 120.0 - 600.0 - crate::theme::CARD_HEIGHT / 2.0;
+    assert!(
+        (placed.y - expected_y).abs() < 1.0,
+        "a click at y=120 on a canvas panned down must centre the card there \
+         (world y {expected_y}), not clamp it into the lower half: {placed:?}"
+    );
+
+    // The note path has its own placement function; it must use the same
+    // world-coordinate origin instead of clamping back into the lower half.
+    vcx.update(|_, cx| view.update(cx, |canvas, cx| canvas.begin_text_placement(cx)));
+    vcx.run_until_parked();
+    vcx.simulate_event(MouseDownEvent {
+        button: MouseButton::Left,
+        position: Point::new(px(400.0), px(120.0)),
+        modifiers: Modifiers::none(),
+        click_count: 1,
+        first_mouse: true,
+    });
+    vcx.run_until_parked();
+    let note = vcx
+        .read(|cx| test_support::note_bounds(view.read(cx), workspace.id, cx))
+        .expect("the placement click must spawn a note");
+    let expected_note_y = 120.0 - 600.0 - crate::theme::TEXT_CARD_HEIGHT / 2.0;
+    assert!(
+        (note.y - expected_note_y).abs() < 1.0,
+        "a note placed at y=120 must use the clicked world position: {note:?}"
+    );
+}
+
+/// New terminals and agents open as a usable workspace, not a thumbnail.
+#[test]
+fn spawned_cards_open_large() {
+    use crate::theme::{CARD_HEIGHT, CARD_WIDTH};
+
+    assert!(CARD_WIDTH >= 900.0, "a new terminal needs room to work: {CARD_WIDTH}px");
+    assert!(CARD_HEIGHT >= 540.0, "a new terminal needs room to read: {CARD_HEIGHT}px");
+}
+
+// --- Cross-workspace picker, proxy card and rope removal -------------------
+
+fn cross_test_cx() -> auro::gpui::TestAppContext {
+    use auro::gpui::TestAppContext;
+
+    let cx = TestAppContext::single();
+    cx.update(|cx| {
+        gpui_component::init(cx);
+        gpui_component::theme::Theme::change(
+            gpui_component::theme::ThemeMode::Dark,
+            None,
+            cx,
+        );
+    });
+    cx
+}
+
+/// Auri owns an admin agent and a normal agent; Auro owns card 4. Both
+/// workspaces deliberately use the same id space for unrelated cards.
+fn cross_workspace_store(with_edge: bool) -> WorkspaceStore {
+    let json = r#"{
+        "workspaces": [
+            {"id":1,"name":"Auri","icon":"Star","root":"/tmp","canvas":{
+                "agents":[
+                    {"id":1,"kind":"Claude","name":"Writer","bounds":{"x":40.0,"y":40.0,"width":240.0,"height":120.0},"admin":true},
+                    {"id":2,"kind":"Codex","name":"Helper","bounds":{"x":40.0,"y":220.0,"width":240.0,"height":120.0},"admin":false}
+                ],"terminals":[],"notes":[],"selected":null,"next_id":3,"connections":[]}},
+            {"id":2,"name":"Auro","icon":"Folder","root":"/tmp","canvas":{
+                "agents":[
+                    {"id":4,"kind":"Pi","name":"Oh My Pi #3","bounds":{"x":600.0,"y":300.0,"width":240.0,"height":120.0},"admin":false}
+                ],"terminals":[],"notes":[],"selected":null,"next_id":5,"connections":[]}}
+        ],"active":1,"next_id":5
+    }"#;
+    let json = if with_edge {
+        json.replacen(
+            "\"connections\":[]",
+            r#""connections":[{"from":{"Card":1},"to":{"Card":4},"from_workspace":1,"to_workspace":2}]"#,
+            1,
+        )
+    } else {
+        json.to_owned()
+    };
+    serde_json::from_str(&json).expect("cross-workspace fixture")
+}
+
+/// The cross-workspace step must follow the source card's role: a normal agent
+/// keeps the old local-only gesture; an administrator gets a workspace picker.
+#[test]
+fn cross_workspace_picker_is_offered_only_to_an_admin_source() {
+    use auro::gpui::Modifiers;
+
+    use crate::canvas::Canvas;
+    use crate::config::LoadOutcome;
+
+    let mut cx = cross_test_cx();
+    let store = cross_workspace_store(false);
+    let (view, vcx) = cx.add_window_view(|window, cx| {
+        let mut canvas = Canvas::new(
+            store.clone(),
+            LoadOutcome::Fresh,
+            window.window_handle(),
+            None,
+            cx,
+        );
+        canvas.select(1, 2, cx);
+        canvas
+    });
+    vcx.run_until_parked();
+
+    let bolt = vcx
+        .debug_bounds("island-connect")
+        .expect("a selected card exposes the bolt");
+    vcx.simulate_click(bolt.center(), Modifiers::none());
+    vcx.run_until_parked();
+    assert_eq!(
+        vcx.read(|cx| test_support::connect_state(view.read(cx)).0),
+        Some(ConnectionTarget::Card(2)),
+        "the normal agent still starts the ordinary gesture"
+    );
+    assert!(
+        vcx.debug_bounds("connection-workspace-picker").is_none(),
+        "a normal agent must not see the cross-workspace picker"
+    );
+
+    vcx.update(|_, cx| {
+        view.update(cx, |canvas, cx| {
+            canvas.cancel_connect(cx);
+            canvas.select(1, 1, cx);
+        })
+    });
+    vcx.run_until_parked();
+    let bolt = vcx
+        .debug_bounds("island-connect")
+        .expect("the admin card exposes the bolt");
+    vcx.simulate_click(bolt.center(), Modifiers::none());
+    vcx.run_until_parked();
+    assert_eq!(
+        vcx.read(|cx| test_support::connect_state(view.read(cx)).0),
+        Some(ConnectionTarget::Card(1)),
+        "the admin card starts the same gesture"
+    );
+    assert!(
+        vcx.debug_bounds("connection-workspace-picker").is_some(),
+        "only an administrator source gets the workspace step"
+    );
+}
+
+/// Real dispatch through the picker: workspace first, endpoint second; the
+/// resulting edge is workspace-qualified and leaves connection mode.
+#[test]
+fn picker_chooses_a_workspace_then_an_endpoint() {
+    use auro::gpui::Modifiers;
+
+    use crate::canvas::Canvas;
+    use crate::config::LoadOutcome;
+
+    let mut cx = cross_test_cx();
+    let store = cross_workspace_store(false);
+    let (view, vcx) = cx.add_window_view(|window, cx| {
+        let mut canvas = Canvas::new(
+            store.clone(),
+            LoadOutcome::Fresh,
+            window.window_handle(),
+            None,
+            cx,
+        );
+        canvas.select(1, 1, cx);
+        canvas
+    });
+    vcx.run_until_parked();
+
+    let bolt = vcx.debug_bounds("island-connect").expect("admin bolt");
+    vcx.simulate_click(bolt.center(), Modifiers::none());
+    vcx.run_until_parked();
+    let workspace = vcx
+        .debug_bounds("connection-target-2")
+        .expect("the picker offers Auro as a target workspace");
+    vcx.simulate_click(workspace.center(), Modifiers::none());
+    vcx.run_until_parked();
+    let endpoint = vcx
+        .debug_bounds("connection-endpoint-2-c4")
+        .expect("the workspace step lists Auro's card 4");
+    vcx.simulate_click(endpoint.center(), Modifiers::none());
+    vcx.run_until_parked();
+
+    assert!(
+        vcx.read(|cx| test_support::cross_connected(
+            view.read(cx),
+            1,
+            ConnectionTarget::Card(1),
+            2,
+            ConnectionTarget::Card(4)
+        )),
+        "the picker stores one edge with both workspaces qualified"
+    );
+    assert_eq!(vcx.read(|cx| test_support::cross_edge_count(view.read(cx))), 1);
+    assert_eq!(vcx.read(|cx| test_support::connect_state(view.read(cx)).0), None);
+    assert!(
+        !vcx.read(|cx| test_support::connect_picker_open(view.read(cx))),
+        "choosing the endpoint closes the picker"
+    );
+    assert!(
+        vcx.debug_bounds("proxy-card-2-4").is_some(),
+        "the new edge renders its remote endpoint as a proxy"
+    );
+}
+
+/// Review Focus: a proxy is a representation, not a control. Pressing it must
+/// not select, open the inspector, start a gesture or mutate the edge.
+#[test]
+fn clicking_a_proxy_card_changes_nothing() {
+    use auro::gpui::Modifiers;
+
+    use crate::canvas::Canvas;
+    use crate::config::LoadOutcome;
+
+    let mut cx = cross_test_cx();
+    let store = cross_workspace_store(true);
+    let (view, vcx) = cx.add_window_view(|window, cx| {
+        Canvas::new(
+            store.clone(),
+            LoadOutcome::Fresh,
+            window.window_handle(),
+            None,
+            cx,
+        )
+    });
+    vcx.run_until_parked();
+
+    let proxy = vcx
+        .debug_bounds("proxy-card-2-4")
+        .expect("a saved cross edge renders a proxy in Auri");
+    let before = vcx.read(|cx| {
+        let canvas = view.read(cx);
+        (
+            test_support::selection_state(canvas),
+            test_support::connect_state(canvas),
+            test_support::connection_popover_open(canvas),
+            test_support::connect_picker_open(canvas),
+            test_support::cross_edge_count(canvas),
+        )
+    });
+    vcx.simulate_click(proxy.center(), Modifiers::none());
+    vcx.run_until_parked();
+    let after = vcx.read(|cx| {
+        let canvas = view.read(cx);
+        (
+            test_support::selection_state(canvas),
+            test_support::connect_state(canvas),
+            test_support::connection_popover_open(canvas),
+            test_support::connect_picker_open(canvas),
+            test_support::cross_edge_count(canvas),
+        )
+    });
+    assert_eq!(before, after, "the proxy must be completely inert");
+    assert!(vcx.debug_bounds("connection-popover").is_none());
+    assert!(vcx.debug_bounds("connection-workspace-picker").is_none());
+}
+
+/// The same stored edge renders a proxy on both sides, and the existing rope
+/// inspector removes it for both workspaces.
+#[test]
+fn cross_rope_popover_removes_the_edge_from_both_workspaces() {
+    use auro::gpui::{Modifiers, Point, px};
+
+    use crate::canvas::Canvas;
+    use crate::config::LoadOutcome;
+
+    let mut cx = cross_test_cx();
+    let store = cross_workspace_store(true);
+    let (view, vcx) = cx.add_window_view(|window, cx| {
+        Canvas::new(
+            store.clone(),
+            LoadOutcome::Fresh,
+            window.window_handle(),
+            None,
+            cx,
+        )
+    });
+    vcx.run_until_parked();
+
+    assert!(
+        vcx.debug_bounds("proxy-card-2-4").is_some(),
+        "Auri shows Auro's endpoint"
+    );
+    vcx.update(|_, cx| {
+        view.update(cx, |canvas, cx| test_support::activate_workspace(canvas, 2, cx))
+    });
+    vcx.run_until_parked();
+    assert!(
+        vcx.debug_bounds("proxy-card-1-1").is_some(),
+        "Auro shows the originating endpoint from the same edge"
+    );
+    vcx.update(|_, cx| {
+        view.update(cx, |canvas, cx| test_support::activate_workspace(canvas, 1, cx))
+    });
+    vcx.run_until_parked();
+
+    let (x, y, drawer_width) = vcx.read(|cx| {
+        let canvas = view.read(cx);
+        let point = test_support::edge_click_point(canvas, 0).expect("the cross rope is painted");
+        (point.0, point.1, test_support::drawer_width(canvas, cx))
+    });
+    vcx.simulate_click(Point::new(px(x + drawer_width), px(y)), Modifiers::none());
+    vcx.run_until_parked();
+    assert!(
+        vcx.read(|cx| test_support::connection_popover_open(view.read(cx))),
+        "a cross rope opens the same inspector as a local one"
+    );
+    let remove = vcx
+        .debug_bounds("connection-remove")
+        .expect("the inspector offers removal");
+    vcx.simulate_click(remove.center(), Modifiers::none());
+    vcx.run_until_parked();
+
+    assert!(
+        !vcx.read(|cx| test_support::cross_connected(
+            view.read(cx),
+            1,
+            ConnectionTarget::Card(1),
+            2,
+            ConnectionTarget::Card(4)
+        )),
+        "removal deletes the shared edge"
+    );
+    assert_eq!(vcx.read(|cx| test_support::cross_edge_count(view.read(cx))), 0);
+    assert_eq!(vcx.read(|cx| test_support::proxy_count(view.read(cx))), 0);
+    vcx.update(|_, cx| {
+        view.update(cx, |canvas, cx| test_support::activate_workspace(canvas, 2, cx))
+    });
+    vcx.run_until_parked();
+    assert_eq!(
+        vcx.read(|cx| test_support::proxy_count(view.read(cx))),
+        0,
+        "the peer's proxy disappears too"
+    );
+}

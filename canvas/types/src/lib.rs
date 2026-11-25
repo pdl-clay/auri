@@ -102,6 +102,21 @@ fn edge_links(edge: &Connection, a: ConnectionTarget, b: ConnectionTarget) -> bo
     (edge.from == a && edge.to == b) || (edge.from == b && edge.to == a)
 }
 
+/// Whether two edges join the same workspace-qualified endpoints, in either
+/// direction. Workspace ids qualify the target, so two cards with the same
+/// numeric id in different workspaces are different edges.
+fn qualified_edge_links(a: &Connection, b: &Connection) -> bool {
+    let forward = a.from == b.from
+        && a.to == b.to
+        && a.from_workspace == b.from_workspace
+        && a.to_workspace == b.to_workspace;
+    let backward = a.from == b.to
+        && a.to == b.from
+        && a.from_workspace == b.to_workspace
+        && a.to_workspace == b.from_workspace;
+    forward || backward
+}
+
 /// Saved pixel geometry of a canvas card, independent of the UI framework.
 #[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CardBounds {
@@ -561,6 +576,29 @@ impl CanvasState {
         }
         self.connections.push(Connection::local(from, to));
         true
+    }
+
+    /// Add a workspace-qualified edge. Self edges and duplicates (including
+    /// the reverse direction) are ignored. The caller owns workspace ids;
+    /// `None` still means "the workspace storing this edge" when reading it.
+    pub fn connect_qualified(&mut self, edge: Connection) -> bool {
+        if edge.from == edge.to && edge.from_workspace == edge.to_workspace {
+            return false;
+        }
+        if self.connections.iter().any(|stored| qualified_edge_links(stored, &edge)) {
+            return false;
+        }
+        self.connections.push(edge);
+        true
+    }
+
+    /// Remove exactly this workspace-qualified edge, in either direction.
+    /// Unlike `disconnect_between`, an id in another workspace never matches.
+    pub fn disconnect_exact(&mut self, edge: Connection) -> bool {
+        let before = self.connections.len();
+        self.connections
+            .retain(|stored| !qualified_edge_links(stored, &edge));
+        self.connections.len() != before
     }
 
     /// Remove an edge in either direction; false when no such edge existed.
