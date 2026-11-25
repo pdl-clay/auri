@@ -191,7 +191,7 @@ EOF
 }
 
 app="$tmp/appimage"
-cli=''
+cli_file=''
 
 if [[ -n "$manifest" ]]; then
     local_or_url "$manifest" "$tmp/manifest.json"
@@ -243,7 +243,7 @@ if [[ -z "$source" ]]; then
             "$(manifest_field "$tmp/cli-manifest.json" '.size')" \
             "$(manifest_field "$tmp/cli-manifest.json" '.sha256')" 'CLI'
         verify_elf "$tmp/cli"
-        cli="$tmp/cli"
+        cli_file="$tmp/cli"
     fi
 
     if [[ -n "$icon_url" ]] && curl -fL -o "$tmp/icon" "$icon_url" 2>/dev/null; then
@@ -276,13 +276,13 @@ fi
 verify_appimage "$app"
 
 install_exec "$app" "$install_dir/$exec_name"
-if [[ -n "$cli" ]]; then
-    install_exec "$cli" "$install_dir/auri"
+if [[ -n "$cli_file" ]]; then
+    install_exec "$cli_file" "$install_dir/auri"
 fi
 if [[ "$desktop" == true ]]; then
     install_desktop
 fi
 
 printf 'instalado: %s/%s\n' "$install_dir" "$exec_name"
-[[ -n "$cli" ]] && printf 'instalado: %s/auri\n' "$install_dir"
+[[ -n "$cli_file" ]] && printf 'instalado: %s/auri\n' "$install_dir"
 [[ "$desktop" == true ]] && printf 'desktop: %s/applications/%s.desktop\n' "$data_dir" "$exec_name"
