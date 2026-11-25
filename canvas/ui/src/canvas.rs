@@ -5301,7 +5301,7 @@ impl Render for Canvas {
                                             MouseButton::Left,
                                             |_, _, cx| cx.stop_propagation(),
                                         )
-                                        .child("Clique no destino para conectar · Esc cancela"),
+                                        .child("Clique no destino · troque de workspace na barra lateral · Esc cancela"),
                                 )
                             })
                             .when(self.placing || self.placing_text, |area| {
