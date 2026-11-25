@@ -207,31 +207,49 @@ impl AgentRegistry {
     }
 }
 
-/// Resolve an address for the card that made the request. An unqualified
-/// address is local to that card even when another workspace is active; a
-/// qualified address names its workspace explicitly.
+/// Resolve an address for the card that made the request. An exact local id
+/// or display name always wins — even when it contains `@`; only otherwise is
+/// the address treated as a qualified reference to another workspace.
 fn resolve_for_caller(
     store: &WorkspaceStore,
     workspace: &WorkspaceState,
     address: &str,
 ) -> Option<(WorkspaceId, ConnectionTarget)> {
+    if let Some(target) = Canvas::resolve_target(workspace, address) {
+        return Some((workspace.id, target));
+    }
     if address.contains('@') {
         Canvas::resolve_qualified_target(store, address)
     } else {
-        Canvas::resolve_target(workspace, address).map(|target| (workspace.id, target))
+        None
     }
 }
 
 /// The suffix printed by `list` and used inside cross-workspace envelopes.
-/// Lowercase names keep the suffix directly usable as an address.
+/// Lowercase names keep the suffix directly usable as an address; when the
+/// resolver could not resolve that name back, the stable workspace id is used.
 fn workspace_address(store: &WorkspaceStore, workspace: WorkspaceId) -> String {
-    store
-        .workspaces()
-        .iter()
-        .find(|item| item.id == workspace)
-        .map(|item| item.name.trim().to_ascii_lowercase())
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| workspace.to_string())
+    let Some(found) = store.workspaces().iter().find(|item| item.id == workspace) else {
+        return workspace.to_string();
+    };
+    let name = found.name.trim();
+    let name_unique = !name.is_empty()
+        && store
+            .workspaces()
+            .iter()
+            .filter(|item| item.name.trim().eq_ignore_ascii_case(name))
+            .count() == 1;
+    // The resolver prefers a numeric qualifier as an id, so a numeric name
+    // pointing elsewhere cannot be used as a suffix either.
+    let name_is_id_of_other = name
+        .parse::<WorkspaceId>()
+        .ok()
+        .is_some_and(|id| id != workspace && store.workspaces().iter().any(|item| item.id == id));
+    if name_unique && !name_is_id_of_other {
+        name.to_ascii_lowercase()
+    } else {
+        workspace.to_string()
+    }
 }
 
 /// Resolve a CLI address to a card: canonical workspace-local id first, then
@@ -5643,6 +5661,123 @@ mod connect_tests {
     }
 
     #[test]
+    fn workspace_suffix_falls_back_to_id_when_names_collide() {
+        let (store, auri, auro) = duplicate_id_store();
+        assert_eq!(workspace_address(&store, auri), "auri");
+        assert_eq!(workspace_address(&store, auro), "auro");
+
+        let (mut ambiguous, _, auro) = duplicate_id_store();
+        ambiguous.add("AURO".into(), WorkspaceIcon::Globe, std::env::temp_dir());
+        let suffix = workspace_address(&ambiguous, auro);
+        assert_eq!(suffix, auro.to_string(), "a duplicate name would print an unresolvable suffix");
+        assert_eq!(
+            Canvas::resolve_qualified_target(&ambiguous, &format!("4@{suffix}")),
+            Some((auro, ConnectionTarget::Card(4))),
+            "the suffix printed by `list` must be a usable address"
+        );
+    }
+
+    #[test]
+    fn local_card_name_containing_at_stays_local() {
+        let mut store = WorkspaceStore::new();
+        let local = store.add("Turno".into(), WorkspaceIcon::Star, std::env::temp_dir());
+        let card = store
+            .workspace_mut(local.id)
+            .unwrap()
+            .canvas
+            .add_agent_named("Ops@Night".into(), AgentKind::Claude, bounds())
+            .id;
+        let state = store.workspaces().iter().find(|item| item.id == local.id).unwrap();
+
+        assert_eq!(
+            resolve_for_caller(&store, state, "Ops@Night"),
+            Some((local.id, ConnectionTarget::Card(card))),
+            "an exact local name is never a workspace qualifier"
+        );
+    }
+
+    #[test]
+    fn qualified_check_reads_the_target_workspace_screen() {
+        use auro::gpui::TestAppContext;
+
+        let json = r#"{
+            "workspaces": [
+                {"id":1,"name":"Auri","icon":"Star","root":"/tmp","canvas":{
+                    "agents":[{"id":1,"kind":"Claude","name":"Writer","bounds":{"x":0.0,"y":0.0,"width":400.0,"height":240.0}}],
+                    "terminals":[{"id":3,"title":"Local","exited":false,"bounds":{"x":0.0,"y":0.0,"width":400.0,"height":240.0}}],
+                    "connections":[
+                        {"from":{"Card":1},"to":{"Card":2},"from_workspace":1,"to_workspace":2},
+                        {"from":{"Card":1},"to":{"Card":4},"from_workspace":1,"to_workspace":2}
+                    ],"next_id":5}},
+                {"id":2,"name":"Auro","icon":"Folder","root":"/tmp","canvas":{
+                    "terminals":[
+                        {"id":2,"title":"Peer","exited":false,"bounds":{"x":0.0,"y":0.0,"width":400.0,"height":240.0}},
+                        {"id":4,"title":"No view","exited":false,"bounds":{"x":0.0,"y":0.0,"width":400.0,"height":240.0}}
+                    ],"next_id":5}}
+            ],
+            "active":1,"next_id":5
+        }"#;
+        let store: WorkspaceStore = serde_json::from_str(json).expect("two-workspace store");
+        let mut cx = TestAppContext::single();
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            gpui_component::theme::Theme::change(gpui_component::theme::ThemeMode::Dark, None, cx);
+        });
+        let (view, vcx) = cx.add_window_view(|window, cx| {
+            Canvas::new(store, LoadOutcome::Fresh, window.window_handle(), None, cx)
+        });
+        vcx.run_until_parked();
+
+        let token = vcx.update(|_, cx| view.update(cx, |canvas, cx| {
+            canvas
+                .spawn_cli_card(1, 3, CardKind::Terminal, Some("echo LOCAL_LINE".into()), cx)
+                .expect("local card");
+            canvas
+                .spawn_cli_card(2, 2, CardKind::Terminal, Some("echo PEER_LINE".into()), cx)
+                .expect("peer card");
+            canvas.registry.issue(1, 1)
+        }));
+
+        // The PTY feeds the terminal view asynchronously; poll until its output
+        // is visible instead of assuming one event loop turn is enough.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let peer = loop {
+            vcx.run_until_parked();
+            let response = vcx.update(|_, cx| view.update(cx, |canvas, cx| {
+                canvas.handle_request(
+                    &token,
+                    Request::Check { target: "2@auro".into(), lines: None },
+                    cx,
+                )
+            }));
+            if matches!(&response, Response::Ok(lines) if lines.contains("PEER_LINE"))
+                || Instant::now() >= deadline
+            {
+                break response;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let Response::Ok(lines) = &peer else {
+            panic!("a connected qualified check must read the peer screen: {peer:?}");
+        };
+        assert!(lines.contains("PEER_LINE"), "the peer's screen was not used: {lines}");
+        assert!(!lines.contains("LOCAL_LINE"), "the caller's card must not answer: {lines}");
+
+        let unavailable = vcx.update(|_, cx| view.update(cx, |canvas, cx| {
+            canvas.handle_request(
+                &token,
+                Request::Check { target: "4@auro".into(), lines: None },
+                cx,
+            )
+        }));
+        assert_eq!(
+            unavailable,
+            Response::Err("target_unavailable".into()),
+            "a peer without a live card view cannot be read"
+        );
+    }
+
+    #[test]
     fn island_connect_without_a_selected_card_does_nothing() {
         let mut mode = None;
 
@@ -5955,6 +6090,8 @@ pub(crate) mod test_support {
         registry: AgentRegistry,
         token: String,
         written: Arc<Mutex<Vec<u8>>>,
+        peer_token: String,
+        peer_written: Arc<Mutex<Vec<u8>>>,
     }
 
     struct BufferWriter(Arc<Mutex<Vec<u8>>>);
@@ -5990,17 +6127,28 @@ pub(crate) mod test_support {
             let store: WorkspaceStore = serde_json::from_str(&json).expect("two-workspace store");
             let mut registry = AgentRegistry::default();
             let token = registry.issue(1, 1);
+            let peer_token = registry.issue(2, 2);
             let written = Arc::new(Mutex::new(Vec::new()));
+            let peer_written = Arc::new(Mutex::new(Vec::new()));
             registry.register(2, 2, Arc::new(Mutex::new(Box::new(BufferWriter(written.clone())))));
-            Self { store, registry, token, written }
+            registry.register(1, 1, Arc::new(Mutex::new(Box::new(BufferWriter(peer_written.clone())))));
+            Self { store, registry, token, written, peer_token, peer_written }
         }
 
         pub(crate) fn run(&mut self, request: Request) -> Response {
             dispatch_authorized(&mut self.store, &mut self.registry, &self.token, request).response
         }
 
+        pub(crate) fn run_as_peer(&mut self, request: Request) -> Response {
+            dispatch_authorized(&mut self.store, &mut self.registry, &self.peer_token, request).response
+        }
+
         pub(crate) fn written(&self) -> String {
             String::from_utf8(self.written.lock().expect("test buffer").clone()).expect("utf8 envelope")
+        }
+
+        pub(crate) fn peer_written(&self) -> String {
+            String::from_utf8(self.peer_written.lock().expect("test buffer").clone()).expect("utf8 envelope")
         }
     }
 

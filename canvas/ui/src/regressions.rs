@@ -115,6 +115,12 @@ fn connected_normal_peer_lists_and_asks_across_but_unconnected_is_refused() {
     });
     assert_eq!(reply, Response::Ok(String::new()));
     assert_eq!(connected.written(), "auri from Writer <1@auri>\nvamos\r");
+    let ask_back = connected.run_as_peer(Request::Ask {
+        target: "1@auri".into(),
+        raw: b"resposta".to_vec(),
+    });
+    assert_eq!(ask_back, Response::Ok(String::new()));
+    assert_eq!(connected.peer_written(), "auri from Leitor <2@auro>\nresposta\r");
 
     let mut unconnected = test_support::PeerHarness::new(false, false);
     let Response::Ok(lines) = unconnected.run(Request::List) else {
@@ -126,6 +132,11 @@ fn connected_normal_peer_lists_and_asks_across_but_unconnected_is_refused() {
         Response::Err("permission_denied".into())
     );
     assert!(unconnected.written().is_empty());
+    assert_eq!(
+        unconnected.run_as_peer(Request::Ask { target: "1@auri".into(), raw: b"resposta".to_vec() }),
+        Response::Err("permission_denied".into())
+    );
+    assert!(unconnected.peer_written().is_empty());
 }
 
 #[test]
