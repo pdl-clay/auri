@@ -86,7 +86,10 @@ impl Connection {
     }
 
     /// True when both endpoints are explicitly qualified with different
-    /// workspace ids. Unqualified endpoints stay local to the storing workspace.
+    /// workspace ids. One-sided qualification cannot be classified without the
+    /// storing workspace, so it is conservatively reported as local here. When
+    /// the storing workspace is known, `WorkspaceStore::connected_across` is the
+    /// authoritative check: it resolves `None` to that workspace.
     pub fn is_cross_workspace(&self) -> bool {
         match (self.from_workspace, self.to_workspace) {
             (Some(from), Some(to)) => from != to,
@@ -1596,6 +1599,47 @@ mod workspace_tests {
             ConnectionTarget::Card(4),
             b.id,
             ConnectionTarget::Card(3),
+        ));
+    }
+
+    #[test]
+    fn one_sided_workspace_ids_are_local_to_the_helper_but_resolve_in_store() {
+        let mut store = WorkspaceStore::new();
+        let a = store.add("A".into(), WorkspaceIcon::Star, PathBuf::from("/a"));
+        let b = store.add("B".into(), WorkspaceIcon::Bolt, PathBuf::from("/b"));
+
+        let from_qualified = Connection {
+            from: ConnectionTarget::Card(1),
+            to: ConnectionTarget::Note(2),
+            from_workspace: Some(a.id),
+            to_workspace: None,
+        };
+        let to_qualified = Connection {
+            from: ConnectionTarget::Card(3),
+            to: ConnectionTarget::Note(4),
+            from_workspace: None,
+            to_workspace: Some(a.id),
+        };
+        assert!(!from_qualified.is_cross_workspace());
+        assert!(!to_qualified.is_cross_workspace());
+
+        let canvas = &mut store.workspace_mut(b.id).unwrap().canvas;
+        canvas.connections.push(from_qualified);
+        canvas.connections.push(to_qualified);
+
+        // Stored in B, each unqualified end resolves to B, so both edges are
+        // cross-workspace under the store's authoritative lookup.
+        assert!(store.connected_across(
+            a.id,
+            ConnectionTarget::Card(1),
+            b.id,
+            ConnectionTarget::Note(2),
+        ));
+        assert!(store.connected_across(
+            b.id,
+            ConnectionTarget::Card(3),
+            a.id,
+            ConnectionTarget::Note(4),
         ));
     }
 }
