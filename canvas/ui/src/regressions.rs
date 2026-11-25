@@ -139,6 +139,22 @@ fn connected_normal_peer_lists_and_asks_across_but_unconnected_is_refused() {
     assert!(unconnected.peer_written().is_empty());
 }
 
+/// At startup a peer workspace has no live writers. A stale writer from an
+/// earlier load must not receive bytes: the ask first rebuilds the peer and
+/// registers its fresh writer, then writes the envelope to that writer.
+#[test]
+fn ask_to_unloaded_peer_waits_for_the_fresh_writer() {
+    let probe = test_support::probe_unloaded_peer_ask(true);
+
+    assert_eq!(probe.response, Response::Ok(String::new()));
+    assert!(probe.has_peer_writer, "the fresh peer PTY writer must be registered");
+    assert!(probe.stale_bytes.is_empty(), "bytes went to a stale writer: {:?}", probe.stale_bytes);
+    assert_eq!(probe.active_before, Some(1));
+    assert_eq!(probe.active_after, Some(1), "loading a peer must not change the active workspace");
+    assert!(!probe.peer_unloaded);
+    assert_eq!(probe.peer_cards, 1);
+}
+
 #[test]
 fn old_config_regression_loads_without_connections() {
     // A config written before the feature: no `connections`, no `admin`,

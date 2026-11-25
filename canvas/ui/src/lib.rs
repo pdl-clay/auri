@@ -202,9 +202,12 @@ pub fn run() {
                         let answer = canvas
                             .upgrade()
                             .and_then(|entity| {
-                                entity
-                                    .update(cx, |canvas, cx| canvas.handle_request(&line.token, line.request, cx))
-                                    .ok()
+                                cx.update_window(handle, |_, window, app| {
+                                    entity.update(app, |canvas, cx| {
+                                        canvas.handle_request(&line.token, line.request, window, cx)
+                                    })
+                                })
+                                .ok()
                             })
                             .unwrap_or_else(|| Response::Err("host_unavailable".into()));
                         let _ = reply.send(answer);

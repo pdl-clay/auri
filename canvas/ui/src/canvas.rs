@@ -1157,14 +1157,22 @@ struct WorkspaceLayout {
 }
 
 /// Select a workspace and clear its unloaded flag, returning the saved layout
-/// the GPUI side must rebuild. Already-loaded workspaces need no rebuild.
-fn begin_workspace_load(store: &mut WorkspaceStore, id: WorkspaceId) -> Option<WorkspaceLayout> {
+/// the GPUI side must rebuild. `activate` is false for a background peer load,
+/// which must leave `WorkspaceStore::active()` untouched. Already-loaded
+/// workspaces need no rebuild.
+fn begin_workspace_load(
+    store: &mut WorkspaceStore,
+    id: WorkspaceId,
+    activate: bool,
+) -> Option<WorkspaceLayout> {
     let workspace = store.workspace_mut(id)?;
     if !workspace.unloaded {
         return None;
     }
     workspace.mark_loaded();
-    store.select(id);
+    if activate {
+        store.select(id);
+    }
     let workspace = store.workspace_mut(id)?;
     Some(WorkspaceLayout {
         root: workspace.root.clone(),
@@ -1413,13 +1421,49 @@ impl Canvas {
     }
 
     /// Authenticate and run one host request on the main GPUI thread.
-    pub fn handle_request(&mut self, token: &str, request: Request, cx: &mut Context<Self>) -> Response {
+    pub fn handle_request(
+        &mut self,
+        token: &str,
+        request: Request,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Response {
         if let Response::Err(reason) = authorize_request(&self.registry, &self.store, token, &request) {
             return Response::Err(reason);
         }
         let Some((workspace_id, caller)) = self.registry.resolve(&self.store, token) else {
             return Response::Err("permission_denied".into());
         };
+        // A connected address may name a peer whose workspace is still
+        // unloaded. Rebuild its PTYs and register their writers before
+        // dispatch delivers bytes; the active workspace must not change.
+        let address = match &request {
+            Request::Ask { target, .. } | Request::Check { target, .. } => Some(target.as_str()),
+            _ => None,
+        };
+        let peer = address
+            .and_then(|address| {
+                let caller = self
+                    .store
+                    .workspaces()
+                    .iter()
+                    .find(|workspace| workspace.id == workspace_id)?;
+                resolve_for_caller(&self.store, caller, address)
+            })
+            .and_then(|(target_workspace, _)| {
+                let unloaded = self
+                    .store
+                    .workspaces()
+                    .iter()
+                    .find(|workspace| workspace.id == target_workspace)
+                    .is_some_and(|workspace| workspace.unloaded);
+                (target_workspace != workspace_id && unloaded).then_some(target_workspace)
+            });
+        if let Some(peer) = peer
+            && let Err(error) = self.load_peer_workspace(peer, window, cx)
+        {
+            return Response::Err(error);
+        }
         if let Request::Check { target, lines } = &request {
             return self.answer_check(workspace_id, target, *lines, cx);
         }
@@ -3055,11 +3099,56 @@ impl Canvas {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let canvas = cx.weak_entity();
+        if let Err(error) = self.rebuild_workspace(id, window, cx, canvas, true) {
+            self.error = Some(error);
+        }
+        self.clear_note_selection(cx);
+        self.finish_store_change(cx);
+        cx.notify();
+    }
+
+    /// Load a peer workspace in the background: its saved cards get fresh
+    /// PTYs and registered writers, but the active workspace stays selected.
+    /// The caller dispatches only after this returns, so bytes are never sent
+    /// to a workspace whose new writers are not ready yet.
+    pub fn load_peer_workspace(
+        &mut self,
+        id: WorkspaceId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let canvas = cx.weak_entity();
+        let result = self.rebuild_workspace(id, window, cx, canvas, false);
+        self.finish_store_change(cx);
+        cx.notify();
+        result
+    }
+
+    /// Rebuild one workspace's cards and notes from persisted state. Shared by
+    /// the row click and the background peer load; `activate` decides whether
+    /// `begin_workspace_load` selects the workspace.
+    fn rebuild_workspace(
+        &mut self,
+        id: WorkspaceId,
+        window: &mut Window,
+        cx: &mut App,
+        canvas: WeakEntity<Self>,
+        activate: bool,
+    ) -> Result<(), String> {
         let Some(WorkspaceLayout { root, root_ok, terminals, notes, mut agents }) =
-            begin_workspace_load(&mut self.store, id)
+            begin_workspace_load(&mut self.store, id, activate)
         else {
-            return;
+            return Ok(());
         };
+        // An unusable shell root cannot produce writers; fail the request
+        // instead of leaving a loaded workspace with no live endpoints.
+        if !root_ok && !activate {
+            if let Some(workspace) = self.store.workspace_mut(id) {
+                workspace.mark_unloaded();
+            }
+            return Err("target_unavailable".into());
+        }
         if let Some(workspace) = self.store.workspace_mut(id) {
             workspace.canvas.reindex_titles();
             let names: HashMap<TerminalId, String> = workspace
@@ -3074,14 +3163,12 @@ impl Canvas {
                 }
             }
         }
-        self.clear_note_selection(cx);
         // An unloaded workspace has no live cards; drop any stale entities.
         let dropped = self.cards.remove(&id).unwrap_or_default();
         let dropped_notes = self.notes.remove(&id).unwrap_or_default();
         drop(dropped);
         drop(dropped_notes);
 
-        let canvas = cx.entity().downgrade();
         let (zoom, offset_x, offset_y) = (self.zoom, self.offset_x, self.offset_y);
         let ids = terminals
             .iter()
@@ -3203,8 +3290,7 @@ impl Canvas {
             self.notes.entry(id).or_default().push((note.id, note_entity));
         }
 
-        self.finish_store_change(cx);
-        cx.notify();
+        Ok(())
     }
 }
 
@@ -4958,7 +5044,7 @@ mod tests {
         store.workspace_mut(first.id).unwrap().unload();
         store.select(second.id);
 
-        let layout = begin_workspace_load(&mut store, first.id).expect("unloaded workspace");
+        let layout = begin_workspace_load(&mut store, first.id, true).expect("unloaded workspace");
 
         assert!(layout.root_ok);
         assert_eq!(layout.terminals.len(), 1);
@@ -4971,7 +5057,7 @@ mod tests {
         assert!(store.workspaces()[1].unloaded);
 
         // Clicking an already-loaded workspace must not rebuild or duplicate cards.
-        assert!(begin_workspace_load(&mut store, first.id).is_none());
+        assert!(begin_workspace_load(&mut store, first.id, true).is_none());
         store.select(first.id);
         assert!(!store.workspaces()[0].unloaded);
         assert_eq!(store.workspaces()[0].canvas.terminals().len(), 1);
@@ -5743,10 +5829,11 @@ mod connect_tests {
         let deadline = Instant::now() + Duration::from_secs(5);
         let peer = loop {
             vcx.run_until_parked();
-            let response = vcx.update(|_, cx| view.update(cx, |canvas, cx| {
+            let response = vcx.update(|window, cx| view.update(cx, |canvas, cx| {
                 canvas.handle_request(
                     &token,
                     Request::Check { target: "2@auro".into(), lines: None },
+                    window,
                     cx,
                 )
             }));
@@ -5763,10 +5850,11 @@ mod connect_tests {
         assert!(lines.contains("PEER_LINE"), "the peer's screen was not used: {lines}");
         assert!(!lines.contains("LOCAL_LINE"), "the caller's card must not answer: {lines}");
 
-        let unavailable = vcx.update(|_, cx| view.update(cx, |canvas, cx| {
+        let unavailable = vcx.update(|window, cx| view.update(cx, |canvas, cx| {
             canvas.handle_request(
                 &token,
                 Request::Check { target: "4@auro".into(), lines: None },
+                window,
                 cx,
             )
         }));
@@ -5775,6 +5863,18 @@ mod connect_tests {
             Response::Err("target_unavailable".into()),
             "a peer without a live card view cannot be read"
         );
+    }
+
+    #[test]
+    fn ask_to_unloaded_peer_loads_cards_writes_to_pty_and_keeps_active_workspace() {
+        let probe = test_support::probe_unloaded_peer_ask(false);
+
+        assert_eq!(probe.active_before, Some(1));
+        assert_eq!(probe.response, Response::Ok(String::new()));
+        assert_eq!(probe.active_after, Some(1), "background load must not switch workspace");
+        assert!(!probe.peer_unloaded, "the peer's saved cards must be live now");
+        assert_eq!(probe.peer_cards, 1, "the peer agent card must be rebuilt");
+        assert!(probe.has_peer_writer, "the ask needs a registered peer writer");
     }
 
     #[test]
@@ -6104,6 +6204,93 @@ pub(crate) mod test_support {
 
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
+        }
+    }
+
+    /// Result of a real host ask against a peer whose workspace is still
+    /// unloaded at startup. `stale` simulates a writer left in the registry
+    /// from a previous load; a correct ask replaces it before writing bytes.
+    pub(crate) struct PeerLoadProbe {
+        pub(crate) response: Response,
+        pub(crate) active_before: Option<WorkspaceId>,
+        pub(crate) active_after: Option<WorkspaceId>,
+        pub(crate) peer_unloaded: bool,
+        pub(crate) peer_cards: usize,
+        pub(crate) has_peer_writer: bool,
+        pub(crate) stale_bytes: String,
+    }
+
+    pub(crate) fn probe_unloaded_peer_ask(stale_writer: bool) -> PeerLoadProbe {
+        use auro::gpui::TestAppContext;
+
+        let json = r#"{
+            "workspaces": [
+                {"id":1,"name":"Auri","icon":"Star","root":"/tmp","unloaded":false,"canvas":{
+                    "agents":[{"id":1,"kind":"Claude","name":"Writer","bounds":{"x":0.0,"y":0.0,"width":200.0,"height":120.0}}],
+                    "connections":[{"from":{"Card":1},"to":{"Card":2},"from_workspace":1,"to_workspace":2}],
+                    "next_id":2}},
+                {"id":2,"name":"Auro","icon":"Folder","root":"/tmp","unloaded":true,"canvas":{
+                    "agents":[{"id":2,"kind":"Claude","name":"Leitor","bounds":{"x":0.0,"y":0.0,"width":200.0,"height":120.0}}],
+                    "next_id":3}}
+            ],
+            "active":1,"next_id":3
+        }"#;
+        let store: WorkspaceStore = serde_json::from_str(json).expect("two-workspace store");
+        let mut cx = TestAppContext::single();
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            gpui_component::theme::Theme::change(gpui_component::theme::ThemeMode::Dark, None, cx);
+        });
+        let (view, vcx) = cx.add_window_view(|window, cx| {
+            Canvas::new(store, LoadOutcome::Fresh, window.window_handle(), None, cx)
+        });
+        vcx.run_until_parked();
+        let stale = Arc::new(Mutex::new(Vec::new()));
+        let (token, active_before) = vcx.update(|_, cx| view.update(cx, |canvas, cx| {
+            canvas
+                .spawn_cli_card(1, 1, CardKind::Agent(AgentKind::Claude), None, cx)
+                .expect("caller card");
+            if stale_writer {
+                canvas.registry.register(
+                    2,
+                    2,
+                    Arc::new(Mutex::new(Box::new(BufferWriter(stale.clone())))),
+                );
+            }
+            (canvas.registry.issue(1, 1), canvas.store.active())
+        }));
+        let response = vcx.update(|window, cx| view.update(cx, |canvas, cx| {
+            canvas.handle_request(
+                &token,
+                Request::Ask { target: "2@auro".into(), raw: b"ping".to_vec() },
+                window,
+                cx,
+            )
+        }));
+        let (active_after, peer_unloaded, peer_cards, has_peer_writer) =
+            vcx.update(|_, cx| view.update(cx, |canvas, _cx| {
+                let peer = canvas
+                    .store
+                    .workspaces()
+                    .iter()
+                    .find(|workspace| workspace.id == 2)
+                    .expect("peer workspace");
+                (
+                    canvas.store.active(),
+                    peer.unloaded,
+                    canvas.cards.get(&2).map_or(0, Vec::len),
+                    canvas.registry.writers.contains_key(&(2, 2)),
+                )
+            }));
+        PeerLoadProbe {
+            response,
+            active_before,
+            active_after,
+            peer_unloaded,
+            peer_cards,
+            has_peer_writer,
+            stale_bytes: String::from_utf8(stale.lock().expect("stale buffer").clone())
+                .expect("utf8 envelope"),
         }
     }
 
