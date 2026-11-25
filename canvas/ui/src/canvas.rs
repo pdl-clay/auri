@@ -5878,6 +5878,36 @@ mod connect_tests {
     }
 
     #[test]
+    fn qualified_check_to_unloaded_peer_loads_and_reads_its_fresh_screen() {
+        let probe = test_support::probe_unloaded_peer_check();
+
+        // A freshly restarted peer has a new screen: its first read is Ok with
+        // only startup output (possibly empty), never the caller's screen.
+        assert!(
+            matches!(&probe.response, Response::Ok(_)),
+            "a qualified check must read the loaded peer: {:?}",
+            probe.response
+        );
+        assert_eq!(probe.active_before, Some(1));
+        assert_eq!(probe.active_after, Some(1), "the check must not switch workspace");
+        assert!(!probe.peer_unloaded);
+        assert_eq!(probe.peer_cards, 1);
+        assert!(probe.has_peer_writer);
+    }
+
+    #[test]
+    fn ask_to_unloaded_peer_with_invalid_root_is_refused_without_staging_cards() {
+        let probe = test_support::probe_unloaded_peer_invalid_root();
+
+        assert_eq!(probe.response, Response::Err("target_unavailable".into()));
+        assert_eq!(probe.active_before, Some(1));
+        assert_eq!(probe.active_after, Some(1), "a failed load must not switch workspace");
+        assert!(probe.peer_unloaded, "the peer must stay unloaded after a failed load");
+        assert_eq!(probe.peer_cards, 0, "no half-open card may be staged");
+        assert!(!probe.has_peer_writer, "no writer may be registered for the failed peer");
+    }
+
+    #[test]
     fn island_connect_without_a_selected_card_does_nothing() {
         let mut mode = None;
 
@@ -6221,6 +6251,21 @@ pub(crate) mod test_support {
     }
 
     pub(crate) fn probe_unloaded_peer_ask(stale_writer: bool) -> PeerLoadProbe {
+        probe_unloaded_peer(stale_writer, false, false)
+    }
+
+    /// A qualified check also uses an unloaded peer: it must load in the
+    /// background and read that peer's freshly started screen.
+    pub(crate) fn probe_unloaded_peer_check() -> PeerLoadProbe {
+        probe_unloaded_peer(false, false, true)
+    }
+
+    /// A peer whose shell root does not exist cannot produce any writers.
+    pub(crate) fn probe_unloaded_peer_invalid_root() -> PeerLoadProbe {
+        probe_unloaded_peer(false, true, false)
+    }
+
+    fn probe_unloaded_peer(stale_writer: bool, invalid_root: bool, check: bool) -> PeerLoadProbe {
         use auro::gpui::TestAppContext;
 
         let json = r#"{
@@ -6235,7 +6280,16 @@ pub(crate) mod test_support {
             ],
             "active":1,"next_id":3
         }"#;
-        let store: WorkspaceStore = serde_json::from_str(json).expect("two-workspace store");
+        let mut store: WorkspaceStore = serde_json::from_str(json).expect("two-workspace store");
+        if invalid_root {
+            let peer = store.workspace_mut(2).expect("peer workspace");
+            peer.update_details(
+                "Auro".into(),
+                WorkspaceIcon::Folder,
+                WorkspaceColor::Brass,
+                PathBuf::from("/definitely-missing/auri-task3-peer"),
+            );
+        }
         let mut cx = TestAppContext::single();
         cx.update(|cx| {
             gpui_component::init(cx);
@@ -6259,13 +6313,13 @@ pub(crate) mod test_support {
             }
             (canvas.registry.issue(1, 1), canvas.store.active())
         }));
+        let request = if check {
+            Request::Check { target: "2@auro".into(), lines: None }
+        } else {
+            Request::Ask { target: "2@auro".into(), raw: b"ping".to_vec() }
+        };
         let response = vcx.update(|window, cx| view.update(cx, |canvas, cx| {
-            canvas.handle_request(
-                &token,
-                Request::Ask { target: "2@auro".into(), raw: b"ping".to_vec() },
-                window,
-                cx,
-            )
+            canvas.handle_request(&token, request, window, cx)
         }));
         let (active_after, peer_unloaded, peer_cards, has_peer_writer) =
             vcx.update(|_, cx| view.update(cx, |canvas, _cx| {
