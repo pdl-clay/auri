@@ -874,7 +874,10 @@ impl TerminalView {
     }
 
     /// Feed bytes straight into the emulator for deterministic tests: no PTY
-    /// thread, timer or executor turn is involved.
+    /// thread, timer or executor turn is involved. Never call from production:
+    /// this method is compiled only with `cfg(test)` or the `test-support`
+    /// feature, which `canvas-ui` enables exclusively as a dev-dependency.
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn feed_bytes_for_test(&mut self, bytes: &[u8]) {
         self.state.process_bytes(bytes);

@@ -15,6 +15,10 @@ path = "src/lib.rs"
 # Upstream examples depend on dev-only crates; our app uses the library API.
 doctest = false
 
+# Test-only helper in view.rs; enabled solely by canvas-ui's dev-dependency.
+[features]
+test-support = []
+
 [dependencies.alacritty_terminal]
 version = "0.25.1"
 

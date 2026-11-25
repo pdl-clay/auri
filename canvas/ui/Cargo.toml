@@ -25,3 +25,6 @@ tempfile = "3"
 # Enables gpui/test-support through feature unification; the regression suite
 # drives real GPUI event dispatch instead of re-implementing it.
 auro-ui = { version = "=0.1.0-alpha.15", features = ["test-support"] }
+# Gated test-only feed used by the deterministic screen regression. The
+# feature is off in the app's normal dependency on gpui-terminal.
+gpui-terminal = { path = "../vendor/gpui-terminal", features = ["test-support"] }

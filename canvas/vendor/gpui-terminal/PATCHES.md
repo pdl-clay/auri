@@ -14,5 +14,10 @@ Vendored from crates.io to remove the per-character shaping on every paint.
   150 ms settle window. The PTY is not resized while the font is settling, so a
   zoom gesture no longer makes the child application redraw its whole screen
   on every scroll tick.
+- `view.rs`: `feed_bytes_for_test` injects bytes straight into the emulator
+  for the deterministic `auri check` regression. It is compiled only under
+  `cfg(test)` or the `test-support` feature, which `canvas-ui` enables as a
+  dev-dependency only; never call it from production. Re-apply this patch if
+  the vendored crate is refreshed.
 
 Upstream: https://github.com/zortax/gpui-terminal (MIT OR Apache-2.0).
