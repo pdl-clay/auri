@@ -6,10 +6,12 @@ use std::time::{Duration, Instant};
 use auro::gpui::{
     App, Bounds, Context, CursorStyle, Div, DragMoveEvent, Edges, Entity, EntityId, MouseButton,
     MouseDownEvent, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, Size, Stateful,
+
     WeakEntity, Window, div, px, rgb, svg,
 };
 use auro::prelude::*;
 use portable_pty::PtySize;
+
 use gpui_terminal::{TerminalConfig, TerminalView};
 use canvas_types::{AgentIcon, AgentKind, ConnectionTarget, TerminalId, WorkspaceId};
 
@@ -61,25 +63,18 @@ pub(crate) fn terminal_grid(bounds: &Bounds<Pixels>) -> (u16, u16) {
     grid_size(f32::from(bounds.size.width), content_height, FONT_TERMINAL, LINE_HEIGHT_TERMINAL)
 }
 
-/// Keep a dragged edge inside its minimum size and the canvas origin.
-fn resize_axis(
+/// Resize one axis. Start edges may cross the canvas origin: the canvas pans
+/// and cards can live at negative coordinates, so only the minimum size is a
+/// real limit.
+pub(crate) fn resize_axis(
     origin: f32,
     size: f32,
     delta: f32,
     min_size: f32,
-    min_origin: f32,
     from_start: bool,
 ) -> (f32, f32) {
     if from_start {
-        let max_step = size - min_size;
-        let min_step = min_origin - origin;
-        // When the origin is already left of `min_origin`, the two limits cannot
-        // both hold: preserve the minimum size and let pan handle the origin.
-        let step = if min_step > max_step {
-            delta.min(max_step)
-        } else {
-            delta.clamp(min_step, max_step)
-        };
+        let step = delta.min(size - min_size);
         (origin + step, size - step)
     } else {
         (origin, (size + delta).max(min_size))
@@ -124,6 +119,27 @@ impl Render for DragToken {
 }
 
 #[derive(Clone, Copy)]
+struct ScrollThumb {
+    card_id: EntityId,
+}
+
+impl ScrollThumb {
+    fn new(card_id: EntityId) -> Self {
+        Self { card_id }
+    }
+
+    fn targets(&self, card_id: EntityId) -> bool {
+        self.card_id == card_id
+    }
+}
+
+impl Render for ScrollThumb {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
+
+#[derive(Clone, Copy)]
 struct DragStart {
     mode: DragMode,
     position: Point<Pixels>,
@@ -149,6 +165,8 @@ pub struct TerminalCard {
     /// Owns the child process group; dropping it terminates the session.
     _pty: PtySession,
     drag: Option<DragStart>,
+    /// True while the terminal's scrollbar thumb is being dragged.
+    scroll_drag: bool,
     last_drag_notify: Option<Instant>,
     view_zoom: f32,
     view_offset_x: f32,
@@ -228,6 +246,7 @@ impl TerminalCard {
             _pty: pty,
             last_drag_notify: None,
             drag: None,
+            scroll_drag: false,
             root,
             view_zoom: 1.0,
             view_offset_x: 0.0,
@@ -305,22 +324,29 @@ impl TerminalCard {
         self.agent.clone()
     }
 
-    /// Open the agent edit menu at the event's own position, never a synthetic one.
-    fn open_agent_menu_at(&self, position: Point<Pixels>, cx: &mut App) {
-        if self.agent.is_none() {
-            return;
-        }
+    /// Right-click menu: agents keep `Editar`, plain terminals get `Conectar`.
+    fn open_context_menu_at(&self, position: Point<Pixels>, cx: &mut App) {
         let Some(canvas) = self.canvas.upgrade() else {
             return;
         };
         let workspace_id = self.workspace_id;
         let id = self.id;
+        let is_agent = self.agent.is_some();
         let _ = canvas.update(cx, |canvas, cx| {
-            canvas.open_agent_menu(workspace_id, id, position, cx)
+            if is_agent {
+                canvas.open_agent_menu(workspace_id, id, position, cx);
+            } else {
+                canvas.open_connect_menu(
+                    workspace_id,
+                    ConnectionTarget::Card(id),
+                    position,
+                    cx,
+                );
+            }
         });
     }
 
-    /// Apply the canvas zoom/pan to this card and its terminal font.
+    /// Apply canvas pan/zoom to the card and its text.
     pub fn set_view(&mut self, zoom: f32, offset_x: f32, offset_y: f32, cx: &mut Context<Self>) {
         let zoom_changed = (self.view_zoom - zoom).abs() > 0.005;
         self.view_zoom = zoom;
@@ -369,39 +395,39 @@ impl TerminalCard {
         let (nx, ny, nw, nh) = match start.mode {
             DragMode::Move => (x + dx, y + dy, w, h),
             DragMode::ResizeLeft => {
-                let (nx, nw) = resize_axis(x, w, dx, MIN_TERMINAL_WIDTH, 8.0, true);
+                let (nx, nw) = resize_axis(x, w, dx, MIN_TERMINAL_WIDTH, true);
                 (nx, y, nw, h)
             }
             DragMode::ResizeRight => {
-                let (_, nw) = resize_axis(x, w, dx, MIN_TERMINAL_WIDTH, 8.0, false);
+                let (_, nw) = resize_axis(x, w, dx, MIN_TERMINAL_WIDTH, false);
                 (x, y, nw, h)
             }
             DragMode::ResizeTop => {
-                let (ny, nh) = resize_axis(y, h, dy, MIN_TERMINAL_HEIGHT, 8.0, true);
+                let (ny, nh) = resize_axis(y, h, dy, MIN_TERMINAL_HEIGHT, true);
                 (x, ny, w, nh)
             }
             DragMode::ResizeBottom => {
-                let (_, nh) = resize_axis(y, h, dy, MIN_TERMINAL_HEIGHT, 8.0, false);
+                let (_, nh) = resize_axis(y, h, dy, MIN_TERMINAL_HEIGHT, false);
                 (x, y, w, nh)
             }
             DragMode::ResizeTopLeft => {
-                let (nx, nw) = resize_axis(x, w, dx, MIN_TERMINAL_WIDTH, 8.0, true);
-                let (ny, nh) = resize_axis(y, h, dy, MIN_TERMINAL_HEIGHT, 8.0, true);
+                let (nx, nw) = resize_axis(x, w, dx, MIN_TERMINAL_WIDTH, true);
+                let (ny, nh) = resize_axis(y, h, dy, MIN_TERMINAL_HEIGHT, true);
                 (nx, ny, nw, nh)
             }
             DragMode::ResizeTopRight => {
-                let (_, nw) = resize_axis(x, w, dx, MIN_TERMINAL_WIDTH, 8.0, false);
-                let (ny, nh) = resize_axis(y, h, dy, MIN_TERMINAL_HEIGHT, 8.0, true);
+                let (_, nw) = resize_axis(x, w, dx, MIN_TERMINAL_WIDTH, false);
+                let (ny, nh) = resize_axis(y, h, dy, MIN_TERMINAL_HEIGHT, true);
                 (x, ny, nw, nh)
             }
             DragMode::ResizeBottomLeft => {
-                let (nx, nw) = resize_axis(x, w, dx, MIN_TERMINAL_WIDTH, 8.0, true);
-                let (_, nh) = resize_axis(y, h, dy, MIN_TERMINAL_HEIGHT, 8.0, false);
+                let (nx, nw) = resize_axis(x, w, dx, MIN_TERMINAL_WIDTH, true);
+                let (_, nh) = resize_axis(y, h, dy, MIN_TERMINAL_HEIGHT, false);
                 (nx, y, nw, nh)
             }
             DragMode::ResizeBottomRight => {
-                let (_, nw) = resize_axis(x, w, dx, MIN_TERMINAL_WIDTH, 8.0, false);
-                let (_, nh) = resize_axis(y, h, dy, MIN_TERMINAL_HEIGHT, 8.0, false);
+                let (_, nw) = resize_axis(x, w, dx, MIN_TERMINAL_WIDTH, false);
+                let (_, nh) = resize_axis(y, h, dy, MIN_TERMINAL_HEIGHT, false);
                 (x, y, nw, nh)
             }
         };
@@ -452,9 +478,9 @@ impl TerminalCard {
             DragMode::ResizeTop => handle.top_0().left(px(HANDLE)).right(px(HANDLE)).h(px(HANDLE)),
             DragMode::ResizeBottom => handle.bottom_0().left(px(HANDLE)).right(px(HANDLE)).h(px(HANDLE)),
             DragMode::ResizeTopLeft => handle.left_0().top_0().w(px(18.0)).h(px(18.0)),
-            DragMode::ResizeTopRight => handle.right_0().top_0().w(px(18.0)).h(px(18.0)),
+            DragMode::ResizeTopRight => handle.right_0().top_0().w(px(HANDLE)).h(px(HANDLE)),
             DragMode::ResizeBottomLeft => handle.left_0().bottom_0().w(px(18.0)).h(px(18.0)),
-            DragMode::ResizeBottomRight => handle.right_0().bottom_0().w(px(18.0)).h(px(18.0)),
+            DragMode::ResizeBottomRight => handle.right_0().bottom_0().w(px(HANDLE)).h(px(HANDLE)),
         };
         handle
             .on_mouse_down(
@@ -496,6 +522,29 @@ pub(crate) fn scroll_delta(event: &ScrollWheelEvent) -> (f32, f32) {
     }
 }
 
+/// Scrollbar position to history ratio; bottom of the track is ratio 0.
+fn scrollbar_ratio(position_y: f32, card_top: f32, body_h: f32, thumb_h: f32) -> f32 {
+    let travel = body_h - thumb_h;
+    if travel <= 0.0 {
+        return 1.0;
+    }
+    let local = (position_y - card_top - thumb_h * 0.5) / travel;
+    1.0 - local.clamp(0.0, 1.0)
+}
+
+/// The thumb strip must cover the full right resize handle, including the
+/// path row, or a press near the bottom still starts a card resize.
+fn scrollbar_hit_height(card_height: f32) -> f32 {
+    (card_height - TITLE_HEIGHT).max(1.0)
+}
+
+/// The strip must be at least as wide as the right resize handles, otherwise
+/// their outer pixels stay clickable next to the thumb.
+fn scrollbar_hit_width() -> f32 {
+    HANDLE
+}
+
+
 impl Render for TerminalCard {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let id = self.id;
@@ -509,13 +558,24 @@ impl Render for TerminalCard {
         let bounds_canvas = self.canvas.clone();
         let saved_bounds = card_bounds(&self.bounds);
         let entity_id = cx.entity_id();
-        let scroll_canvas = self.canvas.clone();
+        let title_scroll_canvas = self.canvas.clone();
+        let path_scroll_canvas = self.canvas.clone();
+        let scrollbar_terminal = self.terminal.clone();
         let zoom = self.view_zoom;
         let agent = self.agent();
         let left = f32::from(self.bounds.origin.x) * zoom + self.view_offset_x;
         let top = f32::from(self.bounds.origin.y) * zoom + self.view_offset_y;
         let width = f32::from(self.bounds.size.width) * zoom;
         let height = f32::from(self.bounds.size.height) * zoom;
+        let (display_offset, history, screen_lines) = self.terminal.read(cx).scroll_info();
+        let body_h = (height - TITLE_HEIGHT - PATH_HEIGHT).max(1.0);
+        let total_lines = (screen_lines + history).max(1);
+        let thumb_h = (body_h * screen_lines as f32 / total_lines as f32).max(24.0).min(body_h);
+        let thumb_top = if history == 0 {
+            0.0
+        } else {
+            (1.0 - display_offset as f32 / history as f32) * (body_h - thumb_h)
+        };
         div()
             .id(("card-select", id))
             .on_mouse_down(
@@ -538,7 +598,7 @@ impl Render for TerminalCard {
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                     cx.stop_propagation();
-                    this.open_agent_menu_at(event.position, cx);
+                    this.open_context_menu_at(event.position, cx);
                 }),
             )
             .on_mouse_up(
@@ -554,13 +614,6 @@ impl Render for TerminalCard {
                 MouseButton::Left,
                 cx.listener(move |this, _, _, cx| this.end_drag(cx)),
             )
-            .on_scroll_wheel(cx.listener(move |_, event: &ScrollWheelEvent, _, cx| {
-                let (dx, dy) = scroll_delta(event);
-                let _ = scroll_canvas.update(cx, |canvas, cx| {
-                    canvas.apply_scroll(event.position, dx, dy, event.modifiers.control, event.modifiers.shift, cx)
-                });
-                cx.stop_propagation();
-            }))
             .absolute()
             .left(px(left))
             .top(px(top))
@@ -571,6 +624,7 @@ impl Render for TerminalCard {
             .overflow_hidden()
             .rounded(px(10.0))
             .bg(rgb(COLOR_BASE))
+            .text_size(px(FONT_CARD_TITLE * zoom))
             .when(selected, |card| {
                 card.border_2().border_dashed().border_color(rgb(COLOR_SELECTION))
             })
@@ -590,6 +644,20 @@ impl Render for TerminalCard {
                     .h(px(TITLE_HEIGHT))
                     .px_2()
                     .bg(rgb(COLOR_ELEVATED))
+                    .on_scroll_wheel(cx.listener(move |_, event: &ScrollWheelEvent, _, cx| {
+                        let (dx, dy) = scroll_delta(event);
+                        let _ = title_scroll_canvas.update(cx, |canvas, cx| {
+                            canvas.apply_scroll(
+                                event.position,
+                                dx,
+                                dy,
+                                event.modifiers.control,
+                                event.modifiers.shift,
+                cx,
+                            )
+                        });
+                        cx.stop_propagation();
+                    }))
                     .text_color(rgb(COLOR_FOREGROUND))
                     .child(
                         div()
@@ -605,7 +673,7 @@ impl Render for TerminalCard {
                                             .h(px(ICON_SIZE))
                                             .text_color(rgb(agent_color(icon))),
                                     )
-                                    .child(div().text_sm().child(name))
+                                    .child(div().child(name))
                             })
                             .when(agent.is_none(), |title| {
                                 title
@@ -620,20 +688,42 @@ impl Render for TerminalCard {
                                                 rgb(COLOR_SUBTLE)
                                             }),
                                     )
-                                    .child(div().text_sm().child(format!("Terminal {}", self.number)))
+                                    .child(div().child(format!("Terminal {}", self.number)))
                             })
                             .when(exited, |title| {
                                 title
                                     .child("encerrado")
-                                    .text_xs()
+                                    .text_size(px(FONT_CARD_PATH * zoom))
                                     .text_color(rgb(COLOR_DANGER))
                             }),
                     )
                     .child(
                         div()
                             .id(("close-terminal", id))
-                            .px_1()
-                            .on_click(cx.listener(move |_, _, _, cx| {
+                            .w(px(CLOSE_BUTTON_SIZE))
+                            .h(px(CLOSE_BUTTON_SIZE))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(RADIUS_CHIP))
+                            .text_size(px(CLOSE_ICON_SIZE))
+                            .text_color(rgb(COLOR_MUTED))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    if this.connect_mode {
+                                        let canvas = this.canvas.clone();
+                                        let _ = canvas.update(cx, |canvas, cx| {
+                                            canvas.complete_connect(ConnectionTarget::Card(id), cx)
+                                        });
+                                    }
+                                }),
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if this.connect_mode {
+                                    return;
+                                }
                                 let _ = canvas.update(cx, |canvas, cx| {
                                     canvas.remove(workspace_id, id, cx);
                                     cx.notify();
@@ -669,7 +759,7 @@ impl Render for TerminalCard {
                         MouseButton::Right,
                         cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                             cx.stop_propagation();
-                            this.open_agent_menu_at(event.position, cx);
+                            this.open_context_menu_at(event.position, cx);
                         }),
                     ),
             )
@@ -682,7 +772,21 @@ impl Render for TerminalCard {
                     .px_2()
                     .overflow_hidden()
                     .bg(rgb(COLOR_PANEL))
-                    .text_xs()
+                    .on_scroll_wheel(cx.listener(move |_, event: &ScrollWheelEvent, _, cx| {
+                        let (dx, dy) = scroll_delta(event);
+                        let _ = path_scroll_canvas.update(cx, |canvas, cx| {
+                            canvas.apply_scroll(
+                                event.position,
+                                dx,
+                                dy,
+                                event.modifiers.control,
+                                event.modifiers.shift,
+                cx,
+                            )
+                        });
+                        cx.stop_propagation();
+                    }))
+                    .text_size(px(FONT_CARD_PATH * zoom))
                     .text_color(rgb(COLOR_MUTED))
                     .child(self.root.to_string_lossy().into_owned()),
             )
@@ -694,12 +798,101 @@ impl Render for TerminalCard {
             .child(Self::resize_handle(id, DragMode::ResizeTopRight, entity_id, cx, connect_mode))
             .child(Self::resize_handle(id, DragMode::ResizeBottomLeft, entity_id, cx, connect_mode))
             .child(Self::resize_handle(id, DragMode::ResizeBottomRight, entity_id, cx, connect_mode))
+            .when(history > 0, |card| {
+                card.child(
+                    div()
+                        .id(("terminal-scrollbar", id))
+                        .debug_selector(|| "terminal-scrollbar".to_string())
+                        .absolute()
+                        .right(px(0.0))
+                        .top(px(TITLE_HEIGHT))
+                        .w(px(scrollbar_hit_width()))
+                        .h(px(scrollbar_hit_height(height)))
+                        // The right resize handle is behind this strip; block it
+                        // so dragging the thumb cannot resize the card.
+                        .occlude()
+                        .bg(rgb(COLOR_PANEL))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                cx.stop_propagation();
+                                // A resize gesture started before the pointer
+                                // reached the strip must not keep running.
+                                this.end_drag(cx);
+                                this.scroll_drag = true;
+                                let ratio = scrollbar_ratio(
+                                    f32::from(event.position.y) - top - TITLE_HEIGHT,
+                                    0.0,
+                                    body_h,
+                                    thumb_h,
+                                );
+                                this.terminal.update(cx, |terminal, cx| {
+                                    terminal.scroll_to_ratio(ratio, cx)
+                                });
+                                cx.notify();
+                            }),
+                        )
+                        .on_drag(ScrollThumb::new(entity_id), |thumb, _, _, cx| cx.new(|_| *thumb))
+                        .on_drag_move(
+                            cx.listener(move |this, event: &DragMoveEvent<ScrollThumb>, _, cx| {
+                                if !event.drag(cx).targets(entity_id) {
+                                    return;
+                                }
+                                let ratio = scrollbar_ratio(
+                                    f32::from(event.event.position.y) - top - TITLE_HEIGHT,
+                                    0.0,
+                                    body_h,
+                                    thumb_h,
+                                );
+                                this.terminal.update(cx, |terminal, cx| {
+                                    terminal.scroll_to_ratio(ratio, cx)
+                                });
+                            }),
+                        )
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.scroll_drag = false;
+                                cx.notify();
+                            }),
+                        )
+                        .on_mouse_up_out(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.scroll_drag = false;
+                                cx.notify();
+                            }),
+                        )
+                        .on_scroll_wheel(cx.listener(move |_, event: &ScrollWheelEvent, _, cx| {
+                            let consumed = scrollbar_terminal.update(cx, |terminal, cx| {
+                                terminal.handle_wheel(
+                                    event,
+                                    px(FONT_TERMINAL * zoom * LINE_HEIGHT_TERMINAL),
+                                    cx,
+                                )
+                            });
+                            if consumed {
+                                cx.stop_propagation();
+                            }
+                        }))
+                        .child(
+                            div()
+                                .absolute()
+                                .left(px((scrollbar_hit_width() - 4.0) / 2.0))
+                                .top(px(thumb_top))
+                                .w(px(4.0))
+                                .h(px(thumb_h))
+                                .rounded(px(RADIUS_CHIP))
+                                .bg(rgb(if self.scroll_drag { COLOR_ACCENT } else { COLOR_MUTED })),
+                        ),
+                )
+            })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{DragMode, DragToken, grid_size, resize_axis};
+    use super::{DragMode, DragToken, ScrollThumb, grid_size, resize_axis, scrollbar_hit_height, scrollbar_hit_width, scrollbar_ratio};
     use auro::gpui::EntityId;
 
     #[test]
@@ -717,17 +910,51 @@ mod tests {
     }
 
     #[test]
-    fn resizing_left_edge_moves_origin_and_keeps_minimum_width() {
-        let (origin, size) = resize_axis(100.0, 640.0, -40.0, 320.0, 8.0, true);
+    fn resizing_edges_keeps_minimum_size_but_not_the_canvas_origin() {
+        let (origin, size) = resize_axis(100.0, 640.0, -40.0, 240.0, true);
         assert_eq!((origin, size), (60.0, 680.0));
-        let (origin, size) = resize_axis(100.0, 400.0, -500.0, 320.0, 8.0, true);
-        assert_eq!((origin, size), (8.0, 492.0));
-        let (_, size) = resize_axis(100.0, 640.0, -40.0, 320.0, 8.0, false);
+        let (origin, size) = resize_axis(100.0, 400.0, -500.0, 240.0, true);
+        assert_eq!((origin, size), (-400.0, 900.0));
+        let (origin, size) = resize_axis(-672.0, 935.0, 500.0, 240.0, true);
+        assert_eq!((origin, size), (-172.0, 435.0));
+        let (_, size) = resize_axis(100.0, 640.0, -40.0, 240.0, false);
         assert_eq!(size, 600.0);
     }
+
     #[test]
-    fn resize_axis_tolerates_inverted_constraint_bounds() {
-        let (_, size) = resize_axis(-672.0, 935.0, -50.0, 320.0, 8.0, true);
-        assert!(size >= 320.0);
+    fn scrollbar_track_maps_top_to_history_and_bottom_to_live() {
+        let (body_h, thumb_h) = (200.0, 40.0);
+        assert_eq!(scrollbar_ratio(20.0, 0.0, body_h, thumb_h), 1.0);
+        assert_eq!(scrollbar_ratio(180.0, 0.0, body_h, thumb_h), 0.0);
+        assert_eq!(scrollbar_ratio(100.0, 0.0, body_h, thumb_h), 0.5);
+    }
+
+    #[test]
+    fn scrollbar_hitbox_covers_the_right_resize_handle() {
+        use crate::theme::{PATH_HEIGHT, TITLE_HEIGHT};
+
+        let card_h = 300.0;
+        assert_eq!(scrollbar_hit_height(card_h), card_h - TITLE_HEIGHT);
+        assert!(
+            scrollbar_hit_height(card_h) > card_h - TITLE_HEIGHT - PATH_HEIGHT,
+            "the path row must be covered too, or a press there still resizes the card"
+        );
+    }
+
+    #[test]
+    fn scrollbar_hitbox_leaves_no_resize_handle_exposed() {
+        use crate::theme::HANDLE;
+
+        assert!(
+            scrollbar_hit_width() >= HANDLE,
+            "a narrower strip leaves resize pixels beside the thumb"
+        );
+    }
+
+    #[test]
+    fn scroll_thumb_drag_targets_only_its_own_card() {
+        let thumb = ScrollThumb::new(EntityId::from(7));
+        assert!(thumb.targets(EntityId::from(7)));
+        assert!(!thumb.targets(EntityId::from(8)));
     }
 }

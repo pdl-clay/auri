@@ -8,6 +8,7 @@ pub mod permissions;
 pub mod theme;
 pub mod text_card;
 pub mod workspaces;
+pub mod updater;
 
 #[cfg(test)]
 mod regressions;
@@ -131,6 +132,12 @@ impl Drop for HostListener {
 
 /// Runs the app with the terminal canvas as the `main` window's root view.
 pub fn run() {
+    let dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    match crate::updater::prepare(&dir) {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(error) => eprintln!("auri updater unavailable: {error}"),
+    }
     // Install before the first window (and therefore the first agent PTY).
     let skill = match canvas::install_skill() {
         Ok(path) => Some(path),
@@ -179,7 +186,6 @@ pub fn run() {
             let view = cx.new(|cx| canvas::Canvas::new(store.clone(), load.clone(), handle, skill.clone(), cx));
             view.update(cx, |canvas, cx| canvas.bind_actions(cx));
             view.update(cx, |canvas, cx| canvas.prepare_workspaces(cx));
-
             // Requests arrive on the socket thread but must mutate the canvas
             // on the main thread; each connection waits for its own answer.
             let (sender, receiver) = mpsc::channel::<(RequestLine, mpsc::Sender<Response>)>();

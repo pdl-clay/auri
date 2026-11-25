@@ -75,7 +75,7 @@
 
 use alacritty_terminal::index::{Column, Line, Point as AlacPoint};
 use alacritty_terminal::term::TermMode;
-use gpui::{MouseButton, Pixels, Point};
+use gpui::{MouseButton, Pixels, Point, ScrollDelta};
 
 /// Type of text selection in the terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -476,11 +476,57 @@ pub fn pixels_to_scroll_lines(pixel_delta: Pixels, cell_height: Pixels) -> i32 {
     lines.clamp(-10.0, 10.0) as i32
 }
 
+/// Convert a GPUI wheel delta (positive = down) into terminal scroll lines
+/// (positive = up into history). One wheel notch is three lines.
+pub fn wheel_to_scroll_lines(delta_y: f32, cell_height: Pixels) -> i32 {
+    pixels_to_scroll_lines(gpui::px(-delta_y), cell_height)
+}
+
+/// Convert a GPUI wheel event to terminal lines (positive scrolls up).
+/// Line deltas are notches, not pixels: converting them through a fixed pixel
+/// budget makes one notch round to zero at large fonts/zoom.
+pub fn wheel_lines(delta: &ScrollDelta, cell_height: Pixels) -> i32 {
+    match delta {
+        ScrollDelta::Lines(point) => (-point.y * 3.0).clamp(-10.0, 10.0).round() as i32,
+        ScrollDelta::Pixels(point) => {
+            pixels_to_scroll_lines(gpui::px(-f32::from(point.y)), cell_height)
+        }
+    }
+}
+
+/// Alternate screen alone must not freeze scrollback: only an application
+/// that explicitly enabled mouse reporting owns the wheel.
+pub fn wheel_is_captured(mode: TermMode) -> bool {
+    mode.intersects(TermMode::MOUSE_REPORT_CLICK | TermMode::MOUSE_MOTION | TermMode::MOUSE_DRAG)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use gpui::{point, px};
 
+
+    #[test]
+    fn alternate_screen_does_not_capture_the_wheel() {
+        assert!(!wheel_is_captured(TermMode::ALT_SCREEN));
+        assert!(wheel_is_captured(TermMode::MOUSE_REPORT_CLICK));
+    }
+
+    #[test]
+    fn one_line_notch_scrolls_three_lines_at_any_font_size() {
+        assert_eq!(
+            wheel_lines(&ScrollDelta::Lines(gpui::point(0.0, -1.0)), gpui::px(160.0)),
+            3
+        );
+        assert_eq!(
+            wheel_lines(&ScrollDelta::Lines(gpui::point(0.0, 1.0)), gpui::px(160.0)),
+            -3
+        );
+        assert_eq!(
+            wheel_lines(&ScrollDelta::Pixels(gpui::point(px(0.0), px(-64.0))), gpui::px(16.0)),
+            4
+        );
+    }
     #[test]
     fn test_pixel_to_cell() {
         let position = point(px(100.0), px(50.0));
@@ -491,6 +537,14 @@ mod tests {
         let point = pixel_to_cell(position, origin, cell_width, cell_height);
         assert_eq!(point.column.0, 9);
         assert_eq!(point.line.0, 2);
+    }
+
+    #[test]
+    fn wheel_up_scrolls_into_history() {
+        let cell = px(16.0);
+        assert_eq!(wheel_to_scroll_lines(-48.0, cell), 3);
+        assert_eq!(wheel_to_scroll_lines(48.0, cell), -3);
+        assert_eq!(wheel_to_scroll_lines(0.0, cell), 0);
     }
 
     #[test]

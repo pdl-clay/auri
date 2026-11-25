@@ -1,7 +1,7 @@
 [app]
 identifier = "com.example.canvas"
 product-name = "canvas"
-version = "0.1.0"
+version = "0.1.1"
 
 [[app.windows]]
 label = "main"
@@ -12,3 +12,9 @@ height = 640
 [bundle]
 # A 512x512 placeholder shipped by `auro new`; replace it with the app's own icon.
 icon = ["icons/icon.png"]
+
+[updater]
+provider = "github"
+repository = "pdl-clay/auri"
+public-key = "d+Ltt6kOIF9kp5raaYtZTOEnZ1r3NjJr/D+UE8vKUi8="
+include-prereleases = true

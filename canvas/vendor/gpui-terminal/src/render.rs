@@ -102,6 +102,7 @@ struct RenderCache {
     columns: usize,
     full_rebuild: bool,
     font_settle_until: Option<Instant>,
+    display_offset: usize,
 }
 
 impl RenderCache {
@@ -229,6 +230,7 @@ impl TerminalRenderer {
         let metrics = self.cell_metrics(window);
         let rows = term.screen_lines();
         let columns = term.columns();
+        let display_offset = term.grid().display_offset();
         let default_bg = self.palette.resolve(
             Color::Named(NamedColor::Background),
             term.colors(),
@@ -240,7 +242,10 @@ impl TerminalRenderer {
         let mut damaged = vec![false; rows];
         let mut rebuild_all = {
             let cache = self.cache.borrow();
-            cache.full_rebuild || cache.rows.len() != rows || cache.columns != columns
+            cache.full_rebuild
+                || cache.rows.len() != rows
+                || cache.columns != columns
+                || cache.display_offset != display_offset
         };
         match term.damage() {
             TermDamage::Full => rebuild_all = true,
@@ -258,16 +263,16 @@ impl TerminalRenderer {
             if rebuild_all {
                 cache.rows = (0..rows).map(|_| RowPaint::default()).collect();
                 cache.columns = columns;
-                cache.full_rebuild = false;
+                cache.display_offset = display_offset;
             }
             if rebuild_all {
                 for (line, row) in cache.rows.iter_mut().enumerate() {
-                    self.rebuild_row(term, line, &metrics, row, window);
+                    self.rebuild_row(term, line, display_offset as i32, &metrics, row, window);
                 }
             } else {
                 for (line, row) in cache.rows.iter_mut().enumerate() {
                     if damaged[line] {
-                        self.rebuild_row(term, line, &metrics, row, window);
+                        self.rebuild_row(term, line, display_offset as i32, &metrics, row, window);
                     }
                 }
             }
@@ -334,25 +339,28 @@ impl TerminalRenderer {
             }
         }
 
-        let cursor_x = origin.x + metrics.cell_width * (cursor.column.0 as f32);
-        let cursor_y = origin.y + metrics.cell_height * (cursor.line.0 as f32);
-        window.paint_quad(quad(
-            Bounds {
-                origin: Point {
-                    x: cursor_x,
-                    y: cursor_y,
+        let cursor_line = cursor.line.0 as usize + display_offset;
+        if cursor_line < rows {
+            let cursor_x = origin.x + metrics.cell_width * (cursor.column.0 as f32);
+            let cursor_y = origin.y + metrics.cell_height * (cursor_line as f32);
+            window.paint_quad(quad(
+                Bounds {
+                    origin: Point {
+                        x: cursor_x,
+                        y: cursor_y,
+                    },
+                    size: Size {
+                        width: metrics.cell_width,
+                        height: metrics.cell_height,
+                    },
                 },
-                size: Size {
-                    width: metrics.cell_width,
-                    height: metrics.cell_height,
-                },
-            },
-            px(0.0),
-            cursor_color,
-            Edges::<Pixels>::default(),
-            transparent_black(),
-            Default::default(),
-        ));
+                px(0.0),
+                cursor_color,
+                Edges::<Pixels>::default(),
+                transparent_black(),
+                Default::default(),
+            ));
+        }
     }
 
     /// Reshape one row into its cached backgrounds and text runs.
@@ -360,6 +368,7 @@ impl TerminalRenderer {
         &self,
         term: &Term<GpuiEventProxy>,
         line: usize,
+        display_offset: i32,
         metrics: &CellMetrics,
         out: &mut RowPaint,
         window: &mut Window,
@@ -436,7 +445,7 @@ impl TerminalRenderer {
         };
 
         for column in 0..columns {
-            let cell: &Cell = &grid[AlacPoint::new(Line(line as i32), Column(column))];
+            let cell: &Cell = &grid[AlacPoint::new(Line(line as i32 - display_offset), Column(column))];
             let fg = cell.fg;
             let cell_bg = cell.bg;
             let flags = cell.flags;

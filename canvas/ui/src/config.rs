@@ -95,9 +95,22 @@ fn config_path_from(xdg: Option<OsString>, home: Option<OsString>) -> PathBuf {
     base.join(CONFIG_DIR).join(CONFIG_FILE)
 }
 
+/// Root used for the first workspace. `auro dev` runs with the app crate as
+/// cwd, so relying on `current_dir()` here silently pins every agent to the
+/// app's own directory; the launcher can name the real project root instead.
+fn initial_root(override_root: Option<OsString>, cwd: PathBuf) -> PathBuf {
+    override_root
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or(cwd)
+}
+
 fn initial_store() -> WorkspaceStore {
+    let root = initial_root(
+        std::env::var_os("AURI_WORKSPACE_ROOT"),
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+    );
     let mut store = WorkspaceStore::new();
-    let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     store.add(INITIAL_NAME.into(), WorkspaceIcon::Star, root);
     store
 }
@@ -375,6 +388,16 @@ mod tests {
     }
 
     #[test]
+    fn initial_root_prefers_explicit_override() {
+        let cwd = PathBuf::from("/app/canvas");
+        let project = PathBuf::from("/home/pdl/Documentos/auri");
+
+        assert_eq!(initial_root(Some(project.as_os_str().to_os_string()), cwd.clone()), project);
+        assert_eq!(initial_root(Some(OsString::new()), cwd.clone()), cwd);
+        assert_eq!(initial_root(None, cwd.clone()), cwd);
+    }
+
+    #[test]
     fn fresh_config_provides_initial_workspace_without_writing() {
         let dir = tempfile::tempdir().unwrap();
         let path = config_file(dir.path());
@@ -385,7 +408,7 @@ mod tests {
         assert_eq!(store.workspaces().len(), 1);
         assert_eq!(store.workspaces()[0].name, "AURI");
         assert_eq!(store.workspaces()[0].icon, WorkspaceIcon::Star);
-        assert_eq!(store.workspaces()[0].root, std::env::current_dir().unwrap());
+        assert_eq!(store.workspaces()[0].root, initial_root(None, std::env::current_dir().unwrap()));
         assert_eq!(store.active(), Some(1));
         assert!(store.workspaces()[0].unloaded);
     }

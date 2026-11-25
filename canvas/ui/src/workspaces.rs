@@ -322,7 +322,7 @@ impl WorkspaceDrawer {
             let state = cx.new(|cx| {
                 InputState::new(window, cx)
                     .default_value(value)
-                    .placeholder("Caminho da pasta")
+                    .placeholder("Sem pasta selecionada")
             });
             self.root_subscription = Some(cx.subscribe_in(
                 &state,
@@ -680,8 +680,21 @@ fn workspace_dialog(
                         .gap_2()
                         .child(
                             Button::new("new-workspace-pick-root")
-                                .label("Escolher pasta")
-                                .rounded(px(RADIUS_CONTROL))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(asset_icon("folder.svg", COLOR_FOREGROUND))
+                                        .child("Escolher pasta"),
+                                )
+                                .px(px(SPACE_PANEL))
+                                .py(px(SPACE_NORMAL))
+                                .rounded(px(RADIUS_PILL))
+                                .bg(rgb(COLOR_ELEVATED))
+                                .border_1()
+                                .border_color(rgb(COLOR_BORDER))
+                                .with_variant(ButtonVariant::Ghost)
                                 .on_click({
                                     let pick_drawer = pick_drawer.clone();
                                     move |_, _, cx| {
@@ -850,7 +863,12 @@ impl Render for WorkspaceDrawer {
                     .text_color(rgb(COLOR_MUTED))
                     .child("Espaços de trabalho"),
             )
-            .children(rows.into_iter().map(|workspace| {
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(WORKSPACE_ROW_GAP))
+                    .children(rows.into_iter().map(|workspace| {
                 let id = workspace.id;
                 let is_active = active == Some(id);
                 let invalid = workspace.invalid_root;
@@ -869,16 +887,21 @@ impl Render for WorkspaceDrawer {
                     .gap_2()
                     .px_2()
                     .py(px(WORKSPACE_ROW_PAD_Y))
-                    .rounded(px(RADIUS_CONTROL))
-                    .bg(rgb(if is_active {
-                        COLOR_ELEVATED
+                    .rounded(px(RADIUS_CHIP))
+                    .bg(if is_active {
+                        rgb(COLOR_ELEVATED)
                     } else {
-                        COLOR_PANEL
-                    }))
+                        rgba(0x00000000)
+                    })
                     .border_1()
-                    .when(is_active, |this| this.border_color(rgba(COLOR_ROW_BORDER_ACTIVE)))
-                    .when(!is_active, |this| this.border_color(rgba(COLOR_ROW_BORDER_SOFT)))
-                    .hover(|this| this.bg(rgb(COLOR_ELEVATED)))
+                    .border_color(if is_active {
+                        rgba(COLOR_ROW_BORDER_ACTIVE)
+                    } else {
+                        rgba(0x00000000)
+                    })
+                    .when(!is_active, |this| {
+                        this.hover(|style| style.bg(rgb(COLOR_ROW_HOVER)))
+                    })
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _, _, cx| {
@@ -950,7 +973,8 @@ impl Render for WorkspaceDrawer {
                                 })),
                             ),
                     )
-            }))
+                    })),
+            )
             .when_some(context_menu, |this, (target, (x, y))| {
                 let this = this.child(
                     div()

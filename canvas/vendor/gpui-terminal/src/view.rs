@@ -50,8 +50,11 @@
 use crate::colors::ColorPalette;
 use crate::event::{GpuiEventProxy, TerminalEvent};
 use crate::input::keystroke_to_bytes;
+use crate::mouse;
 use crate::render::TerminalRenderer;
 use crate::terminal::TerminalState;
+use alacritty_terminal::grid::Scroll;
+use alacritty_terminal::grid::Dimensions;
 use gpui::{Edges, *};
 use std::io::{Read, Write};
 use std::sync::Arc;
@@ -785,18 +788,18 @@ impl TerminalView {
         // - Send mouse motion reports if mouse tracking is enabled
     }
 
-    /// Handle scroll events.
-    ///
-    /// Currently a placeholder for future scrollback support.
+    /// Scroll the terminal display, or forward the wheel to applications that
+    /// own it (mouse reporting / alternate screen).
     fn on_scroll(
         &mut self,
-        _event: &ScrollWheelEvent,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
+        event: &ScrollWheelEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) {
-        // TODO: Implement scrollback
-        // - Scroll the terminal display up/down
-        // - Send scroll reports if alternate screen is not active
+        let cell_height = self.renderer.cell_metrics(window).cell_height;
+        if self.handle_wheel(event, cell_height, cx) {
+            cx.stop_propagation();
+        }
     }
 
     /// Process pending terminal events.
@@ -868,6 +871,63 @@ impl TerminalView {
             }
             rows.into_iter().map(|row| row.trim_end().to_owned()).collect()
         })
+    }
+
+    /// (display_offset, history_size, screen_lines) for the scrollbar thumb.
+    pub fn scroll_info(&self) -> (usize, usize, usize) {
+        let term = self.state.term_arc();
+        let term = term.lock();
+        (
+            term.grid().display_offset(),
+            term.grid().history_size(),
+            term.grid().screen_lines(),
+        )
+    }
+
+
+    /// Handle one wheel event. Returns true only when this terminal consumed
+    /// it: history actually moved or the PTY received a mouse report. An
+    /// unconsumed wheel must keep bubbling to an enclosing scroll area.
+    pub fn handle_wheel(
+        &self,
+        event: &ScrollWheelEvent,
+        cell_height: Pixels,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let lines = mouse::wheel_lines(&event.delta, cell_height);
+        if lines == 0 {
+            return false;
+        }
+        let mode = self.state.mode();
+        if mouse::wheel_is_captured(mode) {
+            let term = self.state.term_arc();
+            let point = term.lock().renderable_content().cursor.point;
+            let Some(report) = mouse::scroll_report(lines, point, 0, mode) else {
+                return false;
+            };
+            let _ = self.stdin_writer.lock().write_all(&report);
+            return true;
+        }
+        let term = self.state.term_arc();
+        let mut term = term.lock();
+        let before = term.grid().display_offset();
+        term.scroll_display(Scroll::Delta(lines));
+        let moved = before != term.grid().display_offset();
+        if moved {
+            cx.notify();
+        }
+        moved
+    }
+
+    /// Place the thumb at a fraction of the available scrollback (0 = bottom).
+    pub fn scroll_to_ratio(&self, ratio: f32, cx: &mut Context<Self>) {
+        let history = self.state.term_arc().lock().grid().history_size();
+        let target = (ratio.clamp(0.0, 1.0) * history as f32).round() as usize;
+        let term = self.state.term_arc();
+        let mut term = term.lock();
+        let current = term.grid().display_offset();
+        term.scroll_display(Scroll::Delta(target as i32 - current as i32));
+        cx.notify();
     }
 
     /// Resize the terminal to new dimensions.

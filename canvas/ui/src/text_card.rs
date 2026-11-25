@@ -1,19 +1,28 @@
 //! A draggable, resizable sticky note with an always-editable text input.
 use auro::gpui::{
-    App, Bounds, Context, CursorStyle, DragMoveEvent, Entity, EntityId, MouseButton, MouseDownEvent,
-    Pixels, Point, Render, ScrollWheelEvent, Size, Subscription, WeakEntity, Window, div, px, rgb,
+    App, Bounds, Context, CursorStyle, Div, DragMoveEvent, Entity, EntityId, MouseButton,
+    MouseDownEvent, Pixels, Point, Render, ScrollWheelEvent, Size, Stateful, Subscription, WeakEntity,
+    Window,
+    div, px, rgb,
 };
 use auro::prelude::*;
 use canvas_types::{ConnectionTarget, WorkspaceId};
 use gpui_component::input::{Input, InputState};
 
-use crate::card::scroll_delta;
+use crate::card::{resize_axis, scroll_delta};
 use crate::canvas::Canvas;
 use crate::theme::*;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DragMode {
     Move,
+    ResizeLeft,
+    ResizeRight,
+    ResizeTop,
+    ResizeBottom,
+    ResizeTopLeft,
+    ResizeTopRight,
+    ResizeBottomLeft,
     ResizeBottomRight,
 }
 
@@ -56,6 +65,7 @@ pub struct TextCard {
     pub bounds: Bounds<Pixels>,
     pub selected: bool,
     connect_mode: bool,
+    connect_source: bool,
     number: usize,
     input: Entity<InputState>,
     canvas: WeakEntity<Canvas>,
@@ -69,6 +79,59 @@ pub struct TextCard {
 /// Notes move like terminal cards: the canvas does not clamp their origin.
 fn move_origin(origin: Point<Pixels>, dx: f32, dy: f32) -> Point<Pixels> {
     Point::new(px(f32::from(origin.x) + dx), px(f32::from(origin.y) + dy))
+}
+
+/// Pure geometry for every note handle, shared with the drag tests.
+fn resize_note_bounds(start: Bounds<Pixels>, mode: DragMode, dx: f32, dy: f32) -> Bounds<Pixels> {
+    let origin = start.origin;
+    let size = start.size;
+    let x = f32::from(origin.x);
+    let y = f32::from(origin.y);
+    let w = f32::from(size.width);
+    let h = f32::from(size.height);
+    let (nx, ny, nw, nh) = match mode {
+        DragMode::Move => {
+            let moved = move_origin(origin, dx, dy);
+            (f32::from(moved.x), f32::from(moved.y), w, h)
+        }
+        DragMode::ResizeLeft => {
+            let (nx, nw) = resize_axis(x, w, dx, MIN_NOTE_WIDTH, true);
+            (nx, y, nw, h)
+        }
+        DragMode::ResizeRight => {
+            let (_, nw) = resize_axis(x, w, dx, MIN_NOTE_WIDTH, false);
+            (x, y, nw, h)
+        }
+        DragMode::ResizeTop => {
+            let (ny, nh) = resize_axis(y, h, dy, MIN_NOTE_HEIGHT, true);
+            (x, ny, w, nh)
+        }
+        DragMode::ResizeBottom => {
+            let (_, nh) = resize_axis(y, h, dy, MIN_NOTE_HEIGHT, false);
+            (x, y, w, nh)
+        }
+        DragMode::ResizeTopLeft => {
+            let (nx, nw) = resize_axis(x, w, dx, MIN_NOTE_WIDTH, true);
+            let (ny, nh) = resize_axis(y, h, dy, MIN_NOTE_HEIGHT, true);
+            (nx, ny, nw, nh)
+        }
+        DragMode::ResizeTopRight => {
+            let (_, nw) = resize_axis(x, w, dx, MIN_NOTE_WIDTH, false);
+            let (ny, nh) = resize_axis(y, h, dy, MIN_NOTE_HEIGHT, true);
+            (x, ny, nw, nh)
+        }
+        DragMode::ResizeBottomLeft => {
+            let (nx, nw) = resize_axis(x, w, dx, MIN_NOTE_WIDTH, true);
+            let (_, nh) = resize_axis(y, h, dy, MIN_NOTE_HEIGHT, false);
+            (nx, y, nw, nh)
+        }
+        DragMode::ResizeBottomRight => {
+            let (_, nw) = resize_axis(x, w, dx, MIN_NOTE_WIDTH, false);
+            let (_, nh) = resize_axis(y, h, dy, MIN_NOTE_HEIGHT, false);
+            (x, y, nw, nh)
+        }
+    };
+    Bounds::new(Point::new(px(nx), px(ny)), Size::new(px(nw), px(nh)))
 }
 
 impl TextCard {
@@ -112,6 +175,7 @@ impl TextCard {
             selected: false,
             number: 1,
             connect_mode: false,
+            connect_source: false,
         }
     }
 
@@ -130,9 +194,10 @@ impl TextCard {
         }
     }
     /// In connection mode a note click completes an edge instead of focusing.
-    pub fn set_connect_mode(&mut self, connecting: bool, cx: &mut Context<Self>) {
-        if self.connect_mode != connecting {
+    pub fn set_connect_mode(&mut self, connecting: bool, source: bool, cx: &mut Context<Self>) {
+        if self.connect_mode != connecting || self.connect_source != source {
             self.connect_mode = connecting;
+            self.connect_source = source;
             cx.notify();
         }
     }
@@ -209,25 +274,65 @@ impl TextCard {
         let zoom = self.view_zoom.max(0.01);
         let dx = (f32::from(event.event.position.x) - f32::from(start.position.x)) / zoom;
         let dy = (f32::from(event.event.position.y) - f32::from(start.position.y)) / zoom;
-        let bounds = start.bounds;
-        let origin = bounds.origin;
-        let size = bounds.size;
-        let next = match start.mode {
-            DragMode::Move => Bounds::new(move_origin(origin, dx, dy), size),
-            DragMode::ResizeBottomRight => Bounds::new(
-                origin,
-                Size::new(
-                    px((f32::from(size.width) + dx).max(TEXT_CARD_WIDTH / 2.0)),
-                    px((f32::from(size.height) + dy).max(TEXT_CARD_HEIGHT / 2.0)),
-                ),
-            ),
-        };
-        self.bounds = next;
+        self.bounds = resize_note_bounds(start.bounds, start.mode, dx, dy);
         let canvas = self.canvas.clone();
         cx.defer(move |cx| {
             let _ = canvas.update(cx, |_, cx| cx.notify());
         });
         cx.notify(entity_id);
+    }
+
+    fn resize_handle(
+        id: u64,
+        mode: DragMode,
+        entity_id: EntityId,
+        cx: &mut Context<Self>,
+        connect_mode: bool,
+    ) -> Stateful<Div> {
+        let (element_id, cursor): ((&str, u64), CursorStyle) = match mode {
+            DragMode::Move => unreachable!("only resize modes have handles"),
+            DragMode::ResizeLeft => (("note-resize-left", id), CursorStyle::ResizeLeftRight),
+            DragMode::ResizeRight => (("note-resize-right", id), CursorStyle::ResizeLeftRight),
+            DragMode::ResizeTop => (("note-resize-top", id), CursorStyle::ResizeUpDown),
+            DragMode::ResizeBottom => (("note-resize-bottom", id), CursorStyle::ResizeUpDown),
+            DragMode::ResizeTopLeft => (("note-resize-top-left", id), CursorStyle::ResizeUpRightDownLeft),
+            DragMode::ResizeTopRight => (("note-resize-top-right", id), CursorStyle::ResizeUpLeftDownRight),
+            DragMode::ResizeBottomLeft => (("note-resize-bottom-left", id), CursorStyle::ResizeUpLeftDownRight),
+            DragMode::ResizeBottomRight => (("note-resize-bottom-right", id), CursorStyle::ResizeUpRightDownLeft),
+        };
+        let mut handle = div().absolute().id(element_id).cursor(if connect_mode {
+            CursorStyle::Crosshair
+        } else {
+            cursor
+        });
+        handle = match mode {
+            DragMode::Move => unreachable!("only resize modes have handles"),
+            DragMode::ResizeLeft => handle.left_0().top(px(TITLE_HEIGHT)).bottom_0().w(px(HANDLE)),
+            DragMode::ResizeRight => handle.right_0().top(px(TITLE_HEIGHT)).bottom_0().w(px(HANDLE)),
+            DragMode::ResizeTop => handle.top_0().left(px(HANDLE)).right(px(HANDLE)).h(px(HANDLE)),
+            DragMode::ResizeBottom => handle.bottom_0().left(px(HANDLE)).right(px(HANDLE)).h(px(HANDLE)),
+            DragMode::ResizeTopLeft => handle.left_0().top_0().w(px(18.0)).h(px(18.0)),
+            DragMode::ResizeTopRight => handle.right_0().top_0().w(px(18.0)).h(px(18.0)),
+            DragMode::ResizeBottomLeft => handle.left_0().bottom_0().w(px(18.0)).h(px(18.0)),
+            DragMode::ResizeBottomRight => handle.right_0().bottom_0().w(px(18.0)).h(px(18.0)),
+        };
+        handle
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    if this.connect_mode {
+                        this.complete_connect(cx);
+                        return;
+                    }
+                    this.select_and_focus(window, cx);
+                    this.begin_drag(mode, event.position);
+                }),
+            )
+            .on_drag(DragToken::new(mode, entity_id), |token, _, _, cx| cx.new(|_| *token))
+            .on_drag_move(cx.listener(move |this, event: &DragMoveEvent<DragToken>, _, cx| {
+                this.apply_drag(event, entity_id, cx);
+            }))
     }
 
 }
@@ -261,7 +366,22 @@ impl Render for TextCard {
                     cx.stop_propagation();
                 }),
             )
-            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    if let Some(canvas) = this.canvas.upgrade() {
+                        let _ = canvas.update(cx, |canvas, cx| {
+                            canvas.open_connect_menu(
+                                this.workspace_id,
+                                ConnectionTarget::Note(this.id),
+                                event.position,
+                                cx,
+                            );
+                        });
+                    }
+                }),
+            )
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(move |this, _, _, cx| {
@@ -295,12 +415,14 @@ impl Render for TextCard {
             .overflow_hidden()
             .rounded(px(RADIUS_CONTROL))
             .bg(rgb(COLOR_NOTE_BG))
+            .text_size(px(FONT_NOTE_BODY * zoom))
             .when(selected, |card| {
                 card.border_2().border_dashed().border_color(rgb(COLOR_SELECTION))
             })
             .when(!selected, |card| {
                 card.border_1().border_color(rgb(COLOR_BORDER))
             })
+            .when(self.connect_source, |card| card.border_2().border_color(rgb(CONNECTION_SOURCE_COLOR)))
             .when(connect_mode, |card| card.cursor(CursorStyle::Crosshair))
             .text_color(rgb(COLOR_NOTE_FG))
             .child(
@@ -314,16 +436,34 @@ impl Render for TextCard {
                     .px_2()
                     .child(
                         div()
-                            .text_xs()
+                            .text_size(px(FONT_NOTE_TITLE * zoom))
                             .text_color(rgb(COLOR_NOTE_PLACEHOLDER))
                             .child(format!("Bloco de texto {}", self.number)),
                     )
                     .child(
                         div()
                             .id(("close-text-card", id))
-                            .px_1()
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_click(cx.listener(move |_, _, _, cx| {
+                            .w(px(CLOSE_BUTTON_SIZE))
+                            .h(px(CLOSE_BUTTON_SIZE))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(RADIUS_CHIP))
+                            .text_size(px(CLOSE_ICON_SIZE))
+                            .text_color(rgb(COLOR_NOTE_PLACEHOLDER))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    if this.connect_mode {
+                                        this.complete_connect(cx);
+                                    }
+                                }),
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if this.connect_mode {
+                                    return;
+                                }
                                 let _ = canvas.update(cx, |canvas, cx| {
                                     canvas.remove_text(workspace_id, id, cx)
                                 });
@@ -354,6 +494,7 @@ impl Render for TextCard {
                     .flex_1()
                     .min_h_0()
                     .p(px(TEXT_CARD_PADDING))
+                    .text_size(px(FONT_NOTE_BODY * zoom))
                     .child(
                         Input::new(&self.input)
                             .appearance(false)
@@ -364,35 +505,14 @@ impl Render for TextCard {
                             .h_full(),
                     ),
             )
-            .child(
-                div()
-                    .absolute()
-                    .right_0()
-                    .bottom_0()
-                    .w(px(HANDLE))
-                    .h(px(HANDLE))
-                    .cursor(if connect_mode { CursorStyle::Crosshair } else { CursorStyle::ResizeUpRightDownLeft })
-                    .id(("text-card-resize", id))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                            cx.stop_propagation();
-                            if this.connect_mode {
-                                this.complete_connect(cx);
-                                return;
-                            }
-                            this.select_and_focus(window, cx);
-                            this.begin_drag(DragMode::ResizeBottomRight, event.position);
-                        }),
-                    )
-                    .on_drag(
-                        DragToken::new(DragMode::ResizeBottomRight, entity_id),
-                        |token, _, _, cx| cx.new(|_| *token),
-                    )
-                    .on_drag_move(cx.listener(move |this, event: &DragMoveEvent<DragToken>, _, cx| {
-                        this.apply_drag(event, entity_id, cx);
-                    })),
-            )
+            .child(Self::resize_handle(id, DragMode::ResizeLeft, entity_id, cx, connect_mode))
+            .child(Self::resize_handle(id, DragMode::ResizeRight, entity_id, cx, connect_mode))
+            .child(Self::resize_handle(id, DragMode::ResizeTop, entity_id, cx, connect_mode))
+            .child(Self::resize_handle(id, DragMode::ResizeBottom, entity_id, cx, connect_mode))
+            .child(Self::resize_handle(id, DragMode::ResizeTopLeft, entity_id, cx, connect_mode))
+            .child(Self::resize_handle(id, DragMode::ResizeTopRight, entity_id, cx, connect_mode))
+            .child(Self::resize_handle(id, DragMode::ResizeBottomLeft, entity_id, cx, connect_mode))
+            .child(Self::resize_handle(id, DragMode::ResizeBottomRight, entity_id, cx, connect_mode))
     }
 }
 
@@ -404,5 +524,45 @@ mod tests {
     fn move_origin_allows_the_top_left_corner() {
         let moved = move_origin(Point::new(px(100.0), px(100.0)), -240.0, -180.0);
         assert_eq!((f32::from(moved.x), f32::from(moved.y)), (-140.0, -80.0));
+    }
+
+    #[test]
+    fn every_note_edge_and_corner_resizes() {
+        let start = Bounds::new(Point::new(px(100.0), px(100.0)), Size::new(px(320.0), px(220.0)));
+        let check = |mode, dx, dy, expected| {
+            let next = resize_note_bounds(start, mode, dx, dy);
+            assert_eq!(
+                (
+                    f32::from(next.origin.x),
+                    f32::from(next.origin.y),
+                    f32::from(next.size.width),
+                    f32::from(next.size.height),
+                ),
+                expected,
+                "{mode:?}"
+            );
+        };
+        check(DragMode::ResizeLeft, -40.0, 0.0, (60.0, 100.0, 360.0, 220.0));
+        check(DragMode::ResizeRight, 40.0, 0.0, (100.0, 100.0, 360.0, 220.0));
+        check(DragMode::ResizeTop, 0.0, -40.0, (100.0, 60.0, 320.0, 260.0));
+        check(DragMode::ResizeBottom, 0.0, 40.0, (100.0, 100.0, 320.0, 260.0));
+        check(DragMode::ResizeTopLeft, -40.0, -40.0, (60.0, 60.0, 360.0, 260.0));
+        check(DragMode::ResizeTopRight, 40.0, -40.0, (100.0, 60.0, 360.0, 260.0));
+        check(DragMode::ResizeBottomLeft, -40.0, 40.0, (60.0, 100.0, 360.0, 260.0));
+        check(DragMode::ResizeBottomRight, 40.0, 40.0, (100.0, 100.0, 360.0, 260.0));
+    }
+
+    #[test]
+    fn note_resize_keeps_minimum_size_without_an_origin_barrier() {
+        let start = Bounds::new(Point::new(px(100.0), px(100.0)), Size::new(px(320.0), px(220.0)));
+        let next = resize_note_bounds(start, DragMode::ResizeTopLeft, 400.0, 400.0);
+        assert_eq!(f32::from(next.size.width), MIN_NOTE_WIDTH);
+        assert_eq!(f32::from(next.size.height), MIN_NOTE_HEIGHT);
+        assert_eq!(f32::from(next.origin.x), 300.0);
+        assert_eq!(f32::from(next.origin.y), 230.0);
+
+        let next = resize_note_bounds(start, DragMode::ResizeTopLeft, -500.0, -500.0);
+        assert_eq!(f32::from(next.origin.x), -400.0);
+        assert_eq!(f32::from(next.origin.y), -400.0);
     }
 }
