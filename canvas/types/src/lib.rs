@@ -23,17 +23,70 @@ pub enum ConnectionTarget {
     Note(u64),
 }
 
-/// One stored edge. Edges are bidirectional; permission checks read both ends.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// One stored edge. Edges are bidirectional; either endpoint can be a card
+/// or a note. `from` accepts the old integer card form when loading configs.
+/// Workspace ids qualify the endpoints; `None` means the storing workspace.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct Connection {
-    pub from: TerminalId,
+    pub from: ConnectionTarget,
     pub to: ConnectionTarget,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_workspace: Option<WorkspaceId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_workspace: Option<WorkspaceId>,
 }
 
-fn edge_links(edge: &Connection, a: TerminalId, b: ConnectionTarget) -> bool {
-    (edge.from == a && edge.to == b)
-        || (edge.to == ConnectionTarget::Card(a)
-            && matches!(b, ConnectionTarget::Card(id) if edge.from == id))
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum LegacyConnectionFrom {
+    Card(TerminalId),
+    Target(ConnectionTarget),
+}
+
+fn deserialize_connection_from<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<ConnectionTarget, D::Error> {
+    match LegacyConnectionFrom::deserialize(deserializer)? {
+        LegacyConnectionFrom::Card(id) => Ok(ConnectionTarget::Card(id)),
+        LegacyConnectionFrom::Target(target) => Ok(target),
+    }
+}
+
+impl<'de> Deserialize<'de> for Connection {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Raw {
+            #[serde(deserialize_with = "deserialize_connection_from")]
+            from: ConnectionTarget,
+            to: ConnectionTarget,
+            #[serde(default)]
+            from_workspace: Option<WorkspaceId>,
+            #[serde(default)]
+            to_workspace: Option<WorkspaceId>,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        Ok(Self {
+            from: raw.from,
+            to: raw.to,
+            from_workspace: raw.from_workspace,
+            to_workspace: raw.to_workspace,
+        })
+    }
+}
+
+impl Connection {
+    /// True when both endpoints are explicitly qualified with different
+    /// workspace ids. Unqualified endpoints stay local to the storing workspace.
+    pub fn is_cross_workspace(&self) -> bool {
+        match (self.from_workspace, self.to_workspace) {
+            (Some(from), Some(to)) => from != to,
+            _ => false,
+        }
+    }
+}
+
+fn edge_links(edge: &Connection, a: ConnectionTarget, b: ConnectionTarget) -> bool {
+    (edge.from == a && edge.to == b) || (edge.from == b && edge.to == a)
 }
 
 /// Saved pixel geometry of a canvas card, independent of the UI framework.
@@ -480,15 +533,39 @@ impl CanvasState {
     /// Add one edge between a card and another card or note. Self edges and
     /// duplicates (including the reverse direction) are ignored.
     pub fn connect(&mut self, from: TerminalId, to: ConnectionTarget) -> bool {
-        if to == ConnectionTarget::Card(from) || self.connected(from, to) {
+        self.connect_between(ConnectionTarget::Card(from), to)
+    }
+
+    /// Add one edge starting at a sticky note.
+    pub fn connect_note(&mut self, note: u64, to: ConnectionTarget) -> bool {
+        self.connect_between(ConnectionTarget::Note(note), to)
+    }
+
+    /// Generic edge insertion; both endpoints may be cards or notes.
+    pub fn connect_between(&mut self, from: ConnectionTarget, to: ConnectionTarget) -> bool {
+        if from == to || self.connected_between(from, to) {
             return false;
         }
-        self.connections.push(Connection { from, to });
+        self.connections.push(Connection {
+            from,
+            to,
+            from_workspace: None,
+            to_workspace: None,
+        });
         true
     }
 
     /// Remove an edge in either direction; false when no such edge existed.
     pub fn disconnect(&mut self, from: TerminalId, to: ConnectionTarget) -> bool {
+        self.disconnect_between(ConnectionTarget::Card(from), to)
+    }
+
+    /// Remove an edge whose source is a note.
+    pub fn disconnect_note(&mut self, note: u64, to: ConnectionTarget) -> bool {
+        self.disconnect_between(ConnectionTarget::Note(note), to)
+    }
+
+    pub fn disconnect_between(&mut self, from: ConnectionTarget, to: ConnectionTarget) -> bool {
         let before = self.connections.len();
         self.connections.retain(|edge| !edge_links(edge, from, to));
         self.connections.len() != before
@@ -496,15 +573,22 @@ impl CanvasState {
 
     /// True when an edge joins the two endpoints, regardless of its direction.
     pub fn connected(&self, a: TerminalId, b: ConnectionTarget) -> bool {
+        self.connected_between(ConnectionTarget::Card(a), b)
+    }
+
+    /// True when a note joins the given endpoint.
+    pub fn connected_note(&self, note: u64, b: ConnectionTarget) -> bool {
+        self.connected_between(ConnectionTarget::Note(note), b)
+    }
+
+    pub fn connected_between(&self, a: ConnectionTarget, b: ConnectionTarget) -> bool {
         self.connections.iter().any(|edge| edge_links(edge, a, b))
     }
 
     /// Drop every edge touching a card or note being removed.
     pub fn remove_connections_for(&mut self, target: ConnectionTarget) {
-        self.connections.retain(|edge| match target {
-            ConnectionTarget::Card(id) => edge.from != id && edge.to != target,
-            ConnectionTarget::Note(_) => edge.to != target,
-        });
+        self.connections
+            .retain(|edge| edge.from != target && edge.to != target);
     }
 
     /// Change a card's role; the next CLI request observes the new value.
@@ -657,6 +741,7 @@ impl WorkspaceStore {
     pub fn remove(&mut self, id: WorkspaceId) -> Option<WorkspaceState> {
         let index = self.workspaces.iter().position(|workspace| workspace.id == id)?;
         let removed = self.workspaces.remove(index);
+        self.drop_edges_for_workspace(id);
         if self.active == Some(id) {
             self.active = self.workspaces.first().map(|workspace| workspace.id);
         }
@@ -692,6 +777,48 @@ impl WorkspaceStore {
 
     pub fn workspaces(&self) -> &[WorkspaceState] {
         &self.workspaces
+    }
+
+    /// True when an edge between the two qualified endpoints exists in any
+    /// workspace. An edge's missing workspace id means the workspace storing it.
+    pub fn connected_across(
+        &self,
+        from_ws: WorkspaceId,
+        from: ConnectionTarget,
+        to_ws: WorkspaceId,
+        to: ConnectionTarget,
+    ) -> bool {
+        self.workspaces.iter().any(|workspace| {
+            let owner = workspace.id;
+            workspace.canvas.connections.iter().any(|edge| {
+                let edge_from = edge.from_workspace.unwrap_or(owner);
+                let edge_to = edge.to_workspace.unwrap_or(owner);
+                let forward = edge_from == from_ws
+                    && edge_to == to_ws
+                    && edge.from == from
+                    && edge.to == to;
+                let backward = edge_from == to_ws
+                    && edge_to == from_ws
+                    && edge.from == to
+                    && edge.to == from;
+                forward || backward
+            })
+        })
+    }
+
+    /// Drop edges that reference `id` from the other workspaces so deleting
+    /// a workspace leaves no dangling cross-workspace connections behind.
+    pub fn drop_edges_for_workspace(&mut self, id: WorkspaceId) {
+        for workspace in &mut self.workspaces {
+            if workspace.id == id {
+                continue;
+            }
+            let owner = workspace.id;
+            workspace.canvas.connections.retain(|edge| {
+                edge.from_workspace.unwrap_or(owner) != id
+                    && edge.to_workspace.unwrap_or(owner) != id
+            });
+        }
     }
 
     pub fn custom_agents(&self) -> &[CustomAgent] {
@@ -1024,15 +1151,30 @@ mod tests {
         assert_eq!(
             state.connections(),
             &[
-                Connection { from: b.id, to: ConnectionTarget::Note(note.id) },
-                Connection { from: terminal.id, to: ConnectionTarget::Note(note.id) },
+                Connection {
+                    from: ConnectionTarget::Card(b.id),
+                    to: ConnectionTarget::Note(note.id),
+                    from_workspace: None,
+                    to_workspace: None,
+                },
+                Connection {
+                    from: ConnectionTarget::Card(terminal.id),
+                    to: ConnectionTarget::Note(note.id),
+                    from_workspace: None,
+                    to_workspace: None,
+                },
             ]
         );
 
         assert!(state.remove(terminal.id).is_some());
         assert_eq!(
             state.connections(),
-            &[Connection { from: b.id, to: ConnectionTarget::Note(note.id) }]
+            &[Connection {
+                from: ConnectionTarget::Card(b.id),
+                to: ConnectionTarget::Note(note.id),
+                from_workspace: None,
+                to_workspace: None,
+            }]
         );
 
         assert!(state.remove_note(note.id).is_some());
@@ -1054,6 +1196,31 @@ mod tests {
         assert!(decoded.agent(agent.id).unwrap().admin);
         assert_eq!(decoded.next_id(), state.next_id());
         assert_eq!(decoded.selected(), state.selected());
+    }
+
+    #[test]
+    fn notes_can_be_edge_sources_and_touch_either_endpoint_on_removal() {
+        let mut state = CanvasState::new();
+        let bounds = CardBounds { x: 0.0, y: 0.0, width: 320.0, height: 200.0 };
+        let card = state.add_agent(AgentKind::Claude, bounds);
+        let note = state.add_note("origem".into(), bounds);
+
+        assert!(state.connect_note(note.id, ConnectionTarget::Card(card.id)));
+        assert!(state.connected_note(note.id, ConnectionTarget::Card(card.id)));
+        assert!(state.connected(card.id, ConnectionTarget::Note(note.id)));
+        assert!(!state.connect_note(note.id, ConnectionTarget::Card(card.id)));
+        assert!(!state.connect_note(note.id, ConnectionTarget::Note(note.id)));
+
+        assert!(state.remove_note(note.id).is_some());
+        assert!(state.connections().is_empty());
+    }
+
+    #[test]
+    fn legacy_integer_connection_source_still_loads() {
+        let json = r#"{"terminals":[],"notes":[],"agents":[],"selected":null,"next_id":4,"connections":[{"from":2,"to":{"Note":7}}]}"#;
+        let state: CanvasState = serde_json::from_str(json).unwrap();
+        assert_eq!(state.connections().len(), 1);
+        assert!(state.connected(2, ConnectionTarget::Note(7)));
     }
 
     #[test]
@@ -1273,5 +1440,154 @@ mod workspace_tests {
         let mut restored = WorkspaceStore::new();
         restored.reserve_custom_id_above(second.id);
         assert_eq!(restored.add_custom_agent("C".into(), "c".into(), AgentIcon::Pi).id, second.id + 1);
+    }
+
+    #[test]
+    fn old_local_connection_still_loads_without_workspace_ids() {
+        let json = r#"{"from":{"Card":1},"to":{"Note":2}}"#;
+        let edge: Connection = serde_json::from_str(json).unwrap();
+        assert!(!edge.is_cross_workspace());
+
+        let encoded = serde_json::to_string(&edge).unwrap();
+        assert!(!encoded.contains("workspace"));
+        assert_eq!(serde_json::from_str::<Connection>(&encoded).unwrap(), edge);
+    }
+
+    #[test]
+    fn cross_workspace_edge_round_trips_and_is_found_from_both_sides() {
+        let edge = Connection {
+            from: ConnectionTarget::Card(1),
+            to: ConnectionTarget::Note(2),
+            from_workspace: Some(1),
+            to_workspace: Some(2),
+        };
+        assert!(edge.is_cross_workspace());
+
+        let encoded = serde_json::to_string(&edge).unwrap();
+        assert!(encoded.contains("\"from_workspace\":1"));
+        assert!(encoded.contains("\"to_workspace\":2"));
+        assert_eq!(serde_json::from_str::<Connection>(&encoded).unwrap(), edge);
+
+        let mut store = WorkspaceStore::new();
+        let a = store.add("A".into(), WorkspaceIcon::Star, PathBuf::from("/a"));
+        let b = store.add("B".into(), WorkspaceIcon::Bolt, PathBuf::from("/b"));
+        assert_eq!((a.id, b.id), (1, 2));
+        store.workspace_mut(a.id).unwrap().canvas.connections.push(edge);
+
+        assert!(store.connected_across(
+            a.id,
+            ConnectionTarget::Card(1),
+            b.id,
+            ConnectionTarget::Note(2),
+        ));
+        assert!(store.connected_across(
+            b.id,
+            ConnectionTarget::Note(2),
+            a.id,
+            ConnectionTarget::Card(1),
+        ));
+    }
+
+    #[test]
+    fn deleting_a_workspace_drops_its_edges_from_other_workspaces() {
+        let mut store = WorkspaceStore::new();
+        let a = store.add("A".into(), WorkspaceIcon::Star, PathBuf::from("/a"));
+        let b = store.add("B".into(), WorkspaceIcon::Bolt, PathBuf::from("/b"));
+        let c = store.add("C".into(), WorkspaceIcon::Globe, PathBuf::from("/c"));
+        let ab = Connection {
+            from: ConnectionTarget::Card(1),
+            to: ConnectionTarget::Note(2),
+            from_workspace: Some(a.id),
+            to_workspace: Some(b.id),
+        };
+        let bc = Connection {
+            from: ConnectionTarget::Note(3),
+            to: ConnectionTarget::Card(4),
+            from_workspace: Some(b.id),
+            to_workspace: Some(c.id),
+        };
+        let local = Connection {
+            from: ConnectionTarget::Card(5),
+            to: ConnectionTarget::Note(6),
+            from_workspace: None,
+            to_workspace: None,
+        };
+        store.workspace_mut(a.id).unwrap().canvas.connections.extend([ab, local]);
+        store.workspace_mut(c.id).unwrap().canvas.connections.push(bc);
+
+        assert_eq!(store.remove(b.id).map(|workspace| workspace.id), Some(b.id));
+
+        assert!(!store.connected_across(
+            a.id,
+            ConnectionTarget::Card(1),
+            b.id,
+            ConnectionTarget::Note(2),
+        ));
+        assert!(!store.connected_across(
+            b.id,
+            ConnectionTarget::Note(3),
+            c.id,
+            ConnectionTarget::Card(4),
+        ));
+        assert!(store.connected_across(
+            a.id,
+            ConnectionTarget::Card(5),
+            a.id,
+            ConnectionTarget::Note(6),
+        ));
+        assert_eq!(store.workspace_mut(a.id).unwrap().canvas.connections().len(), 1);
+    }
+
+    #[test]
+    fn duplicate_local_ids_do_not_satisfy_a_qualified_lookup() {
+        let mut store = WorkspaceStore::new();
+        let a = store.add("A".into(), WorkspaceIcon::Star, PathBuf::from("/a"));
+        let b = store.add("B".into(), WorkspaceIcon::Bolt, PathBuf::from("/b"));
+        for id in [a.id, b.id] {
+            let canvas = &mut store.workspace_mut(id).unwrap().canvas;
+            for _ in 0..4 {
+                canvas.add();
+            }
+        }
+        let qualified = Connection {
+            from: ConnectionTarget::Card(4),
+            to: ConnectionTarget::Card(3),
+            from_workspace: Some(a.id),
+            to_workspace: Some(b.id),
+        };
+        store.workspace_mut(a.id).unwrap().canvas.connections.push(qualified);
+        assert!(store.workspace_mut(b.id).unwrap().canvas.connect(4, ConnectionTarget::Card(3)));
+
+        assert!(store.connected_across(
+            a.id,
+            ConnectionTarget::Card(4),
+            b.id,
+            ConnectionTarget::Card(3),
+        ));
+        assert!(store.connected_across(
+            b.id,
+            ConnectionTarget::Card(3),
+            a.id,
+            ConnectionTarget::Card(4),
+        ));
+        // B's local edge has the same numeric ids but different qualified endpoints.
+        assert!(!store.connected_across(
+            b.id,
+            ConnectionTarget::Card(4),
+            a.id,
+            ConnectionTarget::Card(3),
+        ));
+        assert!(!store.connected_across(
+            a.id,
+            ConnectionTarget::Card(4),
+            a.id,
+            ConnectionTarget::Card(3),
+        ));
+        assert!(store.connected_across(
+            b.id,
+            ConnectionTarget::Card(4),
+            b.id,
+            ConnectionTarget::Card(3),
+        ));
     }
 }
