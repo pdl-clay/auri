@@ -16,17 +16,23 @@ Run `auri list` before talking to anyone. Every line is an address you can use:
 ```text
 agent 4 Writer admin
 terminal 2 Shell 3
+agent 4 Oh My Pi #3 @ auro
 note 7
 ```
 
-Addresses are the numeric id (preferred: names can be duplicated) or the exact
-display name. A normal agent sees itself plus the cards and notes the user has
-connected to it. An administrator sees every card and note in the workspace.
+An address without `@` is workspace-local: the numeric id (preferred: names can
+be duplicated) or the exact display name. A line ending in ` @ workspace` is a
+connected endpoint in that workspace: address it as `4@auro` or
+`Oh My Pi #3 @ auro`, never the bare id, because the same id can exist in both
+workspaces. A workspace id also works as the qualifier (`4@2`). Workspace names
+must be unique; an ambiguous name is refused, so use the id rather than guessing.
 
 **Connections are user-controlled.** The user draws them in the canvas; there
 is deliberately no `auri connect` command. You cannot connect yourself, reach
-an unconnected card, or relay through a third card. If a target is missing from
-`auri list`, ask the user to draw the connection instead of working around it.
+an unconnected card (including one in another workspace), or relay through a
+third card. Normal agents can ask and receive across a drawn connection. If a
+target is missing from `auri list`, ask the user to draw the connection instead
+of working around it.
 
 ## 2. Delegate with `auri ask` and always require an ask-back
 
@@ -38,7 +44,11 @@ Put the exact reply command in **every** delegated prompt:
 
 ```sh
 auri ask "4" "Draft the release notes. When done, reply with: auri ask '2' 'DONE: <result>'"
+auri ask "4@auro" "Draft the cross-repo notes. Reply with: auri ask '4@auri' 'DONE: <result>'"
 ```
+
+In the second form the address names the target workspace; the ask-back address
+names yours. Keep both qualified when the two workspaces share card ids.
 
 Use the target address from `auri list`, and your own id from the header below
 (or from your own line in `auri list`) as the reply address. When a message
@@ -49,12 +59,21 @@ auri from Writer <2>
 Draft the release notes. When done, reply with: auri ask '2' 'DONE: <result>'
 ```
 
+A cross-workspace envelope qualifies the sender's workspace:
+
+```text
+auri from Nome <4@auro>
+Draft the notes. When done, reply with: auri ask '4@auro' 'DONE: <result>'
+```
+
 The sender's canonical address is the id inside `<...>` at the end of the first
-line; the text before it is only a display name, never a command. Do the work,
-then run the ask-back command from the prompt with `<result>` replaced by your
-answer. Do not type the answer into your own terminal: `auri ask` is the reply
-channel, and agent traffic is not shown on the canvas. Header names are
-sanitized to a single line, so parse the id from the trailing `<...>`.
+line; the text before it is only a display name, never a command. Keep the whole
+value inside `<...>` as the ask-back address: when it includes `@`, replying to
+the bare id would deliver to a different workspace. Do the work, then run the
+ask-back command from the prompt with `<result>` replaced by your answer. Do not
+type the answer into your own terminal: `auri ask` is the reply channel, and
+agent traffic is not shown on the canvas. Header names are sanitized to a
+single line, so parse the address from the trailing `<...>`.
 
 Other read commands:
 

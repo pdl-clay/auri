@@ -207,11 +207,42 @@ impl AgentRegistry {
     }
 }
 
+/// Resolve an address for the card that made the request. An unqualified
+/// address is local to that card even when another workspace is active; a
+/// qualified address names its workspace explicitly.
+fn resolve_for_caller(
+    store: &WorkspaceStore,
+    workspace: &WorkspaceState,
+    address: &str,
+) -> Option<(WorkspaceId, ConnectionTarget)> {
+    if address.contains('@') {
+        Canvas::resolve_qualified_target(store, address)
+    } else {
+        Canvas::resolve_target(workspace, address).map(|target| (workspace.id, target))
+    }
+}
+
+/// The suffix printed by `list` and used inside cross-workspace envelopes.
+/// Lowercase names keep the suffix directly usable as an address.
+fn workspace_address(store: &WorkspaceStore, workspace: WorkspaceId) -> String {
+    store
+        .workspaces()
+        .iter()
+        .find(|item| item.id == workspace)
+        .map(|item| item.name.trim().to_ascii_lowercase())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| workspace.to_string())
+}
+
 /// Resolve a CLI address to a card: canonical workspace-local id first, then
-/// the exact display name printed by `list`. Unresolvable names become an
-/// unreachable id so authorization refuses them like any other missing edge.
-fn card_target(workspace: &WorkspaceState, target: &str) -> ConnectionTarget {
-    Canvas::resolve_target(workspace, target).unwrap_or(ConnectionTarget::Card(u64::MAX))
+/// the exact display name printed by `list`. A qualified address naming a
+/// different workspace is deliberately unresolvable here: its permission is
+/// checked against the stored edge instead.
+fn card_target(store: &WorkspaceStore, workspace: &WorkspaceState, target: &str) -> ConnectionTarget {
+    resolve_for_caller(store, workspace, target)
+        .filter(|(id, _)| *id == workspace.id)
+        .map(|(_, target)| target)
+        .unwrap_or(ConnectionTarget::Card(u64::MAX))
 }
 
 /// Note ids are already canonical; there is no display name to resolve.
@@ -305,11 +336,13 @@ fn live_connection_bounds(
     }
 }
 
-fn action_for_request(workspace: &WorkspaceState, request: &Request) -> Action {
+fn action_for_request(store: &WorkspaceStore, workspace: &WorkspaceState, request: &Request) -> Action {
     match request {
         Request::List | Request::Skill => Action::List,
-        Request::Ask { target, raw } => Action::Ask { target: card_target(workspace, target), raw: raw.clone() },
-        Request::Check { target, .. } => Action::Check { target: card_target(workspace, target) },
+        Request::Ask { target, raw } => {
+            Action::Ask { target: card_target(store, workspace, target), raw: raw.clone() }
+        }
+        Request::Check { target, .. } => Action::Check { target: card_target(store, workspace, target) },
         Request::NoteRead { note, .. } => Action::NoteRead { note: note_target(note) },
         Request::NoteWrite { note, .. } | Request::NoteEdit { note, .. } => {
             Action::NoteWrite { note: note_target(note) }
@@ -317,11 +350,47 @@ fn action_for_request(workspace: &WorkspaceState, request: &Request) -> Action {
         Request::NoteCreate { .. } => Action::NoteCreate,
         Request::NoteDelete { note } => Action::NoteDelete { note: note_target(note) },
         Request::TerminalNew { .. } => Action::TerminalNew,
-        Request::TerminalRemove { target } => Action::TerminalRemove { target: card_target(workspace, target) },
+        Request::TerminalRemove { target } => {
+            Action::TerminalRemove { target: card_target(store, workspace, target) }
+        }
         Request::AgentNew { .. } => Action::AgentNew,
-        Request::AgentRemove { target } => Action::AgentRemove { target: card_target(workspace, target) },
-        Request::AgentRole { target, .. } => Action::AgentRole { target: card_target(workspace, target) },
+        Request::AgentRemove { target } => {
+            Action::AgentRemove { target: card_target(store, workspace, target) }
+        }
+        Request::AgentRole { target, .. } => {
+            Action::AgentRole { target: card_target(store, workspace, target) }
+        }
     }
+}
+
+/// A qualified address naming another workspace needs a stored cross edge,
+/// even for an administrator. Local addresses keep the ordinary matrix, where
+/// admins may see unconnected cards and normal agents need an edge.
+fn cross_workspace_permission(
+    store: &WorkspaceStore,
+    workspace: &WorkspaceState,
+    caller: TerminalId,
+    request: &Request,
+) -> Option<Response> {
+    let address = match request {
+        Request::Ask { target, .. } | Request::Check { target, .. } => target,
+        _ => return None,
+    };
+    let (target_ws, target) = resolve_for_caller(store, workspace, address)?;
+    if target_ws == workspace.id {
+        return None;
+    }
+    let allowed = store.connected_across(
+        workspace.id,
+        ConnectionTarget::Card(caller),
+        target_ws,
+        target,
+    );
+    Some(if allowed {
+        Response::Ok(String::new())
+    } else {
+        Response::Err("permission_denied".into())
+    })
 }
 
 /// The host's permission gate. An unknown or revoked token is deliberately
@@ -341,7 +410,13 @@ fn authorize_request(
     };
     // Built from the live card, never from a name or a cached snapshot.
     let principal = workspace.canvas.agent(id).map(Principal::from);
-    match authorize(workspace, principal.as_ref(), &action_for_request(workspace, request)) {
+    if principal.is_none() {
+        return Response::Err("no_identity".into());
+    }
+    if let Some(response) = cross_workspace_permission(store, workspace, id, request) {
+        return response;
+    }
+    match authorize(workspace, principal.as_ref(), &action_for_request(store, workspace, request)) {
         Ok(()) => Response::Ok(String::new()),
         Err(Denied::NoIdentity) => Response::Err("no_identity".into()),
         Err(Denied::NotAdmin | Denied::NotConnected) => Response::Err("permission_denied".into()),
@@ -461,12 +536,16 @@ fn dispatch(
     let Some(workspace) = store.workspaces().iter().find(|item| item.id == workspace_id) else {
         return refused("no_workspace");
     };
-    let visible = |target| {
-        workspace
-            .canvas
-            .agent(caller)
-            .is_some_and(|agent| agent.admin)
-            || workspace.canvas.connected(caller, target)
+    let visible = |target_ws: WorkspaceId, target: ConnectionTarget| {
+        if target_ws == workspace_id {
+            workspace
+                .canvas
+                .agent(caller)
+                .is_some_and(|agent| agent.admin)
+                || workspace.canvas.connected(caller, target)
+        } else {
+            store.connected_across(workspace_id, ConnectionTarget::Card(caller), target_ws, target)
+        }
     };
 
     match request {
@@ -481,7 +560,7 @@ fn dispatch(
                 ));
             }
             for agent in workspace.canvas.agents() {
-                if agent.id != caller && visible(ConnectionTarget::Card(agent.id)) {
+                if agent.id != caller && visible(workspace_id, ConnectionTarget::Card(agent.id)) {
                     lines.push(format!(
                         "agent {} {} {}",
                         agent.id,
@@ -491,22 +570,61 @@ fn dispatch(
                 }
             }
             for terminal in workspace.canvas.terminals() {
-                if visible(ConnectionTarget::Card(terminal.id)) {
+                if visible(workspace_id, ConnectionTarget::Card(terminal.id)) {
                     lines.push(format!("terminal {} {}", terminal.id, terminal.title));
                 }
             }
             for note in workspace.canvas.notes() {
-                if visible(ConnectionTarget::Note(note.id)) {
+                if visible(workspace_id, ConnectionTarget::Note(note.id)) {
                     lines.push(format!("note {}", note.id));
+                }
+            }
+            // A remote endpoint is only ever reachable through a stored edge;
+            // the suffix is the address the receiver can use to ask back.
+            for remote in store.workspaces() {
+                if remote.id == workspace_id {
+                    continue;
+                }
+                let suffix = format!(" @ {}", workspace_address(store, remote.id));
+                for agent in remote.canvas.agents() {
+                    if visible(remote.id, ConnectionTarget::Card(agent.id)) {
+                        lines.push(format!(
+                            "agent {} {} {}{suffix}",
+                            agent.id,
+                            agent.name,
+                            if agent.admin { "admin" } else { "normal" }
+                        ));
+                    }
+                }
+                for terminal in remote.canvas.terminals() {
+                    if visible(remote.id, ConnectionTarget::Card(terminal.id)) {
+                        lines.push(format!("terminal {} {}{suffix}", terminal.id, terminal.title));
+                    }
+                }
+                for note in remote.canvas.notes() {
+                    if visible(remote.id, ConnectionTarget::Note(note.id)) {
+                        lines.push(format!("note {}{suffix}", note.id));
+                    }
                 }
             }
             replied(lines.join("\n"))
         }
         Request::Ask { target, raw } => {
-            let Some(ConnectionTarget::Card(target_id)) = Canvas::resolve_target(workspace, &target)
+            let Some((target_ws, ConnectionTarget::Card(target_id))) =
+                resolve_for_caller(store, workspace, &target)
             else {
                 return refused("unknown_target");
             };
+            if target_ws != workspace_id
+                && !store.connected_across(
+                    workspace_id,
+                    ConnectionTarget::Card(caller),
+                    target_ws,
+                    ConnectionTarget::Card(target_id),
+                )
+            {
+                return refused("permission_denied");
+            }
             let name = workspace
                 .canvas
                 .agent(caller)
@@ -520,10 +638,17 @@ fn dispatch(
                         .map(|terminal| terminal.title.clone())
                 })
                 .unwrap_or_else(|| caller.to_string());
-            let Some(writer) = registry.writers.get(&(workspace_id, target_id)).cloned() else {
+            // The receiver replies to the sender's workspace, not to a local
+            // id that may belong to a different card there.
+            let sender = if target_ws == workspace_id {
+                caller.to_string()
+            } else {
+                format!("{caller}@{}", workspace_address(store, workspace_id))
+            };
+            let Some(writer) = registry.writers.get(&(target_ws, target_id)).cloned() else {
                 return refused("target_unavailable");
             };
-            let mut bytes = format!("auri from {} <{caller}>\n", ask_header_name(&name)).into_bytes();
+            let mut bytes = format!("auri from {} <{sender}>\n", ask_header_name(&name)).into_bytes();
             bytes.extend_from_slice(&raw);
             // The submit key is a separate write, so a TUI sees a real Enter.
             bytes.push(b'\r');
@@ -1231,6 +1356,38 @@ impl Canvas {
         id.map(ConnectionTarget::Card)
     }
 
+    /// Resolve an address from `auri list` to the workspace that owns it.
+    /// `id@workspace-id` and `id@name` (or `Name @ Workspace`) name the
+    /// workspace explicitly; an unqualified address stays in the active one.
+    /// A duplicated workspace name is refused, never guessed.
+    pub fn resolve_qualified_target(
+        store: &WorkspaceStore,
+        address: &str,
+    ) -> Option<(WorkspaceId, ConnectionTarget)> {
+        let (target, qualifier) = match address.split_once('@') {
+            Some((target, qualifier)) => (target.trim(), Some(qualifier.trim())),
+            None => (address.trim(), None),
+        };
+        let workspace = match qualifier {
+            None => store.workspaces().iter().find(|workspace| Some(workspace.id) == store.active())?,
+            Some(qualifier) => {
+                let by_id = qualifier
+                    .parse::<WorkspaceId>()
+                    .ok()
+                    .and_then(|id| store.workspaces().iter().find(|workspace| workspace.id == id));
+                by_id.or_else(|| {
+                    let mut matches = store
+                        .workspaces()
+                        .iter()
+                        .filter(|workspace| workspace.name.trim().eq_ignore_ascii_case(qualifier));
+                    let found = matches.next()?;
+                    matches.next().is_none().then_some(found)
+                })?
+            }
+        };
+        Self::resolve_target(workspace, target).map(|target| (workspace.id, target))
+    }
+
     /// Keep the shared PTY input handle for one card. Ids are workspace-local,
     /// so the caller supplies the owning workspace explicitly.
     pub fn register_agent_pty(&mut self, workspace: WorkspaceId, id: TerminalId, writer: SharedPtyWriter) {
@@ -1266,12 +1423,13 @@ impl Canvas {
         let Some(state) = self.store.workspaces().iter().find(|item| item.id == workspace) else {
             return Response::Err("no_workspace".into());
         };
-        let Some(ConnectionTarget::Card(id)) = Canvas::resolve_target(state, target) else {
+        let Some((target_ws, ConnectionTarget::Card(id))) = resolve_for_caller(&self.store, state, target)
+        else {
             return Response::Err("unknown_target".into());
         };
         let screen = self
             .cards
-            .get(&workspace)
+            .get(&target_ws)
             .and_then(|cards| cards.iter().find(|(card_id, _)| *card_id == id))
             .map(|(_, card)| card.read(cx).visible_lines(cx));
         match screen {
@@ -5321,6 +5479,48 @@ mod dispatch_tests {
         assert_eq!(bytes.iter().filter(|&&byte| byte == b'\n').count(), 1);
         assert_eq!(&bytes[split + 1..], b"ping\r");
     }
+
+    #[test]
+    fn qualified_ask_writes_a_cross_workspace_envelope() {
+        use crate::canvas::test_support::PeerHarness;
+        let mut harness = PeerHarness::new(false, true);
+
+        let result = harness.run(Request::Ask { target: "2@auro".into(), raw: b"ping".to_vec() });
+
+        assert_eq!(result, Response::Ok(String::new()));
+        assert_eq!(
+            harness.written(),
+            "auri from Writer <1@auri>\nping\r",
+            "the receiver needs the sender's qualified id to ask back"
+        );
+    }
+
+    #[test]
+    fn unconnected_cross_workspace_ask_is_refused() {
+        use crate::canvas::test_support::PeerHarness;
+        let mut harness = PeerHarness::new(false, false);
+
+        let result = harness.run(Request::Ask { target: "2@auro".into(), raw: b"ping".to_vec() });
+
+        assert_eq!(result, Response::Err("permission_denied".into()));
+        assert!(harness.written().is_empty());
+    }
+
+    #[test]
+    fn qualified_check_needs_the_same_cross_workspace_edge() {
+        use crate::canvas::test_support::PeerHarness;
+        let request = Request::Check { target: "2@auro".into(), lines: None };
+
+        let mut unconnected = PeerHarness::new(false, false);
+        assert_eq!(unconnected.run(request.clone()), Response::Err("permission_denied".into()));
+
+        let mut connected = PeerHarness::new(false, true);
+        assert_eq!(
+            connected.run(request),
+            Response::Err("check_requires_host_screen".into()),
+            "with an edge the request reaches the host screen path"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -5361,6 +5561,19 @@ mod skill_tests {
 
         std::fs::remove_dir_all(&cache).unwrap();
     }
+
+    #[test]
+    fn skill_teaches_qualified_addresses_and_envelopes() {
+        for needle in [
+            "agent 4 Oh My Pi #3 @ auro",
+            "4@auro",
+            "auri ask \"4@auro\"",
+            "auri from Nome <4@auro>",
+            "ambiguous",
+        ] {
+            assert!(SKILL_SOURCE.contains(needle), "the managed skill must teach {needle:?}");
+        }
+    }
 }
 #[cfg(test)]
 mod connect_tests {
@@ -5369,6 +5582,64 @@ mod connect_tests {
 
     fn bounds() -> CardBounds {
         CardBounds { x: 0.0, y: 0.0, width: 100.0, height: 100.0 }
+    }
+
+    /// Both workspaces deliberately own card 4, so an unqualified id cannot
+    /// silently pick the peer's card.
+    fn duplicate_id_store() -> (WorkspaceStore, WorkspaceId, WorkspaceId) {
+        let json = r#"{
+            "workspaces": [
+                {"id":1,"name":"Auri","icon":"Star","root":"/tmp","canvas":{"agents":[{"id":4,"kind":"Claude","name":"Writer","bounds":{"x":0.0,"y":0.0,"width":10.0,"height":10.0}}],"next_id":5}},
+                {"id":2,"name":"Auro","icon":"Folder","root":"/tmp","canvas":{"agents":[{"id":4,"kind":"Codex","name":"Oh My Pi #3","bounds":{"x":0.0,"y":0.0,"width":10.0,"height":10.0}}],"next_id":5}}
+            ],
+            "active":1,"next_id":3
+        }"#;
+        let store: WorkspaceStore = serde_json::from_str(json).expect("two-workspace store");
+        (store, 1, 2)
+    }
+
+    #[test]
+    fn qualified_address_resolves_the_named_workspace_not_the_local_id() {
+        let (store, _auri, auro) = duplicate_id_store();
+
+        assert_eq!(
+            Canvas::resolve_qualified_target(&store, "4@auro"),
+            Some((auro, ConnectionTarget::Card(4))),
+            "the qualifier picks Auro's card 4, not Auri's"
+        );
+        assert_eq!(
+            Canvas::resolve_qualified_target(&store, "4@2"),
+            Some((auro, ConnectionTarget::Card(4))),
+            "a workspace id is a canonical qualifier too"
+        );
+    }
+
+    #[test]
+    fn qualified_display_name_with_spaces_resolves_in_that_workspace() {
+        let (store, _auri, auro) = duplicate_id_store();
+
+        assert_eq!(
+            Canvas::resolve_qualified_target(&store, "Oh My Pi #3 @ auro"),
+            Some((auro, ConnectionTarget::Card(4))),
+            "`Name @ Workspace` must resolve the name inside the named workspace"
+        );
+    }
+
+    #[test]
+    fn unqualified_address_falls_back_to_the_active_workspace() {
+        let (store, auri, _auro) = duplicate_id_store();
+
+        assert_eq!(Canvas::resolve_qualified_target(&store, "4"), Some((auri, ConnectionTarget::Card(4))));
+        assert_eq!(Canvas::resolve_qualified_target(&store, "Writer"), Some((auri, ConnectionTarget::Card(4))));
+    }
+
+    #[test]
+    fn ambiguous_workspace_name_is_refused_but_its_id_still_resolves() {
+        let (mut store, _auri, auro) = duplicate_id_store();
+        store.add("AURO".into(), WorkspaceIcon::Globe, std::env::temp_dir());
+
+        assert_eq!(Canvas::resolve_qualified_target(&store, "4@auro"), None, "a duplicate name is not a guess");
+        assert_eq!(Canvas::resolve_qualified_target(&store, "4@2"), Some((auro, ConnectionTarget::Card(4))));
     }
 
     #[test]
@@ -5676,4 +5947,61 @@ pub(crate) mod test_support {
                 .expect("harness workspace")
         }
     }
+    /// A normal agent in Auri, a normal agent in Auro, and optionally the
+    /// user-drawn edge between them. The third workspace has no edge, so it
+    /// must never leak into `list`.
+    pub(crate) struct PeerHarness {
+        store: WorkspaceStore,
+        registry: AgentRegistry,
+        token: String,
+        written: Arc<Mutex<Vec<u8>>>,
+    }
+
+    struct BufferWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for BufferWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("test buffer").extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl PeerHarness {
+        pub(crate) fn new(admin: bool, connected: bool) -> Self {
+            let edges = if connected {
+                r#"[{"from":{"Card":1},"to":{"Card":2},"from_workspace":1,"to_workspace":2}]"#
+            } else {
+                "[]"
+            };
+            let json = format!(
+                r#"{{
+                    "workspaces": [
+                        {{"id":1,"name":"Auri","icon":"Star","root":"/auri","canvas":{{"agents":[{{"id":1,"kind":"Claude","name":"Writer","admin":{admin},"bounds":{{"x":0.0,"y":0.0,"width":10.0,"height":10.0}}}}],"connections":{edges},"next_id":2}}}},
+                        {{"id":2,"name":"Auro","icon":"Folder","root":"/auro","canvas":{{"agents":[{{"id":2,"kind":"Codex","name":"Leitor","bounds":{{"x":0.0,"y":0.0,"width":10.0,"height":10.0}}}}],"next_id":3}}}},
+                        {{"id":3,"name":"Outra","icon":"Globe","root":"/outra","canvas":{{"agents":[{{"id":3,"kind":"Pi","name":"Estranho","bounds":{{"x":0.0,"y":0.0,"width":10.0,"height":10.0}}}}],"next_id":4}}}}
+                    ],
+                    "active":1,"next_id":4
+                }}"#
+            );
+            let store: WorkspaceStore = serde_json::from_str(&json).expect("two-workspace store");
+            let mut registry = AgentRegistry::default();
+            let token = registry.issue(1, 1);
+            let written = Arc::new(Mutex::new(Vec::new()));
+            registry.register(2, 2, Arc::new(Mutex::new(Box::new(BufferWriter(written.clone())))));
+            Self { store, registry, token, written }
+        }
+
+        pub(crate) fn run(&mut self, request: Request) -> Response {
+            dispatch_authorized(&mut self.store, &mut self.registry, &self.token, request).response
+        }
+
+        pub(crate) fn written(&self) -> String {
+            String::from_utf8(self.written.lock().expect("test buffer").clone()).expect("utf8 envelope")
+        }
+    }
+
 }

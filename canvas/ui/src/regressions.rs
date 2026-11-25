@@ -95,6 +95,39 @@ fn admin_created_card_is_connected_and_normal() {
     assert!(harness.creator_connected_to(id), "the creator is connected to its new card");
 }
 
+/// A connected normal agent may work across workspaces; without the drawn
+/// edge neither listing nor asking may reach the peer.
+#[test]
+fn connected_normal_peer_lists_and_asks_across_but_unconnected_is_refused() {
+    let mut connected = test_support::PeerHarness::new(false, true);
+    let Response::Ok(lines) = connected.run(Request::List) else {
+        panic!("a normal agent must be able to list");
+    };
+    assert!(
+        lines.lines().any(|line| line == "agent 2 Leitor normal @ auro"),
+        "a connected remote endpoint is listed with its workspace: {lines}"
+    );
+    assert!(!lines.contains("Estranho"), "an unconnected workspace must not leak: {lines}");
+
+    let reply = connected.run(Request::Ask {
+        target: "Leitor @ Auro".into(),
+        raw: b"vamos".to_vec(),
+    });
+    assert_eq!(reply, Response::Ok(String::new()));
+    assert_eq!(connected.written(), "auri from Writer <1@auri>\nvamos\r");
+
+    let mut unconnected = test_support::PeerHarness::new(false, false);
+    let Response::Ok(lines) = unconnected.run(Request::List) else {
+        panic!("listing is always allowed");
+    };
+    assert!(!lines.contains("Leitor"), "no edge means no remote address: {lines}");
+    assert_eq!(
+        unconnected.run(Request::Ask { target: "2@auro".into(), raw: b"vamos".to_vec() }),
+        Response::Err("permission_denied".into())
+    );
+    assert!(unconnected.written().is_empty());
+}
+
 #[test]
 fn old_config_regression_loads_without_connections() {
     // A config written before the feature: no `connections`, no `admin`,
