@@ -107,7 +107,7 @@ pub fn authorize(
         | Action::AgentRole { .. } => return Err(Denied::NotAdmin),
     };
 
-    if workspace.canvas.connected(principal.id, target) {
+    if workspace.canvas.connected(workspace.id, principal.id, target) {
         Ok(())
     } else {
         Err(Denied::NotConnected)

@@ -71,13 +71,13 @@ fn connection_dies_with_its_card() {
     assert!(state.connect(other, ConnectionTarget::Note(note)));
     assert_eq!(state.connections().len(), 2);
 
-    assert!(state.remove_agent(other).is_some());
+    assert!(state.remove_agent(1, other).is_some());
     assert!(state.connections().is_empty(), "both edges ended with their card endpoint");
-    assert!(!state.connected(card, ConnectionTarget::Card(other)));
-    assert!(!state.connected(card, ConnectionTarget::Note(note)));
+    assert!(!state.connected(1, card, ConnectionTarget::Card(other)));
+    assert!(!state.connected(1, card, ConnectionTarget::Note(note)));
 
     assert!(state.connect(card, ConnectionTarget::Note(note)));
-    assert!(state.remove_note(note).is_some());
+    assert!(state.remove_note(1, note).is_some());
     assert!(state.connections().is_empty(), "a note endpoint cleans up too");
 }
 
@@ -149,6 +149,11 @@ fn ask_to_unloaded_peer_waits_for_the_fresh_writer() {
     assert_eq!(probe.response, Response::Ok(String::new()));
     assert!(probe.has_peer_writer, "the fresh peer PTY writer must be registered");
     assert!(probe.stale_bytes.is_empty(), "bytes went to a stale writer: {:?}", probe.stale_bytes);
+    assert_eq!(
+        probe.fresh_bytes,
+        "auri from Writer <1@auri>\nping\r",
+        "the rebuilt peer writer must receive the exact envelope"
+    );
     assert_eq!(probe.active_before, Some(1));
     assert_eq!(probe.active_after, Some(1), "loading a peer must not change the active workspace");
     assert!(!probe.peer_unloaded);
@@ -879,8 +884,79 @@ fn picker_chooses_a_workspace_then_an_endpoint() {
         "choosing the endpoint closes the picker"
     );
     assert!(
-        vcx.debug_bounds("proxy-card-2-4").is_some(),
+        vcx.debug_bounds("proxy-card-2-c4").is_some(),
         "the new edge renders its remote endpoint as a proxy"
+    );
+}
+
+#[test]
+fn proxies_with_a_shared_numeric_id_are_separate_elements() {
+    use crate::canvas::Canvas;
+    use crate::config::LoadOutcome;
+
+    let json = r#"{
+        "workspaces": [
+            {"id":1,"name":"Auri","icon":"Star","root":"/tmp","canvas":{
+                "agents":[{"id":1,"kind":"Claude","name":"Writer",
+                    "bounds":{"x":40.0,"y":40.0,"width":240.0,"height":120.0},"admin":true}],
+                "connections":[
+                    {"from":{"Card":1},"to":{"Card":4},"from_workspace":1,"to_workspace":2},
+                    {"from":{"Card":1},"to":{"Note":4},"from_workspace":1,"to_workspace":2}
+                ],"next_id":2}},
+            {"id":2,"name":"Auro","icon":"Folder","root":"/tmp","canvas":{
+                "agents":[{"id":4,"kind":"Pi","name":"Oh My Pi #3",
+                    "bounds":{"x":600.0,"y":300.0,"width":240.0,"height":120.0}}],
+                "notes":[{"id":4,"text":"peer note",
+                    "bounds":{"x":600.0,"y":520.0,"width":240.0,"height":120.0}}],
+                "next_id":5}}
+        ],"active":1,"next_id":3
+    }"#;
+    let store: WorkspaceStore = serde_json::from_str(json).expect("two proxies fixture");
+    let mut cx = cross_test_cx();
+    let (_, vcx) = cx.add_window_view(|window, cx| {
+        Canvas::new(store.clone(), LoadOutcome::Fresh, window.window_handle(), None, cx)
+    });
+    vcx.run_until_parked();
+
+    let card = vcx.debug_bounds("proxy-card-2-c4").expect("the card proxy");
+    let note = vcx.debug_bounds("proxy-card-2-n4").expect("the note proxy");
+    assert_ne!(card.center(), note.center(), "both endpoints must render at their own bounds");
+}
+
+#[test]
+fn switching_workspace_closes_the_connection_popover() {
+    use auro::gpui::{Modifiers, Point, px};
+
+    use crate::canvas::Canvas;
+    use crate::config::LoadOutcome;
+
+    let mut cx = cross_test_cx();
+    let store = cross_workspace_store(true);
+    let (view, vcx) = cx.add_window_view(|window, cx| {
+        Canvas::new(store.clone(), LoadOutcome::Fresh, window.window_handle(), None, cx)
+    });
+    vcx.run_until_parked();
+    let (x, y, drawer_width) = vcx.read(|cx| {
+        let canvas = view.read(cx);
+        let point = test_support::edge_click_point(canvas, 0).expect("the cross rope is painted");
+        (point.0, point.1, test_support::drawer_width(canvas, cx))
+    });
+    vcx.simulate_click(Point::new(px(x + drawer_width), px(y)), Modifiers::none());
+    vcx.run_until_parked();
+    assert!(
+        vcx.read(|cx| test_support::connection_popover_open(view.read(cx))),
+        "the rope inspector is open in Auri"
+    );
+
+    vcx.update(|window, cx| {
+        view.update(cx, |canvas, cx| {
+            test_support::activate_via_drawer(canvas, 2, window, cx)
+        })
+    });
+    vcx.run_until_parked();
+    assert!(
+        !vcx.read(|cx| test_support::connection_popover_open(view.read(cx))),
+        "an inspector belongs to the workspace that opened it"
     );
 }
 
@@ -907,7 +983,7 @@ fn clicking_a_proxy_card_changes_nothing() {
     vcx.run_until_parked();
 
     let proxy = vcx
-        .debug_bounds("proxy-card-2-4")
+        .debug_bounds("proxy-card-2-c4")
         .expect("a saved cross edge renders a proxy in Auri");
     let before = vcx.read(|cx| {
         let canvas = view.read(cx);
@@ -959,7 +1035,7 @@ fn cross_rope_popover_removes_the_edge_from_both_workspaces() {
     vcx.run_until_parked();
 
     assert!(
-        vcx.debug_bounds("proxy-card-2-4").is_some(),
+        vcx.debug_bounds("proxy-card-2-c4").is_some(),
         "Auri shows Auro's endpoint"
     );
     vcx.update(|_, cx| {
@@ -967,7 +1043,7 @@ fn cross_rope_popover_removes_the_edge_from_both_workspaces() {
     });
     vcx.run_until_parked();
     assert!(
-        vcx.debug_bounds("proxy-card-1-1").is_some(),
+        vcx.debug_bounds("proxy-card-1-c1").is_some(),
         "Auro shows the originating endpoint from the same edge"
     );
     vcx.update(|_, cx| {

@@ -207,19 +207,21 @@ fn distance_to_segment(point: Point<Pixels>, a: Point<Pixels>, b: Point<Pixels>)
 
 /// Closest rope under a stage-local point, or None when the press missed them.
 fn edge_hit_at(edges: &[EdgeHit], point: Point<Pixels>, tolerance: f32) -> Option<usize> {
-    let mut closest = (tolerance, None);
-    for edge in edges {
+    // (distance, edge index, connection index). Strict `<` on distance keeps
+    // the first rope found, so equal-distance ties go to the lowest index.
+    let mut closest = (tolerance, usize::MAX, usize::MAX);
+    for (index, edge) in edges.iter().enumerate() {
         let mut previous = edge.point_at(0.0);
         for step in 1..=20 {
             let next = edge.point_at(step as f32 / 20.0);
             let distance = distance_to_segment(point, previous, next);
-            if distance <= closest.0 {
-                closest = (distance, Some(edge.connection));
+            if distance < closest.0 || (distance == closest.0 && index < closest.1) {
+                closest = (distance, index, edge.connection);
             }
             previous = next;
         }
     }
-    closest.1
+    (closest.1 != usize::MAX).then_some(closest.2)
 }
 
 /// One short-lived light travelling along a connection. `reverse` keeps the
@@ -466,6 +468,27 @@ fn proxy_cards(
     }
     proxies
 }
+/// Test-only tee: copies bytes written to a freshly rebuilt PTY writer so a
+/// test can prove which writer received an envelope.
+#[cfg(test)]
+struct RecordingWriter {
+    inner: SharedPtyWriter,
+    copy: Arc<Mutex<Vec<u8>>>,
+}
+
+#[cfg(test)]
+impl Write for RecordingWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let written = self.inner.lock().expect("pty writer").write(bytes)?;
+        self.copy.lock().expect("capture buffer").extend_from_slice(&bytes[..written]);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.lock().expect("pty writer").flush()
+    }
+}
+
 /// Live identity for the host listener. `tokens` maps a one-time token to the
 /// workspace-local card id; `homes` remembers its workspace so an id reused in
 /// another workspace cannot borrow its authority. `writers` holds the shared
@@ -475,6 +498,8 @@ struct AgentRegistry {
     tokens: HashMap<String, TerminalId>,
     homes: HashMap<String, WorkspaceId>,
     writers: HashMap<(WorkspaceId, TerminalId), Arc<Mutex<Box<dyn Write + Send>>>>,
+    #[cfg(test)]
+    capture: Option<((WorkspaceId, TerminalId), Arc<Mutex<Vec<u8>>>)>,
 }
 
 impl AgentRegistry {
@@ -488,7 +513,14 @@ impl AgentRegistry {
 
     /// Retain a shared handle to a card's PTY input for later `ask` dispatch.
     /// Ids are workspace-local, so the full (workspace, id) key is required.
-    fn register(&mut self, workspace: WorkspaceId, id: TerminalId, writer: Arc<Mutex<Box<dyn Write + Send>>>) {
+    fn register(&mut self, workspace: WorkspaceId, id: TerminalId, writer: SharedPtyWriter) {
+        #[cfg(test)]
+        let writer: SharedPtyWriter = match &self.capture {
+            Some((key, copy)) if *key == (workspace, id) => Arc::new(Mutex::new(Box::new(
+                RecordingWriter { inner: writer, copy: copy.clone() },
+            ))),
+            _ => writer,
+        };
         self.writers.insert((workspace, id), writer);
     }
 
@@ -570,7 +602,13 @@ fn workspace_address(store: &WorkspaceStore, workspace: WorkspaceId) -> String {
         return workspace.to_string();
     };
     let name = found.name.trim();
+    // The address is the trailing `<...>` of a single-line header. A name with
+    // control characters could forge extra lines, so use the stable id.
+    let name_has_control = name
+        .chars()
+        .any(|char| char.is_control() || matches!(char, '\u{2028}' | '\u{2029}'));
     let name_unique = !name.is_empty()
+        && !name_has_control
         && store
             .workspaces()
             .iter()
@@ -893,7 +931,7 @@ fn dispatch(
                 .canvas
                 .agent(caller)
                 .is_some_and(|agent| agent.admin)
-                || workspace.canvas.connected(caller, target)
+                || workspace.canvas.connected(workspace_id, caller, target)
         } else {
             store.connected_across(workspace_id, ConnectionTarget::Card(caller), target_ws, target)
         }
@@ -1085,10 +1123,7 @@ fn dispatch(
         }
         Request::NoteDelete { note } => {
             let id = note_target(&note);
-            let Some(ws) = store.workspace_mut(workspace_id) else {
-                return refused("no_workspace");
-            };
-            if ws.canvas.remove_note(id).is_none() {
+            if store.remove_note(workspace_id, id).is_none() {
                 return refused("note_not_found");
             }
             outcome(
@@ -1151,15 +1186,7 @@ fn dispatch(
             let Some(ConnectionTarget::Card(id)) = Canvas::resolve_target(workspace, &target) else {
                 return refused("unknown_target");
             };
-            let is_agent = workspace.canvas.agent(id).is_some();
-            let removed = {
-                let ws = store.workspace_mut(workspace_id).expect("workspace just checked");
-                if is_agent {
-                    ws.canvas.remove_agent(id).is_some()
-                } else {
-                    ws.canvas.remove(id).is_some()
-                }
-            };
+            let removed = store.remove_card(workspace_id, id);
             if !removed {
                 return refused("card_not_found");
             }
@@ -1634,14 +1661,7 @@ fn remove_terminal_state(
     workspace_id: WorkspaceId,
     id: TerminalId,
 ) -> bool {
-    let Some(workspace) = store.workspace_mut(workspace_id) else {
-        return false;
-    };
-    if workspace.canvas.agent(id).is_some() {
-        if workspace.canvas.remove_agent(id).is_none() {
-            return false;
-        }
-    } else if workspace.canvas.remove(id).is_none() {
+    if !store.remove_card(workspace_id, id) {
         return false;
     }
     if let Some(cards) = groups.get_mut(&workspace_id) {
@@ -2040,13 +2060,13 @@ impl Canvas {
         let mut pty = match PtySession::spawn_shell_in_with_env(cols, rows, Some(&root), &env) {
             Ok(pty) => pty,
             Err(error) => {
-                return self.rollback_cli_card(workspace, id, agent_kind.is_some(), format!("spawn_failed: {error}"), cx);
+                return self.rollback_cli_card(workspace, id, format!("spawn_failed: {error}"), cx);
             }
         };
         let command = command.or_else(|| icon.as_ref().map(|(stored, _)| stored.clone())).unwrap_or_default();
         if !command.is_empty() {
             if let Err(error) = pty.send_line(&command) {
-                return self.rollback_cli_card(workspace, id, agent_kind.is_some(), format!("spawn_failed: {error}"), cx);
+                return self.rollback_cli_card(workspace, id, format!("spawn_failed: {error}"), cx);
             }
         }
         if let Some(state) = self.store.workspace_mut(workspace) {
@@ -2074,18 +2094,11 @@ impl Canvas {
         &mut self,
         workspace: WorkspaceId,
         id: TerminalId,
-        agent: bool,
         error: String,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
         self.registry.revoke_agent(workspace, id);
-        if let Some(state) = self.store.workspace_mut(workspace) {
-            if agent {
-                state.canvas.remove_agent(id);
-            } else {
-                state.canvas.remove(id);
-            }
-        }
+        self.store.remove_card(workspace, id);
         self.error = Some(error.clone());
         cx.notify();
         Err(error)
@@ -2838,6 +2851,7 @@ impl Canvas {
     /// opened in the previous workspace must be abandoned, not reinterpreted.
     fn cancel_connect_for_activation(&mut self, id: WorkspaceId, cx: &mut Context<Self>) {
         if self.store.active().is_some_and(|active| active != id) {
+            self.connection_popover = None;
             self.cancel_connect(cx);
         }
     }
@@ -2954,9 +2968,7 @@ impl Canvas {
     }
     /// Remove one note and its persisted state.
     pub fn remove_text(&mut self, workspace_id: WorkspaceId, id: u64, cx: &mut Context<Self>) {
-        if let Some(workspace) = self.store.workspace_mut(workspace_id) {
-            workspace.canvas.remove_note(id);
-        }
+        self.store.remove_note(workspace_id, id);
         if let Some(notes) = self.notes.get_mut(&workspace_id) {
             notes.retain(|(note_id, _)| *note_id != id);
         }
@@ -3001,9 +3013,7 @@ impl Canvas {
             Ok(pty) => pty,
             Err(error) => {
                 // A failed fork must not leave a phantom entry in the state.
-                if let Some(workspace) = self.store.workspace_mut(workspace_id) {
-                    workspace.canvas.remove(id);
-                }
+                self.store.remove_card(workspace_id, id);
                 self.error = Some(format!("Terminal {id} não iniciou: {error}"));
                 self.finish_store_change(cx);
                 return;
@@ -3072,9 +3082,7 @@ impl Canvas {
             Ok(pty) => pty,
             Err(error) => {
                 self.registry.revoke_agent(workspace_id, id);
-                if let Some(workspace) = self.store.workspace_mut(workspace_id) {
-                    workspace.canvas.remove_agent(id);
-                }
+                self.store.remove_card(workspace_id, id);
                 self.error = Some(format!("Agente {name} não iniciou: {error}"));
                 self.finish_store_change(cx);
                 return;
@@ -3082,9 +3090,7 @@ impl Canvas {
         };
         if let Err(error) = pty.send_line(&command) {
             self.registry.revoke_agent(workspace_id, id);
-            if let Some(workspace) = self.store.workspace_mut(workspace_id) {
-                workspace.canvas.remove_agent(id);
-            }
+            self.store.remove_card(workspace_id, id);
             self.error = Some(format!("Agente {name} não iniciou: {error}"));
             self.finish_store_change(cx);
             return;
@@ -4714,14 +4720,18 @@ impl Render for Canvas {
                     .find(|item| item.id == proxy.workspace)?;
                 let end = connection_end(&self.store, workspace, proxy.target);
                 let workspace_id = proxy.workspace;
-                let numeric_id = match proxy.target {
-                    ConnectionTarget::Card(id) | ConnectionTarget::Note(id) => id,
+                let (kind, numeric_id) = match proxy.target {
+                    ConnectionTarget::Card(id) => ('c', id),
+                    ConnectionTarget::Note(id) => ('n', id),
                 };
-                let key = format!("{workspace_id}-{numeric_id}");
+                let key = format!("{kind}{numeric_id}");
                 Some(
                     div()
-                        .id(ElementId::named_usize(format!("proxy-card-{workspace_id}"), numeric_id as usize))
-                        .debug_selector(move || format!("proxy-card-{key}"))
+                        .id(ElementId::named_usize(
+                            format!("proxy-card-{workspace_id}-{key}"),
+                            numeric_id as usize,
+                        ))
+                        .debug_selector(move || format!("proxy-card-{workspace_id}-{key}"))
                         .absolute()
                         .left(px(proxy.bounds.x))
                         .top(px(proxy.bounds.y))
@@ -6678,7 +6688,7 @@ mod registry_tests {
             Response::Ok(String::new())
         );
 
-        store.workspace_mut(workspace_id).unwrap().canvas.remove_agent(agent_id);
+        store.remove_card(workspace_id, agent_id);
         registry.revoke_agent(workspace_id, agent_id);
 
         assert_eq!(
@@ -6941,7 +6951,7 @@ mod dispatch_tests {
         let id = message.split_whitespace().last().unwrap().parse::<TerminalId>().unwrap();
         let workspace = harness.store.workspaces().iter().find(|item| item.id == harness.workspace).unwrap();
         assert!(workspace.canvas.terminals().iter().any(|terminal| terminal.id == id));
-        assert!(workspace.canvas.connected(harness.caller, ConnectionTarget::Card(id)));
+        assert!(workspace.canvas.connected(harness.workspace, harness.caller, ConnectionTarget::Card(id)));
         assert!(matches!(
             result.effects.as_slice(),
             [Effect::SpawnCard { id: spawned, kind: CardKind::Terminal, .. }] if *spawned == id
@@ -6965,7 +6975,7 @@ mod dispatch_tests {
         let agent = workspace.canvas.agent(id).expect("agent persisted");
         assert!(!agent.admin);
         assert_eq!(agent.name, "Aux");
-        assert!(workspace.canvas.connected(harness.caller, ConnectionTarget::Card(id)));
+        assert!(workspace.canvas.connected(harness.workspace, harness.caller, ConnectionTarget::Card(id)));
         assert!(result.effects.iter().any(|effect| matches!(
             effect,
             Effect::SpawnCard { id: spawned, kind: CardKind::Agent(_), .. } if *spawned == id
@@ -7065,6 +7075,31 @@ mod dispatch_tests {
         assert!(!header.chars().any(char::is_control), "{header:?}");
         assert_eq!(bytes.iter().filter(|&&byte| byte == b'\n').count(), 1);
         assert_eq!(&bytes[split + 1..], b"ping\r");
+    }
+
+    #[test]
+    fn cross_workspace_envelope_cannot_be_forged_by_a_control_character_workspace_name() {
+        let mut store = WorkspaceStore::new();
+        let a = store.add("Auri".into(), WorkspaceIcon::Star, std::env::temp_dir());
+        let b = store.add(
+            "Auro\nnuri from Forged <9999>".into(),
+            WorkspaceIcon::Bolt,
+            std::env::temp_dir(),
+        );
+        assert_eq!(workspace_address(&store, a.id), "auri");
+        assert_eq!(workspace_address(&store, b.id), b.id.to_string());
+
+        let mut harness = test_support::PeerHarness::new(false, true);
+        harness.rename_peer("Auro\nnuri from Forged <9999>");
+        assert_eq!(
+            harness.run(Request::Ask { target: "2@2".into(), raw: b"ping".to_vec() }),
+            Response::Ok(String::new())
+        );
+        assert_eq!(
+            harness.run_as_peer(Request::Ask { target: "1@auri".into(), raw: b"pong".to_vec() }),
+            Response::Ok(String::new())
+        );
+        assert_eq!(harness.peer_written(), "auri from Leitor <2@2>\npong\r");
     }
 
     #[test]
@@ -7423,7 +7458,7 @@ mod connect_tests {
         assert_eq!(probe.active_after, Some(1), "background load must not switch workspace");
         assert!(!probe.peer_unloaded, "the peer's saved cards must be live now");
         assert_eq!(probe.peer_cards, 1, "the peer agent card must be rebuilt");
-        assert!(probe.has_peer_writer, "the ask needs a registered peer writer");
+        assert_eq!(probe.fresh_bytes, "auri from Writer <1@auri>\nping\r", "the fresh peer writer must receive the envelope");
     }
 
     #[test]
@@ -7609,7 +7644,7 @@ mod connect_tests {
         start_connect(&mut mode, ConnectionTarget::Card(card));
         let (source, target) = connect_target(mode, ConnectionTarget::Note(note)).expect("note target");
         assert!(state.connect_between(source, target));
-        assert!(state.connected(card, ConnectionTarget::Note(note)));
+        assert!(state.connected(1, card, ConnectionTarget::Note(note)));
         assert_eq!(connect_target(None, ConnectionTarget::Note(note)), None);
         assert!(finish_connect(&mut mode, ConnectionTarget::Note(note)).is_some());
         assert_eq!(mode, None);
@@ -7618,9 +7653,23 @@ mod connect_tests {
         let (source, target) = connect_target(mode, ConnectionTarget::Card(card)).expect("card target");
         assert_eq!(source, ConnectionTarget::Note(note));
         assert!(!state.connect_between(source, target), "reverse edge is the same edge");
-        assert!(state.connected_note(note, ConnectionTarget::Card(card)));
+        assert!(state.connected_note(1, note, ConnectionTarget::Card(card)));
         assert_eq!(connect_target(mode, ConnectionTarget::Note(note)), None, "note cannot target itself");
     }
+    #[test]
+    fn edge_hit_at_breaks_equal_distance_ties_by_lowest_index() {
+        let rope = |connection| EdgeHit {
+            connection,
+            start: Point::new(px(0.0), px(0.0)),
+            control: Point::new(px(10.0), px(0.0)),
+            end: Point::new(px(20.0), px(0.0)),
+        };
+        let point = Point::new(px(10.0), px(5.0));
+        assert_eq!(edge_hit_at(&[rope(7), rope(9)], point, 10.0), Some(7));
+        assert_eq!(edge_hit_at(&[rope(9), rope(7)], point, 10.0), Some(9));
+        assert_eq!(edge_hit_at(&[], point, 10.0), None);
+    }
+
 }
 
 #[cfg(test)]
@@ -8022,7 +8071,7 @@ pub(crate) mod test_support {
         }
 
         pub(crate) fn creator_connected_to(&self, id: TerminalId) -> bool {
-            self.workspace().canvas.connected(self.caller, ConnectionTarget::Card(id))
+            self.workspace().canvas.connected(self.workspace, self.caller, ConnectionTarget::Card(id))
         }
 
         fn workspace(&self) -> &WorkspaceState {
@@ -8070,6 +8119,7 @@ pub(crate) mod test_support {
         pub(crate) peer_cards: usize,
         pub(crate) has_peer_writer: bool,
         pub(crate) stale_bytes: String,
+        pub(crate) fresh_bytes: String,
     }
 
     pub(crate) fn probe_unloaded_peer_ask(stale_writer: bool) -> PeerLoadProbe {
@@ -8140,6 +8190,10 @@ pub(crate) mod test_support {
         } else {
             Request::Ask { target: "2@auro".into(), raw: b"ping".to_vec() }
         };
+        let fresh = Arc::new(Mutex::new(Vec::new()));
+        vcx.update(|_, cx| view.update(cx, |canvas, _cx| {
+            canvas.registry.capture = Some(((2, 2), fresh.clone()));
+        }));
         let response = vcx.update(|window, cx| view.update(cx, |canvas, cx| {
             canvas.handle_request(&token, request, window, cx)
         }));
@@ -8165,6 +8219,8 @@ pub(crate) mod test_support {
             peer_unloaded,
             peer_cards,
             has_peer_writer,
+            fresh_bytes: String::from_utf8(fresh.lock().expect("fresh buffer").clone())
+                .expect("utf8 envelope"),
             stale_bytes: String::from_utf8(stale.lock().expect("stale buffer").clone())
                 .expect("utf8 envelope"),
         }

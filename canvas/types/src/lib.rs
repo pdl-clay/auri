@@ -98,6 +98,35 @@ impl Connection {
     }
 }
 
+/// Resolve an omitted qualifier to the workspace that stores the edge.
+fn endpoint_workspace(endpoint: Option<WorkspaceId>, owner: WorkspaceId) -> WorkspaceId {
+    endpoint.unwrap_or(owner)
+}
+
+/// A local lookup only matches edges whose two endpoints resolve to `owner`.
+fn edge_links_in(
+    edge: &Connection,
+    owner: WorkspaceId,
+    a: ConnectionTarget,
+    b: ConnectionTarget,
+) -> bool {
+    endpoint_workspace(edge.from_workspace, owner) == owner
+        && endpoint_workspace(edge.to_workspace, owner) == owner
+        && edge_links(edge, a, b)
+}
+
+/// Whether an edge touches `target` in `target_ws`. `owner` is the workspace
+/// storing the edge, so an omitted qualifier resolves to it, not to the caller.
+fn edge_touches(
+    edge: &Connection,
+    owner: WorkspaceId,
+    target_ws: WorkspaceId,
+    target: ConnectionTarget,
+) -> bool {
+    (endpoint_workspace(edge.from_workspace, owner) == target_ws && edge.from == target)
+        || (endpoint_workspace(edge.to_workspace, owner) == target_ws && edge.to == target)
+}
+
 fn edge_links(edge: &Connection, a: ConnectionTarget, b: ConnectionTarget) -> bool {
     (edge.from == a && edge.to == b) || (edge.from == b && edge.to == a)
 }
@@ -345,10 +374,10 @@ impl CanvasState {
         terminal
     }
 
-    pub fn remove(&mut self, id: TerminalId) -> Option<TerminalState> {
+    pub fn remove(&mut self, owner: WorkspaceId, id: TerminalId) -> Option<TerminalState> {
         let index = self.terminals.iter().position(|terminal| terminal.id == id)?;
         let removed = self.terminals.remove(index);
-        self.remove_connections_for(ConnectionTarget::Card(id));
+        self.remove_connections_for(owner, owner, ConnectionTarget::Card(id));
         self.reindex_titles();
         if self.selected == Some(id) {
             self.selected = None;
@@ -426,10 +455,10 @@ impl CanvasState {
         true
     }
 
-    pub fn remove_note(&mut self, id: u64) -> Option<NoteState> {
+    pub fn remove_note(&mut self, owner: WorkspaceId, id: u64) -> Option<NoteState> {
         let index = self.notes.iter().position(|note| note.id == id)?;
         let removed = self.notes.remove(index);
-        self.remove_connections_for(ConnectionTarget::Note(id));
+        self.remove_connections_for(owner, owner, ConnectionTarget::Note(id));
         Some(removed)
     }
 
@@ -470,10 +499,10 @@ impl CanvasState {
         agent
     }
 
-    pub fn remove_agent(&mut self, id: TerminalId) -> Option<AgentState> {
+    pub fn remove_agent(&mut self, owner: WorkspaceId, id: TerminalId) -> Option<AgentState> {
         let index = self.agents.iter().position(|agent| agent.id == id)?;
         let removed = self.agents.remove(index);
-        self.remove_connections_for(ConnectionTarget::Card(id));
+        self.remove_connections_for(owner, owner, ConnectionTarget::Card(id));
         self.reindex_titles();
         if self.selected == Some(id) {
             self.selected = None;
@@ -571,7 +600,7 @@ impl CanvasState {
 
     /// Generic edge insertion; both endpoints may be cards or notes.
     pub fn connect_between(&mut self, from: ConnectionTarget, to: ConnectionTarget) -> bool {
-        if from == to || self.connected_between(from, to) {
+        if from == to || self.connections.iter().any(|edge| edge_links(edge, from, to)) {
             return false;
         }
         self.connections.push(Connection::local(from, to));
@@ -617,24 +646,36 @@ impl CanvasState {
         self.connections.len() != before
     }
 
-    /// True when an edge joins the two endpoints, regardless of its direction.
-    pub fn connected(&self, a: TerminalId, b: ConnectionTarget) -> bool {
-        self.connected_between(ConnectionTarget::Card(a), b)
+    /// True when a local edge joins the two endpoints, regardless of direction.
+    /// A qualified endpoint in another workspace never matches a local id.
+    pub fn connected(&self, owner: WorkspaceId, a: TerminalId, b: ConnectionTarget) -> bool {
+        self.connected_between(owner, ConnectionTarget::Card(a), b)
     }
 
-    /// True when a note joins the given endpoint.
-    pub fn connected_note(&self, note: u64, b: ConnectionTarget) -> bool {
-        self.connected_between(ConnectionTarget::Note(note), b)
+    /// True when a local note joins the given endpoint.
+    pub fn connected_note(&self, owner: WorkspaceId, note: u64, b: ConnectionTarget) -> bool {
+        self.connected_between(owner, ConnectionTarget::Note(note), b)
     }
 
-    pub fn connected_between(&self, a: ConnectionTarget, b: ConnectionTarget) -> bool {
-        self.connections.iter().any(|edge| edge_links(edge, a, b))
+    pub fn connected_between(
+        &self,
+        owner: WorkspaceId,
+        a: ConnectionTarget,
+        b: ConnectionTarget,
+    ) -> bool {
+        self.connections.iter().any(|edge| edge_links_in(edge, owner, a, b))
     }
 
-    /// Drop every edge touching a card or note being removed.
-    pub fn remove_connections_for(&mut self, target: ConnectionTarget) {
+    /// Drop every stored edge touching `target` in `target_ws`. `owner` is the
+    /// workspace storing these edges; `None` qualifiers resolve to it.
+    pub fn remove_connections_for(
+        &mut self,
+        owner: WorkspaceId,
+        target_ws: WorkspaceId,
+        target: ConnectionTarget,
+    ) {
         self.connections
-            .retain(|edge| edge.from != target && edge.to != target);
+            .retain(|edge| !edge_touches(edge, owner, target_ws, target));
     }
 
     /// Change a card's role; the next CLI request observes the new value.
@@ -825,6 +866,38 @@ impl WorkspaceStore {
         &self.workspaces
     }
 
+    /// Remove one card (agent or terminal) from `workspace` and drop every
+    /// edge touching it, including copies of the edge stored in other workspaces.
+    pub fn remove_card(&mut self, workspace: WorkspaceId, id: TerminalId) -> bool {
+        let Some(owner) = self.workspace_mut(workspace) else {
+            return false;
+        };
+        let removed = if owner.canvas.agent(id).is_some() {
+            owner.canvas.remove_agent(workspace, id).is_some()
+        } else {
+            owner.canvas.remove(workspace, id).is_some()
+        };
+        if removed {
+            for stored in &mut self.workspaces {
+                stored
+                    .canvas
+                    .remove_connections_for(stored.id, workspace, ConnectionTarget::Card(id));
+            }
+        }
+        removed
+    }
+
+    /// Remove one note from `workspace` with the same cross-workspace cleanup.
+    pub fn remove_note(&mut self, workspace: WorkspaceId, id: u64) -> Option<NoteState> {
+        let removed = self.workspace_mut(workspace)?.canvas.remove_note(workspace, id)?;
+        for stored in &mut self.workspaces {
+            stored
+                .canvas
+                .remove_connections_for(stored.id, workspace, ConnectionTarget::Note(id));
+        }
+        Some(removed)
+    }
+
     /// True when an edge between the two qualified endpoints exists in any
     /// workspace. An edge's missing workspace id means the workspace storing it.
     pub fn connected_across(
@@ -937,7 +1010,7 @@ mod tests {
             ["Terminal 1", "Terminal 2", "Terminal 3"]
         );
 
-        state.remove(second.id);
+        state.remove(1, second.id);
         assert_eq!(
             state.terminals().iter().map(|item| item.title.as_str()).collect::<Vec<_>>(),
             ["Terminal 1", "Terminal 2"]
@@ -958,7 +1031,7 @@ mod tests {
         let second = state.add_agent(AgentKind::Codex, bounds);
         assert_eq!((first.name.as_str(), second.name.as_str()), ("Claude 1", "Codex 2"));
 
-        state.remove_agent(first.id);
+        state.remove_agent(1, first.id);
         assert_eq!(state.agents()[0].name, "Codex 1");
 
         let custom = state.add_agent_named("Meu agente".into(), AgentKind::Custom(99), bounds);
@@ -987,7 +1060,7 @@ mod tests {
         let a = state.add();
         let _b = state.add();
         state.select(a.id);
-        state.remove(a.id);
+        state.remove(1, a.id);
         assert_eq!(state.selected(), None);
         assert_eq!(state.terminals().len(), 1);
     }
@@ -1029,9 +1102,9 @@ mod tests {
         assert!(state.set_note_bounds(note.id, moved));
         assert_eq!(state.notes()[0].bounds, moved);
 
-        assert_eq!(state.remove_note(note.id).map(|note| note.text), Some("texto novo".into()));
+        assert_eq!(state.remove_note(1, note.id).map(|note| note.text), Some("texto novo".into()));
         assert!(state.notes().is_empty());
-        assert_eq!(state.remove_note(note.id), None);
+        assert_eq!(state.remove_note(1, note.id), None);
     }
 
     #[test]
@@ -1126,10 +1199,10 @@ mod tests {
         let saved = state.agent(agent.id).unwrap().clone();
         assert_eq!((saved.name.as_str(), saved.kind, saved.bounds), ("Meu Claude", AgentKind::OpenCode, moved));
 
-        assert_eq!(state.remove_agent(agent.id), Some(saved.clone()));
+        assert_eq!(state.remove_agent(1, agent.id), Some(saved.clone()));
         assert_eq!(state.selected(), None);
         assert!(state.agents().is_empty());
-        assert!(state.remove_agent(agent.id).is_none());
+        assert!(state.remove_agent(1, agent.id).is_none());
     }
 
     #[test]
@@ -1163,17 +1236,17 @@ mod tests {
             !state.connect(b.id, ConnectionTarget::Card(a.id)),
             "reverse edge is the same edge"
         );
-        assert!(state.connected(a.id, ConnectionTarget::Card(b.id)));
-        assert!(state.connected(b.id, ConnectionTarget::Card(a.id)));
+        assert!(state.connected(1, a.id, ConnectionTarget::Card(b.id)));
+        assert!(state.connected(1, b.id, ConnectionTarget::Card(a.id)));
         assert!(!state.connect(a.id, ConnectionTarget::Card(a.id)), "self edge");
 
         assert!(state.connect(a.id, ConnectionTarget::Note(note.id)));
-        assert!(state.connected(a.id, ConnectionTarget::Note(note.id)));
+        assert!(state.connected(1, a.id, ConnectionTarget::Note(note.id)));
         assert!(!state.connect(a.id, ConnectionTarget::Note(note.id)), "duplicate note edge");
         assert_eq!(state.connections().len(), 2);
 
         assert!(state.disconnect(b.id, ConnectionTarget::Card(a.id)), "reverse disconnect");
-        assert!(!state.connected(a.id, ConnectionTarget::Card(b.id)));
+        assert!(!state.connected(1, a.id, ConnectionTarget::Card(b.id)));
         assert!(!state.disconnect(a.id, ConnectionTarget::Card(b.id)));
     }
 
@@ -1193,7 +1266,7 @@ mod tests {
         assert!(state.connect(terminal.id, ConnectionTarget::Note(note.id)));
         assert_eq!(state.connections().len(), 5);
 
-        assert!(state.remove_agent(a.id).is_some());
+        assert!(state.remove_agent(1, a.id).is_some());
         assert_eq!(
             state.connections(),
             &[
@@ -1212,7 +1285,7 @@ mod tests {
             ]
         );
 
-        assert!(state.remove(terminal.id).is_some());
+        assert!(state.remove(1, terminal.id).is_some());
         assert_eq!(
             state.connections(),
             &[Connection {
@@ -1223,7 +1296,7 @@ mod tests {
             }]
         );
 
-        assert!(state.remove_note(note.id).is_some());
+        assert!(state.remove_note(1, note.id).is_some());
         assert!(state.connections().is_empty());
     }
 
@@ -1252,12 +1325,12 @@ mod tests {
         let note = state.add_note("origem".into(), bounds);
 
         assert!(state.connect_note(note.id, ConnectionTarget::Card(card.id)));
-        assert!(state.connected_note(note.id, ConnectionTarget::Card(card.id)));
-        assert!(state.connected(card.id, ConnectionTarget::Note(note.id)));
+        assert!(state.connected_note(1, note.id, ConnectionTarget::Card(card.id)));
+        assert!(state.connected(1, card.id, ConnectionTarget::Note(note.id)));
         assert!(!state.connect_note(note.id, ConnectionTarget::Card(card.id)));
         assert!(!state.connect_note(note.id, ConnectionTarget::Note(note.id)));
 
-        assert!(state.remove_note(note.id).is_some());
+        assert!(state.remove_note(1, note.id).is_some());
         assert!(state.connections().is_empty());
     }
 
@@ -1266,7 +1339,7 @@ mod tests {
         let json = r#"{"terminals":[],"notes":[],"agents":[],"selected":null,"next_id":4,"connections":[{"from":2,"to":{"Note":7}}]}"#;
         let state: CanvasState = serde_json::from_str(json).unwrap();
         assert_eq!(state.connections().len(), 1);
-        assert!(state.connected(2, ConnectionTarget::Note(7)));
+        assert!(state.connected(1, 2, ConnectionTarget::Note(7)));
     }
 
     #[test]
@@ -1647,6 +1720,53 @@ mod workspace_tests {
             ConnectionTarget::Note(6),
         ));
         assert_eq!(store.workspace_mut(a.id).unwrap().canvas.connections().len(), 1);
+    }
+
+    #[test]
+    fn deleting_a_colliding_local_id_keeps_the_cross_workspace_edge() {
+        let json = r#"{
+            "workspaces": [
+                {"id":1,"name":"A","icon":"Star","root":"/a","canvas":{
+                    "agents":[{"id":1,"kind":"Claude","name":"Admin","admin":true,
+                        "bounds":{"x":0.0,"y":0.0,"width":10.0,"height":10.0}}],
+                    "terminals":[{"id":4,"title":"Unrelated","exited":false,
+                        "bounds":{"x":0.0,"y":0.0,"width":10.0,"height":10.0}}],
+                    "notes":[{"id":2,"text":"local","bounds":{"x":0.0,"y":0.0,"width":10.0,"height":10.0}}],
+                    "connections":[
+                        {"from":{"Card":1},"to":{"Card":4},"from_workspace":1,"to_workspace":2},
+                        {"from":{"Card":1},"to":{"Note":2},"from_workspace":1,"to_workspace":2}
+                    ],"next_id":5}},
+                {"id":2,"name":"B","icon":"Bolt","root":"/b","canvas":{
+                    "terminals":[{"id":4,"title":"Peer","exited":false,
+                        "bounds":{"x":0.0,"y":0.0,"width":10.0,"height":10.0}}],
+                    "notes":[{"id":2,"text":"peer","bounds":{"x":0.0,"y":0.0,"width":10.0,"height":10.0}}],
+                    "next_id":5}}
+            ],"active":1,"next_id":3
+        }"#;
+        let mut store: WorkspaceStore = serde_json::from_str(json).expect("two-workspace store");
+        let card_edge = (
+            ConnectionTarget::Card(1),
+            ConnectionTarget::Card(4),
+        );
+        let note_edge = (
+            ConnectionTarget::Card(1),
+            ConnectionTarget::Note(2),
+        );
+        assert!(store.connected_across(1, card_edge.0, 2, card_edge.1));
+        assert!(store.connected_across(1, note_edge.0, 2, note_edge.1));
+        // Neither cross edge is a local edge in the workspace that stores it.
+        assert!(!store.workspace_mut(1).unwrap().canvas.connected(1, 1, card_edge.1));
+        assert!(!store.workspace_mut(1).unwrap().canvas.connected_note(1, 2, note_edge.0));
+
+        assert!(store.remove_card(1, 4), "A's unrelated local card 4 exists");
+        assert!(store.connected_across(1, card_edge.0, 2, card_edge.1), "B's card 4 is still connected");
+        assert!(store.remove_note(1, 2).is_some(), "A's unrelated local note 2 exists");
+        assert!(store.connected_across(1, note_edge.0, 2, note_edge.1), "B's note 2 is still connected");
+
+        assert!(store.remove_card(2, 4), "deleting the peer endpoint removes its edge");
+        assert!(!store.connected_across(1, card_edge.0, 2, card_edge.1));
+        assert!(store.remove_note(2, 2).is_some());
+        assert!(!store.connected_across(1, note_edge.0, 2, note_edge.1));
     }
 
     #[test]
