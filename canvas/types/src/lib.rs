@@ -1538,6 +1538,68 @@ mod workspace_tests {
     }
 
     #[test]
+    fn connect_qualified_rejects_self_edges_but_keeps_cross_workspace_ids() {
+        let mut state = CanvasState::new();
+        let same = Connection {
+            from: ConnectionTarget::Card(4),
+            to: ConnectionTarget::Card(4),
+            from_workspace: Some(1),
+            to_workspace: Some(1),
+        };
+        assert!(!state.connect_qualified(same));
+        assert!(state.connections().is_empty());
+
+        let cross = Connection {
+            from: ConnectionTarget::Card(4),
+            to: ConnectionTarget::Card(4),
+            from_workspace: Some(1),
+            to_workspace: Some(2),
+        };
+        assert!(state.connect_qualified(cross), "same id in two workspaces is not a self edge");
+        assert_eq!(state.connections(), &[cross]);
+    }
+
+    #[test]
+    fn connect_qualified_ignores_a_reverse_duplicate() {
+        let mut state = CanvasState::new();
+        let edge = Connection {
+            from: ConnectionTarget::Card(1),
+            to: ConnectionTarget::Note(2),
+            from_workspace: Some(1),
+            to_workspace: Some(2),
+        };
+        assert!(state.connect_qualified(edge));
+        let reverse = Connection {
+            from: edge.to,
+            to: edge.from,
+            from_workspace: edge.to_workspace,
+            to_workspace: edge.from_workspace,
+        };
+        assert!(!state.connect_qualified(reverse));
+        assert_eq!(state.connections().len(), 1);
+        assert_eq!(state.connections()[0], edge);
+    }
+
+    #[test]
+    fn disconnect_exact_keeps_an_identical_none_qualified_local_edge() {
+        let mut state = CanvasState::new();
+        let local = Connection::local(ConnectionTarget::Card(1), ConnectionTarget::Card(2));
+        let qualified = Connection {
+            from: local.from,
+            to: local.to,
+            from_workspace: Some(1),
+            to_workspace: Some(1),
+        };
+        assert!(state.connect_qualified(local));
+        assert!(state.connect_qualified(qualified));
+        assert_eq!(state.connections().len(), 2);
+
+        assert!(state.disconnect_exact(qualified));
+        assert_eq!(state.connections(), &[local], "only the qualified edge is removed");
+        assert!(!state.disconnect_exact(qualified), "removal is not repeated");
+    }
+
+    #[test]
     fn deleting_a_workspace_drops_its_edges_from_other_workspaces() {
         let mut store = WorkspaceStore::new();
         let a = store.add("A".into(), WorkspaceIcon::Star, PathBuf::from("/a"));

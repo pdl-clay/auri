@@ -1014,3 +1014,215 @@ fn cross_rope_popover_removes_the_edge_from_both_workspaces() {
         "the peer's proxy disappears too"
     );
 }
+
+/// A local edge is stored before the cross edge, so removing it while the
+/// inspector is open shifts any index-based identity by one.
+fn edge_order_store() -> WorkspaceStore {
+    let json = r#"{
+        "workspaces": [
+            {"id":1,"name":"Auri","icon":"Star","root":"/tmp","canvas":{
+                "agents":[
+                    {"id":1,"kind":"Claude","name":"Writer","bounds":{"x":40.0,"y":40.0,"width":240.0,"height":120.0},"admin":true},
+                    {"id":2,"kind":"Codex","name":"Helper","bounds":{"x":40.0,"y":260.0,"width":240.0,"height":120.0},"admin":false}
+                ],"terminals":[],"notes":[],"selected":null,"next_id":3,
+                "connections":[
+                    {"from":{"Card":1},"to":{"Card":2}},
+                    {"from":{"Card":1},"to":{"Card":4},"from_workspace":1,"to_workspace":2}
+                ]}},
+            {"id":2,"name":"Auro","icon":"Folder","root":"/tmp","canvas":{
+                "agents":[{"id":4,"kind":"Pi","name":"Peer","bounds":{"x":600.0,"y":300.0,"width":240.0,"height":120.0}}],
+                "connections":[]}}
+        ],"active":1
+    }"#;
+    serde_json::from_str(json).expect("edge-order fixture")
+}
+
+/// A remote note sits exactly on top of a real local note.
+fn overlapping_proxy_store() -> WorkspaceStore {
+    let json = r#"{
+        "workspaces": [
+            {"id":1,"name":"Auri","icon":"Star","root":"/tmp","canvas":{
+                "agents":[{"id":1,"kind":"Claude","name":"Writer","bounds":{"x":40.0,"y":40.0,"width":240.0,"height":120.0},"admin":true}],
+                "terminals":[],
+                "notes":[{"id":5,"text":"local note","bounds":{"x":600.0,"y":300.0,"width":240.0,"height":120.0}}],
+                "connections":[{"from":{"Card":1},"to":{"Note":7},"from_workspace":1,"to_workspace":2}]}},
+            {"id":2,"name":"Auro","icon":"Folder","root":"/tmp","canvas":{
+                "agents":[],"terminals":[],
+                "notes":[{"id":7,"text":"remote note","bounds":{"x":600.0,"y":300.0,"width":240.0,"height":120.0}}]}}
+        ],"active":1
+    }"#;
+    serde_json::from_str(json).expect("overlapping-proxy fixture")
+}
+
+/// Switching workspaces mid-picker must abandon the gesture: the source
+/// workspace is captured when it starts and is no longer active afterwards.
+#[test]
+fn switching_workspace_mid_picker_cancels_the_gesture() {
+    use auro::gpui::Modifiers;
+
+    use crate::canvas::Canvas;
+    use crate::config::LoadOutcome;
+
+    let mut cx = cross_test_cx();
+    let store = cross_workspace_store(false);
+    let (view, vcx) = cx.add_window_view(|window, cx| {
+        let mut canvas = Canvas::new(
+            store.clone(),
+            LoadOutcome::Fresh,
+            window.window_handle(),
+            None,
+            cx,
+        );
+        canvas.select(1, 1, cx);
+        canvas
+    });
+    vcx.run_until_parked();
+    let bolt = vcx.debug_bounds("island-connect").expect("admin bolt");
+    vcx.simulate_click(bolt.center(), Modifiers::none());
+    vcx.run_until_parked();
+    let workspace = vcx
+        .debug_bounds("connection-target-2")
+        .expect("the picker's workspace step");
+    vcx.simulate_click(workspace.center(), Modifiers::none());
+    vcx.run_until_parked();
+    assert!(
+        vcx.read(|cx| test_support::connect_picker_open(view.read(cx))),
+        "the picker has reached the endpoint step"
+    );
+
+    vcx.update(|window, cx| {
+        view.update(cx, |canvas, cx| {
+            test_support::activate_via_drawer(canvas, 2, window, cx)
+        })
+    });
+    vcx.run_until_parked();
+    assert!(
+        !vcx.read(|cx| test_support::connect_picker_open(view.read(cx))),
+        "activation cancels the picker"
+    );
+    assert_eq!(vcx.read(|cx| test_support::connect_state(view.read(cx)).0), None);
+
+    vcx.update(|_, cx| {
+        view.update(cx, |canvas, cx| {
+            canvas.complete_cross_connect(2, ConnectionTarget::Card(4), cx)
+        })
+    });
+    vcx.run_until_parked();
+    assert_eq!(vcx.read(|cx| test_support::cross_edge_count(view.read(cx))), 0);
+}
+
+/// The inspector must remove the edge it displayed, even if a store change
+/// reorders or rebuilds the painted edge list while it is open.
+#[test]
+fn inspector_removes_identity_after_a_store_change() {
+    use auro::gpui::{Modifiers, Point, px};
+
+    use crate::canvas::Canvas;
+    use crate::config::LoadOutcome;
+
+    let mut cx = cross_test_cx();
+    let store = edge_order_store();
+    let (view, vcx) = cx.add_window_view(|window, cx| {
+        Canvas::new(
+            store.clone(),
+            LoadOutcome::Fresh,
+            window.window_handle(),
+            None,
+            cx,
+        )
+    });
+    vcx.run_until_parked();
+    let (x, y, drawer_width) = vcx.read(|cx| {
+        let canvas = view.read(cx);
+        let point = test_support::edge_click_point(canvas, 1).expect("the cross rope");
+        (point.0, point.1, test_support::drawer_width(canvas, cx))
+    });
+    vcx.simulate_click(Point::new(px(x + drawer_width), px(y)), Modifiers::none());
+    vcx.run_until_parked();
+    assert!(
+        vcx.read(|cx| test_support::connection_popover_open(view.read(cx))),
+        "the cross rope opened its inspector"
+    );
+
+    vcx.update(|_, cx| {
+        view.update(cx, |canvas, cx| {
+            test_support::remove_local_edge(canvas, ConnectionTarget::Card(1), ConnectionTarget::Card(2), cx)
+        })
+    });
+    vcx.run_until_parked();
+    assert_eq!(vcx.read(|cx| test_support::local_edge_count(view.read(cx))), 0);
+
+    let remove = vcx
+        .debug_bounds("connection-remove")
+        .expect("the still-open inspector");
+    vcx.simulate_click(remove.center(), Modifiers::none());
+    vcx.run_until_parked();
+    assert!(
+        !vcx.read(|cx| test_support::cross_connected(
+            view.read(cx),
+            1,
+            ConnectionTarget::Card(1),
+            2,
+            ConnectionTarget::Card(4)
+        )),
+        "the pressed cross edge is removed, not whatever is now at its old index"
+    );
+    assert_eq!(vcx.read(|cx| test_support::cross_edge_count(view.read(cx))), 0);
+}
+
+/// A proxy is a representation only: when it overlaps a real card, the card
+/// must keep receiving the press.
+#[test]
+fn proxy_does_not_steal_clicks_from_an_overlapping_card() {
+    use auro::gpui::{AppContext, Modifiers, Point, px};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use crate::canvas::Canvas;
+    use crate::config::LoadOutcome;
+
+    let mut cx = cross_test_cx();
+    let store = overlapping_proxy_store();
+    let canvas_slot = Rc::new(RefCell::new(None));
+    let slot = canvas_slot.clone();
+    let (_root, vcx) = cx.add_window_view(move |window, cx| {
+        let canvas = cx.new(|cx| {
+            Canvas::new(
+                store.clone(),
+                LoadOutcome::Fresh,
+                window.window_handle(),
+                None,
+                cx,
+            )
+        });
+        canvas.update(cx, |canvas, cx| canvas.mount_note_for_test(1, 5, window, cx));
+        slot.replace(Some(canvas.clone()));
+        gpui_component::Root::new(canvas, window, cx)
+    });
+    let view = canvas_slot.borrow().clone().expect("canvas entity");
+    assert_eq!(
+        vcx.read(|cx| test_support::selection_state(view.read(cx)).2),
+        Some((1, 5)),
+        "the mounted note starts selected"
+    );
+    let (drawer_width, note) = vcx.read(|cx| {
+        let canvas = view.read(cx);
+        let bounds = test_support::note_bounds(canvas, 1, cx).expect("mounted note");
+        (test_support::drawer_width(canvas, cx), bounds)
+    });
+    vcx.simulate_click(
+        Point::new(
+            px(drawer_width + note.x + note.width * 0.5),
+            px(note.y + note.height * 0.5),
+        ),
+        Modifiers::none(),
+    );
+    vcx.run_until_parked();
+    assert_eq!(
+        vcx.read(|cx| test_support::selection_state(view.read(cx)).2),
+        Some((1, 5)),
+        "the real note under the proxy stays clickable: note={note:?}, drawer={drawer_width}"
+    );
+    assert!(!vcx.read(|cx| test_support::connection_popover_open(view.read(cx))));
+    assert_eq!(vcx.read(|cx| test_support::cross_edge_count(view.read(cx))), 1);
+}

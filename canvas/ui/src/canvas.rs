@@ -335,10 +335,12 @@ fn connection_end(
     }
 }
 
-/// Popover opened by pressing a painted connection line.
-#[derive(Clone)]
+/// Popover opened by pressing a painted connection line. The edge is stored by
+/// identity, not by a render index, so later store changes cannot retarget it.
+#[derive(Clone, Copy)]
 struct ConnectionPopover {
-    connection: usize,
+    owner: WorkspaceId,
+    connection: Connection,
     x: f32,
     y: f32,
 }
@@ -364,10 +366,12 @@ impl VisibleEdge {
     }
 }
 
-/// Workspace step of the connect picker. `None` lists workspaces; `Some` lists
-/// the endpoints inside the chosen workspace.
+/// Workspace step of the connect picker. `owner` is captured when the gesture
+/// starts, so activation changes cannot reattribute its source to another
+/// workspace. `workspace` is the chosen target of the second step.
 #[derive(Clone, Copy)]
 struct ConnectPicker {
+    owner: WorkspaceId,
     workspace: Option<WorkspaceId>,
 }
 
@@ -2254,6 +2258,7 @@ impl Canvas {
 
     /// A row click always activates its workspace and loads its saved cards.
     fn handle_select(&mut self, id: WorkspaceId, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_connect_for_activation(id, cx);
         self.clear_note_selection(cx);
         if self.store.workspace_mut(id).is_some_and(|workspace| !workspace.unloaded) {
             self.store.select(id);
@@ -2316,6 +2321,7 @@ impl Canvas {
                 }
             }
             DrawerAction::Select(id) => {
+                self.cancel_connect_for_activation(id, cx);
                 self.clear_note_selection(cx);
                 self.store.select(id);
                 self.finish_store_change(cx);
@@ -2681,22 +2687,26 @@ impl Canvas {
             return;
         }
         start_connect(&mut self.connecting_from, source);
-        self.connect_picker = self.source_is_admin(source).then_some(ConnectPicker { workspace: None });
+        self.connect_picker = self
+            .store
+            .active()
+            .filter(|active| self.source_is_admin_in(*active, source))
+            .map(|owner| ConnectPicker { owner, workspace: None });
         self.placing = false;
         self.placing_text = false;
         cx.notify();
         self.sync_connect_mode(cx);
     }
 
-    /// True only for an administrator agent card in the active workspace.
-    /// Plain terminals, notes and normal agents keep the local-only gesture.
-    fn source_is_admin(&self, source: ConnectionTarget) -> bool {
+    /// Admin check against the workspace that actually owns the source card.
+    fn source_is_admin_in(&self, workspace_id: WorkspaceId, source: ConnectionTarget) -> bool {
         let ConnectionTarget::Card(id) = source else {
             return false;
         };
         self.store
-            .active()
-            .and_then(|active| self.store.workspaces().iter().find(|item| item.id == active))
+            .workspaces()
+            .iter()
+            .find(|item| item.id == workspace_id)
             .and_then(|workspace| workspace.canvas.agent(id))
             .is_some_and(|agent| agent.admin)
     }
@@ -2758,12 +2768,16 @@ impl Canvas {
         workspace_id: WorkspaceId,
         cx: &mut Context<Self>,
     ) {
-        let valid = self.store.active().is_some_and(|active| active != workspace_id)
+        let Some(picker) = self.connect_picker else {
+            return;
+        };
+        let valid = picker.owner != workspace_id
+            && self.store.active() == Some(picker.owner)
             && self.store.workspaces().iter().any(|item| item.id == workspace_id);
-        if !valid || self.connect_picker.is_none() {
+        if !valid {
             return;
         }
-        self.connect_picker = Some(ConnectPicker { workspace: Some(workspace_id) });
+        self.connect_picker = Some(ConnectPicker { owner: picker.owner, workspace: Some(workspace_id) });
         cx.notify();
     }
 
@@ -2776,16 +2790,18 @@ impl Canvas {
         target: ConnectionTarget,
         cx: &mut Context<Self>,
     ) {
-        let Some(source_workspace) = self.store.active() else {
+        let Some(picker) = self.connect_picker else {
             return;
         };
         let Some(source) = self.connecting_from else {
             return;
         };
-        if source_workspace == workspace_id
-            || !self.store.workspaces().iter().any(|item| item.id == workspace_id)
-            || !self.source_is_admin(source)
-        {
+        let source_workspace = picker.owner;
+        let valid = self.store.active() == Some(source_workspace)
+            && source_workspace != workspace_id
+            && self.store.workspaces().iter().any(|item| item.id == workspace_id)
+            && self.source_is_admin_in(source_workspace, source);
+        if !valid {
             self.cancel_connect(cx);
             return;
         }
@@ -2815,6 +2831,14 @@ impl Canvas {
             self.connect_picker = None;
             cx.notify();
             self.sync_connect_mode(cx);
+        }
+    }
+
+    /// A drawer row activation changes the source workspace, so any gesture
+    /// opened in the previous workspace must be abandoned, not reinterpreted.
+    fn cancel_connect_for_activation(&mut self, id: WorkspaceId, cx: &mut Context<Self>) {
+        if self.store.active().is_some_and(|active| active != id) {
+            self.cancel_connect(cx);
         }
     }
 
@@ -3717,6 +3741,7 @@ impl Canvas {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.cancel_connect_for_activation(id, cx);
         let canvas = cx.weak_entity();
         if let Err(error) = self.rebuild_workspace(id, window, cx, canvas, true) {
             self.error = Some(error);
@@ -4418,16 +4443,16 @@ impl Render for Canvas {
             .unwrap_or_default();
         let connect_picker = self.connect_picker;
         let connection_popover = self.connection_popover.clone().and_then(|menu| {
-            let edge = visible.get(menu.connection)?;
             let state = |id| self.store.workspaces().iter().find(|workspace| workspace.id == id);
-            let (from_ws, from, to_ws, to) = edge.endpoints();
+            let from_ws = menu.connection.from_workspace.unwrap_or(menu.owner);
+            let to_ws = menu.connection.to_workspace.unwrap_or(menu.owner);
             Some((
                 menu,
-                connection_end(&self.store, state(from_ws)?, from),
+                connection_end(&self.store, state(from_ws)?, menu.connection.from),
                 state(from_ws)?.name.clone(),
-                connection_end(&self.store, state(to_ws)?, to),
+                connection_end(&self.store, state(to_ws)?, menu.connection.to),
                 state(to_ws)?.name.clone(),
-                edge.is_cross(),
+                from_ws != to_ws,
             ))
         });
         let minimap_items: Vec<MinimapItem> = workspace_ref
@@ -4711,11 +4736,6 @@ impl Render for Canvas {
                         .border_1()
                         .border_color(rgb(COLOR_PROXY_BORDER))
                         .text_color(rgb(COLOR_FOREGROUND))
-                        // Occlusion and propagation stopping are not actions:
-                        // they keep the invisible rope behind this card from
-                        // opening the inspector when the proxy is pressed.
-                        .occlude()
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .child(
                             svg()
                                 .path(end.icon)
@@ -4789,6 +4809,9 @@ impl Render for Canvas {
             None => Vec::new(),
         };
         let connect_focus = self.connect_focus.clone();
+        // Rope hit testing is the only interaction with a proxy; the element
+        // itself has no handlers and never occludes a real card above it.
+        let proxy_hits = proxies.clone();
 
         div()
             .size_full()
@@ -4865,13 +4888,30 @@ impl Render for Canvas {
                                             let drawer_width = this.drawer.read(cx).drawer_width();
                                             let stage_x = f32::from(event.position.x) - drawer_width;
                                             let y = f32::from(event.position.y);
-                                            if let Some(connection) = edge_hit_at(
+                                            // A press on a proxy changes nothing: its rope
+                                            // continues behind it, but the proxy is not a control.
+                                            if proxy_hits.iter().any(|proxy| {
+                                                stage_x >= proxy.bounds.x
+                                                    && stage_x <= proxy.bounds.x + PROXY_CARD_WIDTH
+                                                    && y >= proxy.bounds.y
+                                                    && y <= proxy.bounds.y + PROXY_CARD_HEIGHT
+                                            }) {
+                                                return;
+                                            }
+                                            if let Some(index) = edge_hit_at(
                                                 &this.edge_hits,
                                                 Point::new(px(stage_x), px(y)),
                                                 CONNECTION_HIT_RADIUS,
                                             ) {
-                                                this.connection_popover =
-                                                    Some(ConnectionPopover { connection, x: f32::from(event.position.x), y });
+                                                let Some(edge) = this.visible_edges.get(index).copied() else {
+                                                    return;
+                                                };
+                                                this.connection_popover = Some(ConnectionPopover {
+                                                    owner: edge.owner,
+                                                    connection: edge.connection,
+                                                    x: f32::from(event.position.x),
+                                                    y,
+                                                });
                                                 cx.notify();
                                                 cx.stop_propagation();
                                                 return;
@@ -5044,7 +5084,7 @@ impl Render for Canvas {
                                                             ),
                                                         ),
                                                         Hsla::from(rgb(CONNECTION_LINE_COLOR))
-                                                            .alpha(0.85),
+                                                            .alpha(CONNECTION_PULSE_SECOND_ALPHA),
                                                     )
                                                     .corner_radii(half),
                                                 );
@@ -5139,9 +5179,11 @@ impl Render for Canvas {
                                         ),
                                 )
                             })
+                            // Proxies paint behind real cards: a representation
+                            // must never intercept a card's press.
+                            .children(proxy_elements)
                             .children(cards)
                             .children(notes)
-                            .children(proxy_elements)
                             .when(connecting, |area| {
                                 area.child(
                                     div()
@@ -5741,7 +5783,6 @@ impl Render for Canvas {
             .when_some(
                 connection_popover,
                 |area, (menu, from, from_ws, to, to_ws, cross)| {
-                let connection = menu.connection;
                 let window_w = stage_w + drawer_width;
                 let left = menu
                     .x
@@ -5752,7 +5793,7 @@ impl Render for Canvas {
                     .clamp(SPACE_NORMAL, (stage_h - CONNECTION_POPOVER_HEIGHT - SPACE_NORMAL).max(SPACE_NORMAL));
                 area.child(
                     div()
-                        .id(("connection-popover", connection))
+                        .id("connection-popover")
                         .debug_selector(|| "connection-popover".to_string())
                         .absolute()
                         .left(px(left))
@@ -5768,7 +5809,7 @@ impl Render for Canvas {
                         .border_1()
                         .border_color(rgb(COLOR_BORDER))
                         .text_color(rgb(COLOR_FOREGROUND))
-                        .text_size(px(12.0))
+                        .text_size(px(CONNECTION_POPOVER_FONT))
                         .occlude()
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .child(
@@ -5780,8 +5821,8 @@ impl Render for Canvas {
                                 .child(
                                     div()
                                         .id("connection-close")
-                                        .w(px(20.0))
-                                        .h(px(20.0))
+                                        .w(px(CONNECTION_POPOVER_CLOSE_SIZE))
+                                        .h(px(CONNECTION_POPOVER_CLOSE_SIZE))
                                         .flex()
                                         .items_center()
                                         .justify_center()
@@ -5821,12 +5862,12 @@ impl Render for Canvas {
                                 .flex()
                                 .items_center()
                                 .gap(px(SPACE_NORMAL))
-                                .pl(px(ICON_SIZE + 2.0))
+                                .pl(px(CONNECTION_POPOVER_ARROW_INDENT))
                                 .text_color(rgb(COLOR_ACCENT))
                                 .child("↕")
                                 .child(
                                     div()
-                                        .text_size(px(11.0))
+                                        .text_size(px(CONNECTION_POPOVER_HINT_FONT))
                                         .text_color(rgb(COLOR_MUTED))
                                         .child("vai / vem"),
                                 ),
@@ -5855,7 +5896,7 @@ impl Render for Canvas {
                         )
                         .child(
                             div()
-                                .text_size(px(11.0))
+                                .text_size(px(CONNECTION_POPOVER_HINT_FONT))
                                 .text_color(rgb(COLOR_MUTED))
                                 .child("Ligação bidirecional"),
                         )
@@ -5864,7 +5905,7 @@ impl Render for Canvas {
                             div()
                                 .id("connection-remove")
                                 .debug_selector(|| "connection-remove".to_string())
-                                .h(px(28.0))
+                                .h(px(CONNECTION_POPOVER_ACTION_HEIGHT))
                                 .flex()
                                 .items_center()
                                 .justify_center()
@@ -5878,18 +5919,14 @@ impl Render for Canvas {
                                         .border_color(rgb(COLOR_DANGER))
                                 })
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    // The visible list is the single source of
-                                    // truth: a cross edge is removed from the
-                                    // workspace that owns the shared record,
-                                    // so both proxies disappear together.
-                                    let edge = this.visible_edges.get(connection).copied();
-                                    let removed = edge.is_some_and(|edge| {
-                                        this.store
-                                            .workspace_mut(edge.owner)
-                                            .is_some_and(|workspace| {
-                                                workspace.canvas.disconnect_exact(edge.connection)
-                                            })
-                                    });
+                                    // Resolve by identity: the pressed edge may
+                                    // no longer be at the same render index.
+                                    let removed = this
+                                        .store
+                                        .workspace_mut(menu.owner)
+                                        .is_some_and(|workspace| {
+                                            workspace.canvas.disconnect_exact(menu.connection)
+                                        });
                                     this.connection_popover = None;
                                     if removed {
                                         this.finish_store_change(cx);
@@ -7752,6 +7789,47 @@ pub(crate) mod test_support {
     ) {
         canvas.store.select(id);
         cx.notify();
+    }
+
+    /// Real drawer activation path, used to cancel a gesture on workspace change.
+    pub(crate) fn activate_via_drawer(
+        canvas: &mut Canvas,
+        id: WorkspaceId,
+        window: &mut Window,
+        cx: &mut Context<Canvas>,
+    ) {
+        canvas.handle_select(id, window, cx);
+    }
+
+    /// Mutate the store while an inspector is open, as ask effects can do.
+    pub(crate) fn remove_local_edge(
+        canvas: &mut Canvas,
+        from: ConnectionTarget,
+        to: ConnectionTarget,
+        cx: &mut Context<Canvas>,
+    ) {
+        if let Some(id) = canvas.store.active()
+            && let Some(workspace) = canvas.store.workspace_mut(id)
+        {
+            workspace.canvas.disconnect_between(from, to);
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn local_edge_count(canvas: &Canvas) -> usize {
+        canvas
+            .store
+            .active()
+            .and_then(|id| canvas.store.workspaces().iter().find(|item| item.id == id))
+            .map(|workspace| {
+                workspace
+                    .canvas
+                    .connections()
+                    .iter()
+                    .filter(|edge| !edge.is_cross_workspace())
+                    .count()
+            })
+            .unwrap_or_default()
     }
 
 

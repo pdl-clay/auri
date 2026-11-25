@@ -106,6 +106,7 @@ pub const CONNECTION_PULSE_SIZE: f32 = 9.;
 pub const CONNECTION_PULSE_HALO_SIZE: f32 = 22.;
 pub const CONNECTION_PULSE_SECOND_SIZE: f32 = 5.;
 pub const CONNECTION_PULSE_SECOND_OFFSET: f32 = 0.045;
+pub const CONNECTION_PULSE_SECOND_ALPHA: f32 = 0.85;
 pub const CONNECTION_PULSE_TRAIL_PUFFS: usize = 6;
 pub const CONNECTION_PULSE_TRAIL_STEP: f32 = 0.028;
 pub const CONNECTION_PULSE_TRAIL_SIZE: f32 = 18.;
@@ -118,6 +119,11 @@ pub const CONNECTION_PULSE_DURATION_MS: u64 = 2000;
 pub const CONNECTION_HIT_RADIUS: f32 = 8.;
 pub const CONNECTION_POPOVER_WIDTH: f32 = 240.;
 pub const CONNECTION_POPOVER_HEIGHT: f32 = 168.;
+pub const CONNECTION_POPOVER_FONT: f32 = 12.;
+pub const CONNECTION_POPOVER_CLOSE_SIZE: f32 = 20.;
+pub const CONNECTION_POPOVER_ARROW_INDENT: f32 = ICON_SIZE + 2.;
+pub const CONNECTION_POPOVER_HINT_FONT: f32 = 11.;
+pub const CONNECTION_POPOVER_ACTION_HEIGHT: f32 = 28.;
 
 // Cross-workspace proxy: a compact, inert representation of a remote endpoint.
 // Every dimension and colour it uses lives here, never inline in the renderer.
