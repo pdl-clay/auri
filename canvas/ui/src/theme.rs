@@ -140,6 +140,8 @@ pub const COLOR_PROXY_BORDER: u32 = 0x5B7896;
 
 /// Empty-canvas notice shown when no workspace has been loaded.
 pub const WORKSPACE_NOTICE_WIDTH: f32 = 400.;
+/// Compact card that reports a verified release without blocking the canvas.
+pub const UPDATE_CARD_WIDTH: f32 = 320.;
 
 // Context menu.
 pub const CONTEXT_MENU_WIDTH: f32 = 180.;

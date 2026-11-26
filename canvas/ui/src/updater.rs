@@ -151,7 +151,7 @@ mod tests {
         let previous = std::env::var_os("AURO_CONFIG");
         let dir = tempfile::tempdir().unwrap();
         let config = load_config(dir.path()).unwrap();
-        assert_eq!(config.app.version, "0.1.3");
+        assert_eq!(config.app.version, crate::APP_VERSION);
 
         let path = dir.path().join("Auri.toml");
         assert_eq!(fs::read_to_string(&path).unwrap(), EMBEDDED_CONFIG);
@@ -159,7 +159,7 @@ mod tests {
 
         fs::write(&path, "stale = true\n").unwrap();
         let config = load_config(dir.path()).unwrap();
-        assert_eq!(config.app.version, "0.1.3");
+        assert_eq!(config.app.version, crate::APP_VERSION);
         assert_eq!(fs::read_to_string(&path).unwrap(), EMBEDDED_CONFIG);
 
         unsafe {
@@ -168,6 +168,21 @@ mod tests {
                 None => std::env::remove_var("AURO_CONFIG"),
             }
         }
+    }
+
+    #[test]
+    fn embedded_version_matches_the_running_app() {
+        let app_section = EMBEDDED_CONFIG
+            .split("[app]")
+            .nth(1)
+            .expect("embedded config has an app section")
+            .split("\n[")
+            .next()
+            .expect("app section ends at the next table");
+        assert!(
+            app_section.contains(&format!("version = \"{}\"", env!("CARGO_PKG_VERSION"))),
+            "Auro.toml must declare the app version the binary reports"
+        );
     }
 }
 

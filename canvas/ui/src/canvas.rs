@@ -1449,7 +1449,7 @@ impl AddOption {
 
     fn icon(self) -> &'static str {
         match self {
-            Self::Agent => agent_icon_path(AgentIcon::Claude),
+            Self::Agent => agent_icon_path(AgentIcon::Omp),
             Self::Terminal => "terminal.svg",
             Self::Note => "note.svg",
         }
@@ -1480,6 +1480,46 @@ fn resolve_agent_details(store: &WorkspaceStore, kind: AgentKind) -> (String, St
         }
     }
     (kind.label(), kind.command(), kind.icon())
+}
+
+/// Command typed for an OMP card. A pinned session is resumed explicitly;
+/// without one, omp picks the newest session in the workspace directory.
+fn omp_command(session: Option<&str>) -> String {
+    match session {
+        Some(path) if !path.is_empty() && Path::new(path).is_file() => {
+            format!("omp --session '{}'", path.replace('\'', "'\\''"))
+        }
+        _ => "omp --continue".to_owned(),
+    }
+}
+
+/// omp keys terminal breadcrumbs by TTY path: `/dev/pts/3` becomes `pts-3`.
+fn terminal_session_key(tty: &Path) -> Option<String> {
+    Some(tty.to_str()?.strip_prefix("/dev/")?.replace('/', "-"))
+}
+
+/// Breadcrumb lines: session cwd, JSONL path, then optional metadata.
+fn read_omp_breadcrumb(path: &Path) -> Option<(PathBuf, PathBuf)> {
+    let body = std::fs::read_to_string(path).ok()?;
+    let mut lines = body.lines();
+    let cwd = lines.next()?.trim();
+    let saved = lines.next()?.trim();
+    if cwd.is_empty() || saved.is_empty() {
+        return None;
+    }
+    let session = PathBuf::from(saved);
+    let session = if session.is_absolute() { session } else { Path::new(cwd).join(session) };
+    Some((PathBuf::from(cwd), session))
+}
+
+fn omp_breadcrumb_dir() -> PathBuf {
+    std::env::var_os("PI_CODING_AGENT_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+            home.join(".omp").join("agent")
+        })
+        .join("terminal-sessions")
 }
 
 fn new_custom_dialog() -> CustomAgentDialog {
@@ -2074,7 +2114,7 @@ impl Canvas {
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
         let root = workspace_root(&self.store, workspace)?;
-        let (bounds, name, agent_kind, icon) = {
+        let (bounds, name, agent_kind, icon, session) = {
             let state = self.store.workspaces().iter().find(|item| item.id == workspace).expect("root checked");
             match kind {
                 CardKind::Terminal => {
@@ -2085,7 +2125,7 @@ impl Canvas {
                         .find(|terminal| terminal.id == id)
                         .ok_or_else(|| "card_not_found".to_owned())?;
                     let saved = terminal.bounds.unwrap_or_else(|| next_card_bounds(state));
-                    (pixel_bounds(saved), terminal.title.clone(), None, None)
+                    (pixel_bounds(saved), terminal.title.clone(), None, None, None)
                 }
                 CardKind::Agent(agent_kind) => {
                     let agent = state
@@ -2093,11 +2133,17 @@ impl Canvas {
                         .agent(id)
                         .ok_or_else(|| "card_not_found".to_owned())?;
                     let (_, stored_command, icon) = resolve_agent_details(&self.store, agent_kind);
+                    let command = if agent_kind == AgentKind::Omp {
+                        omp_command(agent.session.as_deref())
+                    } else {
+                        stored_command
+                    };
                     (
                         pixel_bounds(agent.bounds),
                         agent.name.clone(),
                         Some(agent_kind),
-                        Some((stored_command, icon)),
+                        Some((command, icon)),
+                        agent.session.clone(),
                     )
                 }
             }
@@ -2114,10 +2160,16 @@ impl Canvas {
                 return self.rollback_cli_card(workspace, id, format!("spawn_failed: {error}"), cx);
             }
         };
+        let shell_pid = pty.pid();
         let command = command.or_else(|| icon.as_ref().map(|(stored, _)| stored.clone())).unwrap_or_default();
         if !command.is_empty() {
             if let Err(error) = pty.send_line(&command) {
                 return self.rollback_cli_card(workspace, id, format!("spawn_failed: {error}"), cx);
+            }
+        }
+        if agent_kind == Some(AgentKind::Omp) {
+            if let Some(pid) = shell_pid {
+                self.track_omp_session(workspace, id, pid, root.clone(), cx);
             }
         }
         if let Some(state) = self.store.workspace_mut(workspace) {
@@ -2153,6 +2205,63 @@ impl Canvas {
         self.error = Some(error.clone());
         cx.notify();
         Err(error)
+    }
+
+    /// Pin the session omp left open to this card so a reload resumes it.
+    /// The breadcrumb is written when omp opens a session, so a short bounded
+    /// poll is enough; without it `--continue` still resumes the directory's
+    /// newest session.
+    fn track_omp_session(
+        &mut self,
+        workspace: WorkspaceId,
+        id: TerminalId,
+        pid: u32,
+        root: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        let canvas = cx.entity().downgrade();
+        let breadcrumbs = omp_breadcrumb_dir();
+        let root = std::fs::canonicalize(&root).unwrap_or(root);
+        let tty = format!("/proc/{pid}/fd/0");
+        cx.spawn(async move |_, cx| {
+            let mut pinned = None;
+            for _ in 0..40 {
+                let tty = tty.clone();
+                let breadcrumbs = breadcrumbs.clone();
+                let root = root.clone();
+                let found = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let key = std::fs::read_link(tty)
+                            .ok()
+                            .and_then(|path| terminal_session_key(&path))?;
+                        let (cwd, session) = read_omp_breadcrumb(&breadcrumbs.join(key))?;
+                        let cwd = std::fs::canonicalize(&cwd).unwrap_or(cwd);
+                        let session = std::fs::canonicalize(&session).unwrap_or(session);
+                        (cwd == root && session.is_file()).then_some(session)
+                    })
+                    .await;
+                if found.is_some() {
+                    pinned = found;
+                    break;
+                }
+                cx.background_executor()
+                    .timer(Duration::from_millis(100))
+                    .await;
+            }
+            let Some(session) = pinned else { return };
+            let path = session.to_string_lossy().into_owned();
+            if let Some(entity) = canvas.upgrade() {
+                entity.update(cx, |this, cx| {
+                    if let Some(state) = this.store.workspace_mut(workspace)
+                        && state.canvas.set_agent_session(id, path)
+                    {
+                        this.finish_store_change(cx);
+                    }
+                });
+            }
+        })
+        .detach();
     }
 
     /// Create the live note entity for a persisted note from `note create`.
@@ -3816,7 +3925,9 @@ impl Canvas {
 
     /// Surface a verified update offer without applying it mid-session.
     pub fn set_update_available(&mut self, version: String, cx: &mut Context<Self>) {
-        self.update_available = Some(version);
+        self.update_available = Some(version.clone());
+        self.drawer
+            .update(cx, |drawer, cx| drawer.set_update_available(version, cx));
         cx.notify();
     }
 
@@ -5284,17 +5395,40 @@ impl Render for Canvas {
                                         .absolute()
                                         .left(px(SPACE_PANEL))
                                         .top(px(SPACE_PANEL))
-                                        .w(px(WORKSPACE_NOTICE_WIDTH))
+                                        .w(px(UPDATE_CARD_WIDTH))
                                         .rounded(px(RADIUS_DIALOG))
                                         .border_1()
                                         .border_color(rgb(COLOR_ACCENT))
                                         .bg(rgb(COLOR_PANEL))
                                         .p(px(SPACE_PANEL))
-                                        .text_size(px(FONT_CARD_PATH))
-                                        .text_color(rgb(COLOR_FOREGROUND))
-                                        .child(format!(
-                                            "Atualização disponível: v{version}. Reinicie o Auri para aplicar."
-                                        )),
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(SPACE_TIGHT))
+                                        .child(
+                                            div()
+                                                .id("update-card-title")
+                                                .debug_selector(|| "update-card-title".to_string())
+                                                .text_xs()
+                                                .text_color(rgb(COLOR_ACCENT))
+                                                .child("ATUALIZAÇÃO DISPONÍVEL"),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(rgb(COLOR_FOREGROUND))
+                                                .child(format!("v{version} está pronta")),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("update-card-detail")
+                                                .debug_selector(|| "update-card-detail".to_string())
+                                                .text_xs()
+                                                .text_color(rgb(COLOR_MUTED))
+                                                .child(format!(
+                                                    "Agora v{} · reinicie o Auri para aplicar.",
+                                                    crate::APP_VERSION
+                                                )),
+                                        ),
                                 )
                             })
                             // Proxies paint behind real cards: a representation
@@ -6102,11 +6236,39 @@ mod tests {
     }
 
     #[test]
+    fn omp_command_resumes_a_pinned_session_when_it_still_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = dir.path().join("sess 'um'.jsonl");
+        std::fs::write(&session, "").unwrap();
+        let path = session.to_str().unwrap();
+
+        assert_eq!(omp_command(None), "omp --continue");
+        assert_eq!(omp_command(Some("inexistente.jsonl")), "omp --continue");
+        assert_eq!(
+            omp_command(Some(path)),
+            format!("omp --session '{}'", path.replace('\'', "'\\''"))
+        );
+    }
+
+    #[test]
+    fn omp_breadcrumbs_resolve_relative_session_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let crumb = dir.path().join("pts-3");
+        std::fs::write(&crumb, format!("{}\nsess/session.jsonl\ncwdstat 1 2\n", dir.path().display())).unwrap();
+
+        let (cwd, session) = read_omp_breadcrumb(&crumb).unwrap();
+        assert_eq!(cwd, dir.path());
+        assert_eq!(session, dir.path().join("sess/session.jsonl"));
+        assert_eq!(terminal_session_key(Path::new("/dev/pts/3")).as_deref(), Some("pts-3"));
+        assert!(terminal_session_key(Path::new("/tmp/pts/3")).is_none());
+    }
+
+    #[test]
     fn add_submenu_lists_agent_before_terminal_and_note() {
         let labels: Vec<_> = ADD_OPTIONS.into_iter().map(AddOption::label).collect();
         assert_eq!(labels, ["Agente", "Terminal", "Bloco de texto"]);
         assert_eq!(ADD_OPTIONS[0], AddOption::Agent);
-        assert_eq!(ADD_OPTIONS[0].icon(), "agent-claude.svg");
+        assert_eq!(ADD_OPTIONS[0].icon(), "agent-omp.svg");
     }
 
     #[test]

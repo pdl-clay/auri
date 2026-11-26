@@ -130,6 +130,9 @@ impl Drop for HostListener {
     }
 }
 
+/// Version shown in the drawer footer and checked against `Auro.toml`.
+pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// Runs the app with the terminal canvas as the `main` window's root view.
 pub fn run() {
     let dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
@@ -185,6 +188,11 @@ pub fn run() {
             let handle = window.window_handle();
             let view = cx.new(|cx| canvas::Canvas::new(store.clone(), load.clone(), handle, skill.clone(), cx));
             view.update(cx, |canvas, cx| canvas.bind_actions(cx));
+            // Dev-only preview: show the update card without waiting for a signed release.
+            #[cfg(debug_assertions)]
+            if let Ok(version) = std::env::var("AURI_PREVIEW_UPDATE") {
+                view.update(cx, |canvas, cx| canvas.set_update_available(version, cx));
+            }
             view.update(cx, |canvas, cx| canvas.prepare_workspaces(cx));
             // A release published after the last boot check must still notify
             // the running app; applying it stays a boot-time decision.

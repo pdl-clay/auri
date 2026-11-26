@@ -107,6 +107,8 @@ pub struct WorkspaceDrawer {
     context_menu: Option<(MenuTarget, Point<Pixels>)>,
     drawer_width: f32,
     drag_start: Option<f32>,
+    /// Verified release available for the next restart; shown in the footer.
+    update_available: Option<String>,
 }
 
 impl WorkspaceDrawer {
@@ -134,11 +136,17 @@ impl WorkspaceDrawer {
             form_color: WorkspaceColor::Brass,
             drawer_width: DRAWER_WIDTH,
             drag_start: None,
+            update_available: None,
         }
     }
 
     pub fn drawer_width(&self) -> f32 {
         self.drawer_width
+    }
+
+    pub fn set_update_available(&mut self, version: String, cx: &mut Context<Self>) {
+        self.update_available = Some(version);
+        cx.notify();
     }
 
     fn begin_drawer_drag(&mut self, x: f32) {
@@ -974,6 +982,34 @@ impl Render for WorkspaceDrawer {
                             ),
                     )
                     })),
+            )
+            .child(div().flex_1())
+            .child(
+                div()
+                    .id("drawer-version")
+                    .debug_selector(|| "drawer-version".to_string())
+                    .flex()
+                    .flex_col()
+                    .gap(px(SPACE_TIGHT))
+                    .border_t_1()
+                    .border_color(rgb(COLOR_BORDER))
+                    .pt(px(SPACE_TIGHT))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(COLOR_MUTED))
+                            .child(format!("Auri v{}", crate::APP_VERSION)),
+                    )
+                    .when_some(self.update_available.clone(), |this, version| {
+                        this.child(
+                            div()
+                                .id("drawer-update-status")
+                                .debug_selector(|| "drawer-update-status".to_string())
+                                .text_xs()
+                                .text_color(rgb(COLOR_ACCENT))
+                                .child(format!("v{version} disponível")),
+                        )
+                    }),
             )
             .when_some(context_menu, |this, (target, (x, y))| {
                 let this = this.child(

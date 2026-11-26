@@ -1,5 +1,23 @@
 # Changelog
 
+## [v0.1.4] — 2026-11-26
+
+### Adicionado
+
+- Versão do programa no canto inferior esquerdo do drawer, com destaque em
+  âmbar quando existe uma release verificada mais recente.
+- Card de atualização no canvas mostra a versão disponível, a versão atual e
+  a instrução de reiniciar o Auri para aplicar.
+
+### Alterado
+
+- OMP é o primeiro agente da lista e o ícone padrão de "Adicionar agente";
+  Open Code vem em segundo. Os demais mantêm a ordem anterior.
+- Cartões OMP retomam a sessão deixada no workspace em vez de abrir uma nova.
+  O comando usa `omp --session <arquivo>` quando a sessão já foi identificada
+  pelo breadcrumb do TTY; na primeira vez, `omp --continue` retoma a sessão
+  mais recente do diretório. O caminho fica persistido no cartão.
+
 ## [v0.1.3] — 2026-11-26
 
 ### Corrigido

@@ -98,6 +98,35 @@ fn update_banner_appears_only_when_a_release_is_available() {
     });
     vcx.run_until_parked();
     assert!(vcx.debug_bounds("update-banner").is_some());
+    assert!(vcx.debug_bounds("update-card-title").is_some());
+    assert!(vcx.debug_bounds("update-card-detail").is_some());
+}
+
+#[test]
+fn drawer_footer_reports_version_and_update_state() {
+    use crate::canvas::Canvas;
+    use crate::config::LoadOutcome;
+
+    let mut cx = cross_test_cx();
+    let store = WorkspaceStore::new();
+    let (view, vcx) = cx.add_window_view(|window, cx| {
+        Canvas::new(
+            store.clone(),
+            LoadOutcome::Fresh,
+            window.window_handle(),
+            None,
+            cx,
+        )
+    });
+    vcx.run_until_parked();
+    assert!(vcx.debug_bounds("drawer-version").is_some());
+    assert!(vcx.debug_bounds("drawer-update-status").is_none());
+
+    vcx.update(|_, cx| {
+        view.update(cx, |canvas, cx| canvas.set_update_available("0.1.4".into(), cx))
+    });
+    vcx.run_until_parked();
+    assert!(vcx.debug_bounds("drawer-update-status").is_some());
 }
 
 #[test]

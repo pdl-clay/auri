@@ -222,11 +222,11 @@ pub enum AgentKind {
 
 impl AgentKind {
     pub const ALL: [Self; 5] = [
+        Self::Omp,
+        Self::OpenCode,
         Self::Claude,
         Self::Codex,
         Self::Pi,
-        Self::Omp,
-        Self::OpenCode,
     ];
 
     /// Label shown in menus, cards and the edit dialog. Custom agents use
@@ -249,7 +249,7 @@ impl AgentKind {
             Self::Claude => "claude".into(),
             Self::Codex => "codex".into(),
             Self::Pi => "pi".into(),
-            Self::Omp => "omp".into(),
+            Self::Omp => "omp --continue".into(),
             Self::OpenCode => "opencode".into(),
             Self::Custom(_) => String::new(),
         }
@@ -311,6 +311,9 @@ pub struct AgentState {
     /// Administrator cards can manage workspace cards through the CLI.
     #[serde(default)]
     pub admin: bool,
+    /// Exact omp session JSONL resumed by this card, when one is known.
+    #[serde(default)]
+    pub session: Option<String>,
 }
 
 /// Logical state of a single terminal card.
@@ -505,6 +508,7 @@ impl CanvasState {
             name,
             bounds,
             admin: false,
+            session: None,
         };
         self.agents.push(agent.clone());
         self.reindex_titles();
@@ -565,6 +569,18 @@ impl CanvasState {
             return false;
         }
         agent.kind = kind;
+        true
+    }
+
+    /// Remember the omp session resumed by this card so a reload reopens it.
+    pub fn set_agent_session(&mut self, id: TerminalId, session: String) -> bool {
+        let Some(agent) = self.agents.iter_mut().find(|agent| agent.id == id) else {
+            return false;
+        };
+        if agent.session.as_deref() == Some(session.as_str()) {
+            return false;
+        }
+        agent.session = Some(session);
         true
     }
 
@@ -1176,11 +1192,11 @@ mod tests {
     #[test]
     fn agent_command_mapping_covers_all_five_agents() {
         let expected = [
+            (AgentKind::Omp, "OMP", "omp --continue"),
+            (AgentKind::OpenCode, "Open Code", "opencode"),
             (AgentKind::Claude, "Claude", "claude"),
             (AgentKind::Codex, "Codex", "codex"),
             (AgentKind::Pi, "Pi", "pi"),
-            (AgentKind::Omp, "OMP", "omp"),
-            (AgentKind::OpenCode, "Open Code", "opencode"),
         ];
         assert_eq!(AgentKind::ALL.len(), expected.len());
         for (kind, (expected_kind, label, command)) in AgentKind::ALL.into_iter().zip(expected) {
@@ -1245,6 +1261,7 @@ mod tests {
         assert_eq!(decoded.agents().len(), 1);
         assert_eq!(decoded.agents()[0], agent);
         assert_eq!(decoded.agents()[0].kind, AgentKind::Omp);
+        assert_eq!(decoded.agents()[0].session, None);
         assert_eq!(decoded.next_id(), 9);
     }
 
