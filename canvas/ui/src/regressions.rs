@@ -6,7 +6,7 @@
 
 use auri_protocol::{Request, Response};
 use canvas_types::{
-    AgentKind, CanvasState, CardBounds, ConnectionTarget, WorkspaceIcon, WorkspaceStore,
+    AgentKind, AgentView, CanvasState, CardBounds, ConnectionTarget, WorkspaceIcon, WorkspaceStore,
     WorkspaceState,
 };
 
@@ -127,6 +127,96 @@ fn drawer_footer_reports_version_and_update_state() {
     });
     vcx.run_until_parked();
     assert!(vcx.debug_bounds("drawer-update-status").is_some());
+}
+
+#[test]
+fn agent_view_toggle_persists() {
+    use crate::canvas::Canvas;
+    use crate::config::LoadOutcome;
+
+    let mut cx = cross_test_cx();
+    let mut store = WorkspaceStore::new();
+    let workspace = store.add("A".into(), WorkspaceIcon::Star, std::env::temp_dir());
+    let agent = store
+        .workspace_mut(workspace.id)
+        .unwrap()
+        .canvas
+        .add_agent(AgentKind::Omp, bounds());
+    store.workspace_mut(workspace.id).unwrap().mark_loaded();
+    let (view, vcx) = cx.add_window_view(|window, cx| {
+        Canvas::new(
+            store.clone(),
+            LoadOutcome::Loaded,
+            window.window_handle(),
+            None,
+            cx,
+        )
+    });
+    vcx.update(|_, cx| {
+        view.update(cx, |canvas, cx| {
+            test_support::mount_agent_for_test(canvas, workspace.id, agent.id, cx);
+            canvas.select(workspace.id, agent.id, cx);
+            canvas.set_agent_view(workspace.id, agent.id, AgentView::Chat, cx);
+        });
+    });
+    vcx.run_until_parked();
+
+    let stored = vcx.update(|_, cx| {
+        test_support::agent_view(view.read(cx), workspace.id, agent.id)
+    });
+    assert_eq!(stored, Some(AgentView::Chat));
+    assert!(vcx.debug_bounds("terminal-toggle").is_some());
+}
+
+#[test]
+fn agent_view_reopens_saved_mode() {
+    use crate::canvas::Canvas;
+    use crate::config::LoadOutcome;
+
+    let mut cx = cross_test_cx();
+    let mut store = WorkspaceStore::new();
+    let workspace = store.add("A".into(), WorkspaceIcon::Star, std::env::temp_dir());
+    let agent = store
+        .workspace_mut(workspace.id)
+        .unwrap()
+        .canvas
+        .add_agent(AgentKind::Omp, bounds());
+    store
+        .workspace_mut(workspace.id)
+        .unwrap()
+        .canvas
+        .set_agent_view(agent.id, AgentView::Chat);
+    assert_eq!(
+        store.workspaces()[0].canvas.agents()[0].view,
+        AgentView::Chat
+    );
+    store.workspace_mut(workspace.id).unwrap().mark_loaded();
+
+    let (view, vcx) = cx.add_window_view(|window, cx| {
+        Canvas::new(
+            store.clone(),
+            LoadOutcome::Loaded,
+            window.window_handle(),
+            None,
+            cx,
+        )
+    });
+    vcx.update(|_, cx| {
+        view.update(cx, |canvas, cx| {
+            test_support::mount_agent_for_test(canvas, workspace.id, agent.id, cx);
+            canvas.select(workspace.id, agent.id, cx);
+            cx.notify();
+        });
+    });
+    vcx.run_until_parked();
+
+    let live = vcx.update(|_, cx| {
+        test_support::card_view(view.read(cx), workspace.id, agent.id, cx)
+    });
+    assert_eq!(live, Some(AgentView::Chat));
+    assert!(vcx.debug_bounds("terminal-toggle").is_some());
+    assert!(vcx.debug_bounds("terminal-body").is_some());
+    assert!(vcx.debug_bounds("chat-view").is_some());
 }
 
 #[test]

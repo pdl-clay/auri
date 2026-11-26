@@ -13,7 +13,7 @@ use auro::prelude::*;
 use portable_pty::PtySize;
 
 use gpui_terminal::{TerminalConfig, TerminalView};
-use canvas_types::{AgentIcon, AgentKind, ConnectionTarget, TerminalId, WorkspaceId};
+use canvas_types::{AgentIcon, AgentKind, AgentView, ConnectionTarget, TerminalId, WorkspaceId};
 
 use crate::canvas::{Canvas, card_bounds};
 use crate::pty::{BatchedReader, PtySession};
@@ -153,6 +153,7 @@ pub struct TerminalCard {
     pub bounds: Bounds<Pixels>,
     pub exited: bool,
     agent: Option<(AgentKind, String, AgentIcon)>,
+    view: AgentView,
     number: usize,
     pub selected: bool,
     /// Connection gesture: crosshair targeting and source highlight.
@@ -236,6 +237,7 @@ impl TerminalCard {
             bounds,
             exited: false,
             agent: None,
+            view: AgentView::Terminal,
             number: 1,
             selected: false,
             terminal,
@@ -305,6 +307,19 @@ impl TerminalCard {
     ) {
         self.agent = Some((kind, name, icon));
         cx.notify();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn view_mode(&self) -> AgentView {
+        self.view
+    }
+
+    /// Switch between the terminal and the chat presentation.
+    pub fn set_agent_view(&mut self, view: AgentView, cx: &mut Context<Self>) {
+        if self.view != view {
+            self.view = view;
+            cx.notify();
+        }
     }
 
     /// Display number is the card's current position among its type in the workspace.
@@ -568,6 +583,12 @@ impl Render for TerminalCard {
         let scrollbar_terminal = self.terminal.clone();
         let zoom = self.view_zoom;
         let agent = self.agent();
+        let chat_mode = self.view == AgentView::Chat;
+        let next_view = if chat_mode {
+            AgentView::Terminal
+        } else {
+            AgentView::Chat
+        };
         let left = f32::from(self.bounds.origin.x) * zoom + self.view_offset_x;
         let top = f32::from(self.bounds.origin.y) * zoom + self.view_offset_y;
         let width = f32::from(self.bounds.size.width) * zoom;
@@ -768,7 +789,14 @@ impl Render for TerminalCard {
                         }),
                     ),
             )
-            .child(div().flex_1().min_h_0().child(self.terminal.clone()))
+            .child(
+                div()
+                    .id("terminal-body")
+                    .debug_selector(|| "terminal-body".to_string())
+                    .flex_1()
+                    .min_h_0()
+                    .child(self.terminal.clone()),
+            )
             .child(
                 div()
                     .flex()
@@ -794,6 +822,64 @@ impl Render for TerminalCard {
                     .text_size(px(FONT_CARD_PATH * zoom))
                     .text_color(rgb(COLOR_MUTED))
                     .child(self.root.to_string_lossy().into_owned()),
+            )
+            .when(chat_mode, |card| {
+                card.child(
+                    div()
+                        .id("chat-view")
+                        .debug_selector(|| "chat-view".to_string())
+                        .absolute()
+                        .left(px(0.0))
+                        .right(px(0.0))
+                        .top(px(TITLE_HEIGHT))
+                        .bottom(px(PATH_HEIGHT))
+                        .bg(rgb(COLOR_BASE))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(FONT_CARD_PATH))
+                        .text_color(rgb(COLOR_MUTED))
+                        .child("Chat"),
+                )
+            })
+            .child(
+                div()
+                    .id(if chat_mode { "terminal-toggle" } else { "chat-toggle" })
+                    .debug_selector(move || {
+                        if chat_mode {
+                            "terminal-toggle".to_string()
+                        } else {
+                            "chat-toggle".to_string()
+                        }
+                    })
+                    .absolute()
+                    .top(px(TITLE_HEIGHT + SPACE_TIGHT))
+                    .right(px(SPACE_TIGHT))
+                    .w(px(CLOSE_BUTTON_SIZE))
+                    .h(px(CLOSE_BUTTON_SIZE))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(RADIUS_CHIP))
+                    .bg(rgb(COLOR_ELEVATED))
+                    .border_1()
+                    .border_color(rgb(COLOR_BORDER))
+                    .hover(|style| style.bg(rgb(COLOR_BORDER)))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let canvas = this.canvas.clone();
+                        let _ = canvas
+                            .update(cx, |canvas, cx| {
+                                canvas.set_agent_view(workspace_id, id, next_view, cx)
+                            });
+                    }))
+                    .child(
+                        svg()
+                            .path(if chat_mode { "terminal.svg" } else { "chat.svg" })
+                            .w(px(ICON_SIZE))
+                            .h(px(ICON_SIZE))
+                            .text_color(rgb(COLOR_MUTED)),
+                    ),
             )
             .child(Self::resize_handle(id, DragMode::ResizeLeft, entity_id, cx, connect_mode))
             .child(Self::resize_handle(id, DragMode::ResizeRight, entity_id, cx, connect_mode))

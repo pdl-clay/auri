@@ -21,7 +21,7 @@ use gpui_component::{
     switch::Switch,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
-use canvas_types::{AgentIcon, AgentKind, AgentState, CardBounds, Connection, ConnectionTarget, NoteState, ProxyPlacement, TerminalId, TerminalState, WorkspaceColor, WorkspaceIcon, WorkspaceId, WorkspaceState, WorkspaceStore};
+use canvas_types::{AgentIcon, AgentKind, AgentState, AgentView, CardBounds, Connection, ConnectionTarget, NoteState, ProxyPlacement, TerminalId, TerminalState, WorkspaceColor, WorkspaceIcon, WorkspaceId, WorkspaceState, WorkspaceStore};
 
 use crate::card::{TerminalCard, scroll_delta, terminal_grid, write_shared, SharedPtyWriter};
 use crate::text_card::TextCard;
@@ -2114,7 +2114,7 @@ impl Canvas {
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
         let root = workspace_root(&self.store, workspace)?;
-        let (bounds, name, agent_kind, icon, session) = {
+        let (bounds, name, agent_kind, icon, session, view) = {
             let state = self.store.workspaces().iter().find(|item| item.id == workspace).expect("root checked");
             match kind {
                 CardKind::Terminal => {
@@ -2125,7 +2125,7 @@ impl Canvas {
                         .find(|terminal| terminal.id == id)
                         .ok_or_else(|| "card_not_found".to_owned())?;
                     let saved = terminal.bounds.unwrap_or_else(|| next_card_bounds(state));
-                    (pixel_bounds(saved), terminal.title.clone(), None, None, None)
+                    (pixel_bounds(saved), terminal.title.clone(), None, None, None, AgentView::Terminal)
                 }
                 CardKind::Agent(agent_kind) => {
                     let agent = state
@@ -2144,6 +2144,7 @@ impl Canvas {
                         Some(agent_kind),
                         Some((command, icon)),
                         agent.session.clone(),
+                        agent.view,
                     )
                 }
             }
@@ -2184,6 +2185,7 @@ impl Canvas {
             let (_, icon) = icon.expect("agent icon");
             card.update(cx, |card, cx| card.set_agent(kind, name, icon, cx));
         }
+        card.update(cx, |card, cx| card.set_agent_view(view, cx));
         let (zoom, offset_x, offset_y) = (self.zoom, self.offset_x, self.offset_y);
         card.update(cx, |card, cx| card.set_view(zoom, offset_x, offset_y, cx));
         self.register_agent_pty(workspace, id, card.read(cx).writer());
@@ -3921,6 +3923,31 @@ impl Canvas {
         self.persist_store(cx);
         self.sync_drawer(cx);
         cx.notify();
+    }
+
+    /// Persist the card's terminal/chat presentation and update the live card.
+    pub fn set_agent_view(
+        &mut self,
+        workspace: WorkspaceId,
+        id: TerminalId,
+        view: AgentView,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(state) = self.store.workspace_mut(workspace) else {
+            return;
+        };
+        if !state.canvas.set_agent_view(id, view) {
+            return;
+        }
+        self.finish_store_change(cx);
+        let card = self
+            .cards
+            .get(&workspace)
+            .and_then(|cards| cards.iter().find(|(card_id, _)| *card_id == id))
+            .map(|(_, card)| card.clone());
+        if let Some(card) = card {
+            card.update(cx, |card, cx| card.set_agent_view(view, cx));
+        }
     }
 
     /// Surface a verified update offer without applying it mid-session.
@@ -8026,6 +8053,35 @@ pub(crate) mod test_support {
         (active, card, canvas.selected_note.get())
     }
 
+    /// Persisted presentation for one agent card.
+    pub(crate) fn agent_view(
+        canvas: &Canvas,
+        workspace_id: WorkspaceId,
+        id: TerminalId,
+    ) -> Option<AgentView> {
+        canvas
+            .store
+            .workspaces()
+            .iter()
+            .find(|workspace| workspace.id == workspace_id)
+            .and_then(|workspace| workspace.canvas.agent(id))
+            .map(|agent| agent.view)
+    }
+
+    /// Live presentation of one mounted card.
+    pub(crate) fn card_view(
+        canvas: &Canvas,
+        workspace_id: WorkspaceId,
+        id: TerminalId,
+        cx: &App,
+    ) -> Option<AgentView> {
+        canvas
+            .cards
+            .get(&workspace_id)
+            .and_then(|cards| cards.iter().find(|(card_id, _)| *card_id == id))
+            .map(|(_, card)| card.read(cx).view_mode())
+    }
+
     /// True when the single shared edge is stored with workspace-qualified ends.
     pub(crate) fn cross_connected(
         canvas: &Canvas,
@@ -8593,7 +8649,7 @@ pub(crate) mod test_support {
         };
         let bounds = pixel_bounds(agent.bounds);
         let root = workspace.root.clone();
-        let (kind, name) = (agent.kind, agent.name.clone());
+        let (kind, name, view) = (agent.kind, agent.name.clone(), agent.view);
         let (cols, rows) = terminal_grid(&bounds);
         let Ok(pty) = PtySession::spawn_shell_in(cols, rows, Some(&root)) else {
             return;
@@ -8605,6 +8661,7 @@ pub(crate) mod test_support {
         card.update(cx, |card, cx| {
             let icon = resolve_agent_details(&canvas.store, kind).2;
             card.set_agent(kind, name, icon, cx);
+            card.set_agent_view(view, cx);
         });
         canvas.cards.entry(workspace_id).or_default().push((id, card));
     }
