@@ -143,6 +143,22 @@ pub const WORKSPACE_NOTICE_WIDTH: f32 = 400.;
 /// Compact card that reports a verified release without blocking the canvas.
 pub const UPDATE_CARD_WIDTH: f32 = 320.;
 
+// Agent chat view. The terminal stays behind it; these values only style the
+// conversation layer.
+pub const COLOR_CHAT_USER_BG: u32 = 0x2A3A4A;
+pub const COLOR_CHAT_USER_BORDER: u32 = 0x3D5368;
+pub const COLOR_CHAT_AGENT_BG: u32 = 0x1F2023;
+pub const COLOR_CHAT_INFO_BG: u32 = 0x1A1B1D;
+pub const CHAT_BUBBLE_RADIUS: f32 = 12.;
+pub const CHAT_BUBBLE_PADDING: f32 = 12.;
+pub const CHAT_BUBBLE_GAP: f32 = 10.;
+pub const CHAT_BUBBLE_WIDTH: f32 = 0.82;
+pub const CHAT_TEXT_SIZE: f32 = FONT_NOTE_BODY;
+pub const CHAT_STATUS_FONT: f32 = FONT_CARD_PATH;
+pub const CHAT_COPY_HEIGHT: f32 = 22.;
+pub const CHAT_INPUT_MIN_ROWS: usize = 1;
+pub const CHAT_INPUT_MAX_ROWS: usize = 4;
+
 // Context menu.
 pub const CONTEXT_MENU_WIDTH: f32 = 180.;
 pub const CONTEXT_MENU_ITEM_HEIGHT: f32 = 32.;
