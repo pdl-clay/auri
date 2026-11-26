@@ -151,7 +151,7 @@ mod tests {
         let previous = std::env::var_os("AURO_CONFIG");
         let dir = tempfile::tempdir().unwrap();
         let config = load_config(dir.path()).unwrap();
-        assert_eq!(config.app.version, "0.1.2");
+        assert_eq!(config.app.version, "0.1.3");
 
         let path = dir.path().join("Auri.toml");
         assert_eq!(fs::read_to_string(&path).unwrap(), EMBEDDED_CONFIG);
@@ -159,7 +159,7 @@ mod tests {
 
         fs::write(&path, "stale = true\n").unwrap();
         let config = load_config(dir.path()).unwrap();
-        assert_eq!(config.app.version, "0.1.2");
+        assert_eq!(config.app.version, "0.1.3");
         assert_eq!(fs::read_to_string(&path).unwrap(), EMBEDDED_CONFIG);
 
         unsafe {

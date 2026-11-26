@@ -1,5 +1,13 @@
 # Changelog
 
+## [v0.1.3] — 2026-11-26
+
+### Corrigido
+
+- O updater agora verifica o manifesto assinado a cada boot e uma vez por hora,
+  mostrando um aviso no canvas quando existe versão mais recente. A aplicação
+  continua acontecendo no boot, sem interromper a sessão atual.
+
 ## [v0.1.2] — 2026-11-26
 
 ### Corrigido
