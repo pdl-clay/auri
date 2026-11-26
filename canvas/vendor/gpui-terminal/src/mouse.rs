@@ -477,19 +477,19 @@ pub fn pixels_to_scroll_lines(pixel_delta: Pixels, cell_height: Pixels) -> i32 {
 }
 
 /// Convert a GPUI wheel delta (positive = down) into terminal scroll lines
-/// (positive = up into history). One wheel notch is three lines.
+/// (positive = down into history). One wheel notch is three lines.
 pub fn wheel_to_scroll_lines(delta_y: f32, cell_height: Pixels) -> i32 {
-    pixels_to_scroll_lines(gpui::px(-delta_y), cell_height)
+    pixels_to_scroll_lines(gpui::px(delta_y), cell_height)
 }
 
-/// Convert a GPUI wheel event to terminal lines (positive scrolls up).
+/// Convert a GPUI wheel event to terminal lines (positive scrolls down).
 /// Line deltas are notches, not pixels: converting them through a fixed pixel
 /// budget makes one notch round to zero at large fonts/zoom.
 pub fn wheel_lines(delta: &ScrollDelta, cell_height: Pixels) -> i32 {
     match delta {
-        ScrollDelta::Lines(point) => (-point.y * 3.0).clamp(-10.0, 10.0).round() as i32,
+        ScrollDelta::Lines(point) => (point.y * 3.0).clamp(-10.0, 10.0).round() as i32,
         ScrollDelta::Pixels(point) => {
-            pixels_to_scroll_lines(gpui::px(-f32::from(point.y)), cell_height)
+            pixels_to_scroll_lines(gpui::px(f32::from(point.y)), cell_height)
         }
     }
 }
@@ -515,15 +515,15 @@ mod tests {
     #[test]
     fn one_line_notch_scrolls_three_lines_at_any_font_size() {
         assert_eq!(
-            wheel_lines(&ScrollDelta::Lines(gpui::point(0.0, -1.0)), gpui::px(160.0)),
+            wheel_lines(&ScrollDelta::Lines(gpui::point(0.0, 1.0)), gpui::px(160.0)),
             3
         );
         assert_eq!(
-            wheel_lines(&ScrollDelta::Lines(gpui::point(0.0, 1.0)), gpui::px(160.0)),
+            wheel_lines(&ScrollDelta::Lines(gpui::point(0.0, -1.0)), gpui::px(160.0)),
             -3
         );
         assert_eq!(
-            wheel_lines(&ScrollDelta::Pixels(gpui::point(px(0.0), px(-64.0))), gpui::px(16.0)),
+            wheel_lines(&ScrollDelta::Pixels(gpui::point(px(0.0), px(64.0))), gpui::px(16.0)),
             4
         );
     }
@@ -540,10 +540,10 @@ mod tests {
     }
 
     #[test]
-    fn wheel_up_scrolls_into_history() {
+    fn wheel_down_scrolls_into_history() {
         let cell = px(16.0);
-        assert_eq!(wheel_to_scroll_lines(-48.0, cell), 3);
-        assert_eq!(wheel_to_scroll_lines(48.0, cell), -3);
+        assert_eq!(wheel_to_scroll_lines(-48.0, cell), -3);
+        assert_eq!(wheel_to_scroll_lines(48.0, cell), 3);
         assert_eq!(wheel_to_scroll_lines(0.0, cell), 0);
     }
 

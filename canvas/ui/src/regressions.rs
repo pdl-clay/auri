@@ -47,6 +47,34 @@ fn workspace_notice_follows_load_state() {
 }
 
 #[test]
+fn unloaded_workspace_hides_its_cards_and_ropes() {
+    use crate::canvas::Canvas;
+    use crate::config::LoadOutcome;
+
+    let mut cx = cross_test_cx();
+    let mut store = cross_workspace_store(true);
+    store.select(2);
+    store.workspace_mut(2).unwrap().unload();
+    let (view, vcx) = cx.add_window_view(|window, cx| {
+        Canvas::new(
+            store.clone(),
+            LoadOutcome::Fresh,
+            window.window_handle(),
+            None,
+            cx,
+        )
+    });
+    vcx.run_until_parked();
+
+    assert!(test_support::needs_workspace_notice(&store));
+    assert!(vcx.debug_bounds("proxy-card-1-c1").is_none());
+    assert!(
+        vcx.read(|cx| test_support::edge_click_point(view.read(cx), 0).is_none()),
+        "an unloaded workspace must not paint a rope for a saved connection"
+    );
+}
+
+#[test]
 fn fps_badge_is_not_rendered() {
     let mut store = WorkspaceStore::new();
     let mut workspace = store.add("A".into(), WorkspaceIcon::Star, std::env::temp_dir());
@@ -540,14 +568,14 @@ fn wheel_over_terminal_scrolls_history_not_canvas() {
     let before = vcx.read(|cx| terminal.read(cx).scroll_info());
     vcx.simulate_event(ScrollWheelEvent {
         position: Point::new(px(120.0), px(120.0)),
-        delta: ScrollDelta::Lines(Point::new(0.0, -1.0)),
+        delta: ScrollDelta::Lines(Point::new(0.0, 1.0)),
         modifiers: Modifiers::none(),
         touch_phase: TouchPhase::default(),
     });
     vcx.run_until_parked();
     let after = vcx.read(|cx| terminal.read(cx).scroll_info());
 
-    assert!(after.0 > before.0, "wheel up moves into scrollback: {before:?} -> {after:?}");
+    assert!(after.0 > before.0, "wheel down moves into scrollback: {before:?} -> {after:?}");
     assert_eq!(
         ancestor_wheels.load(Ordering::SeqCst),
         0,
@@ -628,7 +656,7 @@ fn wheel_lines_scroll_history_with_a_large_font() {
     let before = vcx.read(|cx| terminal.read(cx).scroll_info());
     vcx.simulate_event(ScrollWheelEvent {
         position: Point::new(px(120.0), px(120.0)),
-        delta: ScrollDelta::Lines(Point::new(0.0, -1.0)),
+        delta: ScrollDelta::Lines(Point::new(0.0, 1.0)),
         modifiers: Modifiers::none(),
         touch_phase: TouchPhase::default(),
     });
@@ -636,6 +664,45 @@ fn wheel_lines_scroll_history_with_a_large_font() {
     let after = vcx.read(|cx| terminal.read(cx).scroll_info());
 
     assert!(after.0 > before.0, "one wheel notch must scroll history: {before:?} -> {after:?}");
+}
+
+#[test]
+fn wheel_down_pans_canvas_content_down() {
+    use crate::canvas::Canvas;
+    use crate::config::LoadOutcome;
+    use auro::gpui::{Point, px};
+
+    let mut cx = cross_test_cx();
+    let mut store = WorkspaceStore::new();
+    let workspace = store.add("A".into(), WorkspaceIcon::Star, std::env::temp_dir());
+    store.workspace_mut(workspace.id).unwrap().mark_loaded();
+    let (view, vcx) = cx.add_window_view(|window, cx| {
+        Canvas::new(
+            store.clone(),
+            LoadOutcome::Fresh,
+            window.window_handle(),
+            None,
+            cx,
+        )
+    });
+    vcx.run_until_parked();
+
+    let before = vcx.read(|cx| test_support::vertical_offset(view.read(cx)));
+    vcx.update(|_, cx| {
+        view.update(cx, |canvas, cx| {
+            canvas.apply_scroll(Point::new(px(400.0), px(200.0)), 0.0, 16.0, false, false, cx)
+        });
+    });
+    let after_down = vcx.read(|cx| test_support::vertical_offset(view.read(cx)));
+    assert!(after_down > before, "wheel down must move cards down: {before} -> {after_down}");
+
+    vcx.update(|_, cx| {
+        view.update(cx, |canvas, cx| {
+            canvas.apply_scroll(Point::new(px(400.0), px(200.0)), 0.0, -16.0, false, false, cx)
+        });
+    });
+    let after_up = vcx.read(|cx| test_support::vertical_offset(view.read(cx)));
+    assert!(after_up < after_down, "wheel up must move cards up: {after_down} -> {after_up}");
 }
 
 /// Placement must honour the click in the upper half of the canvas. A previous
@@ -668,6 +735,7 @@ fn placement_click_in_the_upper_half_spawns_the_card_there() {
             None,
             cx,
         );
+        // Wheel down moves the canvas content down: offset_y becomes +600.
         canvas.apply_scroll(Point::new(px(400.0), px(200.0)), 0.0, 600.0, false, false, cx);
         canvas.begin_placement(cx);
         canvas

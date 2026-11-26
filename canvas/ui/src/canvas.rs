@@ -4058,7 +4058,7 @@ fn canvas_icon(path: &'static str) -> impl IntoElement {
         .text_color(rgb(COLOR_MUTED))
 }
 
-/// Scroll down moves the canvas content up, like a normal document.
+/// Scroll down moves the canvas content down, like a natural scroll gesture.
 fn pan_vertical(offset_y: f32, dy: f32) -> f32 {
     offset_y + dy
 }
@@ -4509,6 +4509,7 @@ impl Render for Canvas {
         let pulses = self.pulses.clone();
         let active = self.store.active();
         let show_workspace_notice = needs_workspace_notice(&self.store);
+        let canvas_visible = !show_workspace_notice;
         let zoom = self.zoom;
         let offset_x = self.offset_x;
         let offset_y = self.offset_y;
@@ -4517,11 +4518,19 @@ impl Render for Canvas {
         let selected_target = self.selected_connect_target();
         let workspace_ref = active
             .and_then(|id| self.store.workspaces().iter().find(|workspace| workspace.id == id));
-        let visible = active.map(|id| visible_edges(&self.store, id)).unwrap_or_default();
+        let visible = if canvas_visible {
+            active.map(|id| visible_edges(&self.store, id)).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         self.visible_edges = visible.clone();
-        let proxies = active
-            .map(|id| proxy_cards(self, &self.store, id, &visible, zoom, offset_x, offset_y, cx))
-            .unwrap_or_default();
+        let proxies = if canvas_visible {
+            active
+                .map(|id| proxy_cards(self, &self.store, id, &visible, zoom, offset_x, offset_y, cx))
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         let connection_popover = self.connection_popover.clone().and_then(|menu| {
             let state = |id| self.store.workspaces().iter().find(|workspace| workspace.id == id);
             let from_ws = menu.connection.from_workspace.unwrap_or(menu.owner);
@@ -4535,37 +4544,41 @@ impl Render for Canvas {
                 from_ws != to_ws,
             ))
         });
-        let minimap_items: Vec<MinimapItem> = workspace_ref
-            .map(|workspace| {
-                let selected = workspace.canvas.selected();
-                let mut items = Vec::new();
-                for terminal in workspace.canvas.terminals() {
-                    if let Some(bounds) = terminal.bounds {
+        let minimap_items: Vec<MinimapItem> = if canvas_visible {
+            workspace_ref
+                .map(|workspace| {
+                    let selected = workspace.canvas.selected();
+                    let mut items = Vec::new();
+                    for terminal in workspace.canvas.terminals() {
+                        if let Some(bounds) = terminal.bounds {
+                            items.push(MinimapItem {
+                                bounds,
+                                color: COLOR_SELECTION,
+                                selected: selected == Some(terminal.id),
+                            });
+                        }
+                    }
+                    for agent in workspace.canvas.agents() {
+                        let icon = resolve_agent_details(&self.store, agent.kind).2;
                         items.push(MinimapItem {
-                            bounds,
-                            color: COLOR_SELECTION,
-                            selected: selected == Some(terminal.id),
+                            bounds: agent.bounds,
+                            color: agent_color(icon),
+                            selected: selected == Some(agent.id),
                         });
                     }
-                }
-                for agent in workspace.canvas.agents() {
-                    let icon = resolve_agent_details(&self.store, agent.kind).2;
-                    items.push(MinimapItem {
-                        bounds: agent.bounds,
-                        color: agent_color(icon),
-                        selected: selected == Some(agent.id),
-                    });
-                }
-                for note in workspace.canvas.notes() {
-                    items.push(MinimapItem {
-                        bounds: note.bounds,
-                        color: COLOR_NOTE_BG,
-                        selected: false,
-                    });
-                }
-                items
-            })
-            .unwrap_or_default();
+                    for note in workspace.canvas.notes() {
+                        items.push(MinimapItem {
+                            bounds: note.bounds,
+                            color: COLOR_NOTE_BG,
+                            selected: false,
+                        });
+                    }
+                    items
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         let live: Vec<Option<(Point<Pixels>, Point<Pixels>)>> = {
             // One helper keeps local edges and cross edges on exactly the same
             // rope geometry: a remote end terminates at its proxy's centre.
@@ -4758,29 +4771,37 @@ impl Render for Canvas {
             .rounded(px(RADIUS_CHIP))
             .with_variant(ButtonVariant::Ghost)
             .on_click(cx.listener(|this, _, window, cx| this.zoom_by(1.25, window, cx)));
-        let minimap = if self.minimap_open && active.is_some() {
+        let minimap = if self.minimap_open && active.is_some() && canvas_visible {
             Some(self.minimap_panel(&minimap_items, &minimap_geom, view, stage_w, stage_h, cx))
         } else {
             None
         };
-        let cards: Vec<_> = active
-            .and_then(|id| self.cards.get(&id))
-            .map(|group| {
-                group
-                    .iter()
-                    .map(|(_, card)| div().child(card.clone()))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let notes: Vec<_> = active
-            .and_then(|id| self.notes.get(&id))
-            .map(|group| {
-                group
-                    .iter()
-                    .map(|(_, note)| div().child(note.clone()))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let cards: Vec<_> = if canvas_visible {
+            active
+                .and_then(|id| self.cards.get(&id))
+                .map(|group| {
+                    group
+                        .iter()
+                        .map(|(_, card)| div().child(card.clone()))
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let notes: Vec<_> = if canvas_visible {
+            active
+                .and_then(|id| self.notes.get(&id))
+                .map(|group| {
+                    group
+                        .iter()
+                        .map(|(_, note)| div().child(note.clone()))
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
 
         // Proxies are window-like representations: a press can drag their
         // stored centre, but never selects a card or changes the edge.
@@ -7868,6 +7889,11 @@ pub(crate) mod test_support {
         .collect()
     }
 
+
+    /// Pan offset owned by the live canvas; positive moves cards down.
+    pub(crate) fn vertical_offset(canvas: &Canvas) -> f32 {
+        canvas.offset_y
+    }
     /// Change only the zoom level, keeping the pan offset stable.
     pub(crate) fn set_zoom(canvas: &mut Canvas, zoom: f32, cx: &mut Context<Canvas>) {
         let (offset_x, offset_y) = (canvas.offset_x, canvas.offset_y);

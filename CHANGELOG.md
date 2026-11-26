@@ -1,5 +1,15 @@
 # Changelog
 
+## [v0.1.2] — 2026-11-26
+
+### Corrigido
+
+- Com nenhum espaço de trabalho carregado, o aviso no centro do canvas não deixa
+  mais cartões, proxies e linhas de conexão salvos aparecerem atrás dele.
+- Rolar para baixo (roda ou gesto) agora move o conteúdo dos agentes e do
+  terminal para baixo; rolar para cima move para cima. A conversão do delta foi
+  invertida tanto no canvas quanto no scrollback do terminal.
+
 ## [v0.1.1] — 2026-11-25
 
 ### Adicionado
