@@ -181,6 +181,7 @@ pub enum ChatStatus {
     Writing,
     Prompt,
     Exited,
+    Error(String),
 }
 
 impl ChatStatus {
@@ -191,6 +192,7 @@ impl ChatStatus {
             Self::Writing => "escrevendo…".into(),
             Self::Prompt => "responda no terminal".into(),
             Self::Exited => "encerrado".into(),
+            Self::Error(error) => format!("não consegui ler a sessão: {error}"),
         }
     }
 }
@@ -200,6 +202,7 @@ pub enum TranscriptEvent {
     User(String),
     AgentFinal(String),
     Status(ChatStatus),
+    TurnEnd,
 }
 
 /// Parse one JSONL line from an OMP session. Unknown or malformed lines are
@@ -220,14 +223,16 @@ fn parse_message(message: &Value) -> Option<TranscriptEvent> {
             let text = text_blocks(message.get("content"));
             (!text.is_empty()).then_some(TranscriptEvent::User(text))
         }
-        "assistant" => parse_assistant(message.get("content")),
+        "assistant" => parse_assistant(message),
         "toolResult" => Some(TranscriptEvent::Status(ChatStatus::Writing)),
         _ => None,
     }
 }
 
-fn parse_assistant(content: Option<&Value>) -> Option<TranscriptEvent> {
+fn parse_assistant(message: &Value) -> Option<TranscriptEvent> {
+    let content = message.get("content");
     let blocks = content?.as_array()?;
+    let stop_reason = message.get("stopReason").and_then(Value::as_str);
     let tool = blocks.iter().rev().find_map(|block| {
         if block.get("type")?.as_str()? != "toolCall" {
             return None;
@@ -238,6 +243,9 @@ fn parse_assistant(content: Option<&Value>) -> Option<TranscriptEvent> {
             .and_then(Value::as_str)
     });
     if let Some(name) = tool {
+        if stop_reason.is_some_and(|reason| reason != "toolUse") {
+            return Some(TranscriptEvent::TurnEnd);
+        }
         return Some(TranscriptEvent::Status(if name == "ask" {
             ChatStatus::Prompt
         } else {
@@ -247,6 +255,9 @@ fn parse_assistant(content: Option<&Value>) -> Option<TranscriptEvent> {
     let text = text_blocks(content);
     if !text.is_empty() {
         return Some(TranscriptEvent::AgentFinal(text));
+    }
+    if stop_reason.is_some_and(|reason| reason != "toolUse") {
+        return Some(TranscriptEvent::TurnEnd);
     }
     let thinking = blocks
         .iter()
@@ -323,6 +334,12 @@ mod tests {
             parse_transcript_line(line),
             Some(TranscriptEvent::Status(ChatStatus::Prompt))
         );
+    }
+
+    #[test]
+    fn aborted_turn_ends_without_a_bubble() {
+        let line = r#"{"type":"message","message":{"role":"assistant","stopReason":"error","content":[{"type":"thinking","thinking":"x"}]}}"#;
+        assert_eq!(parse_transcript_line(line), Some(TranscriptEvent::TurnEnd));
     }
 
     #[test]

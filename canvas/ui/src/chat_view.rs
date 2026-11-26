@@ -1,5 +1,6 @@
 //! GPUI presentation for the agent chat view.
 
+use std::collections::VecDeque;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
@@ -38,6 +39,7 @@ pub struct ChatView {
     session_generation: u64,
     queue: ChatQueue,
     pending: Vec<String>,
+    outbound: VecDeque<String>,
     sender: Option<(AgentKind, SharedPtyWriter)>,
     liveness: AgentLiveness,
     exited: bool,
@@ -46,6 +48,7 @@ pub struct ChatView {
     snapshot_base: Vec<String>,
     last_change: Instant,
     awaiting_response: bool,
+    observed_output: bool,
     snapshot_message: Option<usize>,
     skills: Vec<SkillInfo>,
     _input_subscription: Subscription,
@@ -85,6 +88,7 @@ impl ChatView {
             session_generation: 0,
             queue: ChatQueue::default(),
             pending: Vec::new(),
+            outbound: VecDeque::new(),
             sender: None,
             liveness: AgentLiveness::Agent,
             exited: false,
@@ -93,6 +97,7 @@ impl ChatView {
             snapshot_base: Vec::new(),
             last_change: Instant::now(),
             awaiting_response: false,
+            observed_output: false,
             snapshot_message: None,
             skills: Vec::new(),
         }
@@ -175,6 +180,11 @@ impl ChatView {
     pub fn set_exited(&mut self, exited: bool, cx: &mut Context<Self>) {
         if self.exited != exited {
             self.exited = exited;
+            if exited {
+                self.queue = ChatQueue::default();
+                self.pending.clear();
+                self.outbound.clear();
+            }
             cx.notify();
         }
     }
@@ -194,15 +204,18 @@ impl ChatView {
         if lines != self.last_snapshot {
             self.last_snapshot = lines;
             self.last_change = Instant::now();
+            if self.awaiting_response {
+                self.observed_output = true;
+            }
             return;
         }
         if !self.awaiting_response
+            || !self.observed_output
             || self.last_change.elapsed() < Duration::from_millis(900)
         {
             return;
         }
         let Some(text) = snapshot_response(&self.snapshot_base, &self.last_snapshot) else {
-            self.awaiting_response = false;
             return;
         };
         if let Some(index) = self.snapshot_message {
@@ -216,6 +229,7 @@ impl ChatView {
             self.snapshot_message = Some(self.messages.len() - 1);
         }
         self.awaiting_response = false;
+        self.observed_output = false;
         self.status = None;
         self.try_send(cx);
         self.scroll.scroll_to_bottom();
@@ -234,6 +248,10 @@ impl ChatView {
         self.status = None;
         self.queue = ChatQueue::default();
         self.pending.clear();
+        self.outbound.clear();
+        self.awaiting_response = false;
+        self.observed_output = false;
+        self.snapshot_message = None;
 
         let Some(path) = path else {
             cx.notify();
@@ -251,10 +269,19 @@ impl ChatView {
                 .await;
             if let Some(entity) = chat.upgrade() {
                 let _ = entity.update(cx, |chat, cx| {
-                    if chat.session_generation == generation
-                        && let Ok(events) = initial
-                    {
-                        chat.apply_events(events, cx);
+                    if chat.session_generation != generation {
+                        return;
+                    }
+                    match initial {
+                        Ok(events) if events.is_empty() => chat.set_info(
+                            "A sessão deste cartão está vazia. Envie uma mensagem para começar.".into(),
+                            cx,
+                        ),
+                        Ok(events) => chat.apply_events(events, cx),
+                        Err(error) => chat.set_info(
+                            format!("Não consegui ler a sessão deste cartão: {error}"),
+                            cx,
+                        ),
                     }
                 });
             }
@@ -262,11 +289,13 @@ impl ChatView {
                 cx.background_executor()
                     .timer(Duration::from_millis(150))
                     .await;
-                let (next, result) = cx
+                let (next, result, reset) = cx
                     .background_executor()
                     .spawn(async move {
                         let events = tail.read_appended();
-                        (tail, events)
+                        let reset = tail.reset;
+                        tail.reset = false;
+                        (tail, events, reset)
                     })
                     .await;
                 tail = next;
@@ -276,8 +305,15 @@ impl ChatView {
                         if chat.session_generation != generation {
                             return false;
                         }
-                        if let Ok(events) = result {
-                            chat.apply_events(events, cx);
+                        if reset {
+                            chat.messages.clear();
+                            chat.status = None;
+                        }
+                        match result {
+                            Ok(events) => chat.apply_events(events, cx),
+                            Err(error) => {
+                                chat.set_status(Some(ChatStatus::Error(error)), cx)
+                            }
                         }
                         true
                     })
@@ -326,9 +362,13 @@ impl ChatView {
         if !self.pending.is_empty() {
             self.pending.remove(0);
         }
+        if !pending.is_skill {
+            self.outbound.push_back(normalize_message(&pending.text));
+        }
         if kind != AgentKind::Omp {
             self.snapshot_base = self.last_snapshot.clone();
             self.awaiting_response = true;
+            self.observed_output = false;
             self.snapshot_message = None;
             self.last_change = Instant::now();
         }
@@ -350,16 +390,9 @@ impl ChatView {
             match event {
                 TranscriptEvent::User(text) => {
                     let normalized = normalize_message(&text);
-                    let duplicate = self
-                        .messages
-                        .iter()
-                        .rev()
-                        .take(12)
-                        .any(|message| {
-                            message.role == ChatRole::User
-                                && normalize_message(&message.text) == normalized
-                        });
-                    if !duplicate {
+                    if self.outbound.front() == Some(&normalized) {
+                        self.outbound.pop_front();
+                    } else {
                         self.messages.push(ChatMessage {
                             role: ChatRole::User,
                             text,
@@ -382,6 +415,10 @@ impl ChatView {
                         self.pending.clear();
                     }
                     self.status = Some(status);
+                }
+                TranscriptEvent::TurnEnd => {
+                    self.status = None;
+                    self.try_send(cx);
                 }
             }
         }
@@ -550,7 +587,7 @@ impl Render for ChatView {
                         .debug_selector(move || format!("chat-skill-{index}"))
                         .flex()
                         .flex_col()
-                        .gap(px(2.0))
+                        .gap(px(CHAT_SKILL_GAP))
                         .px(px(SPACE_NORMAL))
                         .py(px(SPACE_TIGHT))
                         .rounded(px(RADIUS_CHIP))
@@ -753,6 +790,57 @@ mod tests {
         vcx.run_until_parked();
         let sent = String::from_utf8(written.lock().unwrap().clone()).unwrap();
         assert!(sent.contains("segunda"));
+    }
+
+    #[test]
+    fn identical_historical_user_messages_are_both_kept() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let mut file = std::fs::File::create(&path).unwrap();
+        let line = r#"{"type":"message","message":{"role":"user","content":[{"type":"text","text":"oi"}]}}"#;
+        writeln!(file, "{line}").unwrap();
+        writeln!(file, "{line}").unwrap();
+        drop(file);
+
+        let mut cx = test_cx();
+        let (view, vcx) = cx.add_window_view(|window, cx| ChatView::new(window, cx));
+        vcx.update(|_, cx| {
+            view.update(cx, |chat, cx| chat.set_session(Some(path), cx));
+        });
+        vcx.run_until_parked();
+        assert!(vcx.debug_bounds("chat-message-0").is_some());
+        assert!(vcx.debug_bounds("chat-message-1").is_some());
+    }
+
+    #[test]
+    fn missing_session_shows_an_error_bubble() {
+        let mut cx = test_cx();
+        let (view, vcx) = cx.add_window_view(|window, cx| ChatView::new(window, cx));
+        vcx.update(|_, cx| {
+            view.update(cx, |chat, cx| {
+                chat.set_session(Some("/definitely/missing/session.jsonl".into()), cx);
+            });
+        });
+        vcx.run_until_parked();
+        assert!(vcx.debug_bounds("chat-message-0").is_some());
+    }
+
+    #[test]
+    fn non_omp_waits_for_first_output_instead_of_abandoning() {
+        let writer: crate::card::SharedPtyWriter = std::sync::Arc::new(
+            std::sync::Mutex::new(Box::new(std::io::sink())),
+        );
+        let mut cx = test_cx();
+        let (view, vcx) = cx.add_window_view(|window, cx| ChatView::new(window, cx));
+        vcx.update(|_, cx| {
+            view.update(cx, |chat, cx| {
+                chat.set_sender(AgentKind::Claude, writer, cx);
+                chat.enqueue("oi".into(), false, cx);
+                chat.observe_terminal(Vec::new(), cx);
+                assert!(chat.awaiting_response);
+            });
+        });
     }
 
     #[test]

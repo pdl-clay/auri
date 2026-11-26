@@ -676,6 +676,7 @@ impl Render for TerminalCard {
         } else {
             None
         };
+        let is_agent = agent.is_some();
         let left = f32::from(self.bounds.origin.x) * zoom + self.view_offset_x;
         let top = f32::from(self.bounds.origin.y) * zoom + self.view_offset_y;
         let width = f32::from(self.bounds.size.width) * zoom;
@@ -923,9 +924,10 @@ impl Render for TerminalCard {
                         .child(chat),
                 )
             })
-            .child(
-                div()
-                    .id(if chat_mode { "terminal-toggle" } else { "chat-toggle" })
+            .when(is_agent, |card| {
+                card.child(
+                    div()
+                        .id(if chat_mode { "terminal-toggle" } else { "chat-toggle" })
                     .debug_selector(move || {
                         if chat_mode {
                             "terminal-toggle".to_string()
@@ -947,12 +949,18 @@ impl Render for TerminalCard {
                     .border_color(rgb(COLOR_BORDER))
                     .hover(|style| style.bg(rgb(COLOR_BORDER)))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                    .on_click(cx.listener(move |this, _, window, cx| {
                         let canvas = this.canvas.clone();
                         let _ = canvas
                             .update(cx, |canvas, cx| {
                                 canvas.set_agent_view(workspace_id, id, next_view, cx)
                             });
+                        if next_view == AgentView::Chat {
+                            let chat = this.ensure_chat(window, cx);
+                            chat.update(cx, |chat, cx| chat.focus_input(window, cx));
+                        } else {
+                            this.terminal.read(cx).focus_handle().focus(window);
+                        }
                     }))
                     .child(
                         svg()
@@ -961,7 +969,8 @@ impl Render for TerminalCard {
                             .h(px(ICON_SIZE))
                             .text_color(rgb(COLOR_MUTED)),
                     ),
-            )
+                )
+            })
             .child(Self::resize_handle(id, DragMode::ResizeLeft, entity_id, cx, connect_mode))
             .child(Self::resize_handle(id, DragMode::ResizeRight, entity_id, cx, connect_mode))
             .child(Self::resize_handle(id, DragMode::ResizeTop, entity_id, cx, connect_mode))
@@ -970,7 +979,7 @@ impl Render for TerminalCard {
             .child(Self::resize_handle(id, DragMode::ResizeTopRight, entity_id, cx, connect_mode))
             .child(Self::resize_handle(id, DragMode::ResizeBottomLeft, entity_id, cx, connect_mode))
             .child(Self::resize_handle(id, DragMode::ResizeBottomRight, entity_id, cx, connect_mode))
-            .when(history > 0, |card| {
+            .when(history > 0 && !chat_mode, |card| {
                 card.child(
                     div()
                         .id(("terminal-scrollbar", id))

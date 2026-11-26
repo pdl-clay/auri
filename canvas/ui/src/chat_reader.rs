@@ -10,6 +10,7 @@ pub struct TranscriptTail {
     pub path: PathBuf,
     pub offset: u64,
     pub partial: String,
+    pub reset: bool,
     limit: usize,
 }
 
@@ -19,6 +20,7 @@ impl TranscriptTail {
             path,
             offset: 0,
             partial: String::new(),
+            reset: false,
             limit,
         }
     }
@@ -42,18 +44,20 @@ impl TranscriptTail {
         if len < self.offset {
             self.offset = 0;
             self.partial.clear();
+            self.reset = true;
         }
         if len == self.offset {
             return Ok(Vec::new());
         }
 
+        let start = self.offset;
         let mut file = File::open(&self.path).map_err(|error| error.to_string())?;
-        file.seek(SeekFrom::Start(self.offset))
+        file.seek(SeekFrom::Start(start))
             .map_err(|error| error.to_string())?;
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)
             .map_err(|error| error.to_string())?;
-        self.offset = len;
+        self.offset = start + bytes.len() as u64;
 
         let mut text = std::mem::take(&mut self.partial);
         text.push_str(&String::from_utf8_lossy(&bytes));
@@ -134,9 +138,8 @@ mod tests {
         assert_eq!(tail.read_initial().unwrap().len(), 2);
 
         std::fs::write(&path, format!("{USER_LINE}\n")).unwrap();
-        assert_eq!(
-            tail.read_appended().unwrap(),
-            vec![TranscriptEvent::User("oi".into())]
-        );
+        let events = tail.read_appended().unwrap();
+        assert!(tail.reset, "a shrink must tell the view to clear its history");
+        assert_eq!(events, vec![TranscriptEvent::User("oi".into())]);
     }
 }
