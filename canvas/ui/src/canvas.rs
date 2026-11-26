@@ -27,7 +27,9 @@ use crate::card::{TerminalCard, scroll_delta, terminal_grid, write_shared, Share
 use crate::text_card::TextCard;
 use crate::workspaces::{DrawerAction, WorkspaceDrawer};
 use crate::theme::*;
-use crate::config::{self, LoadOutcome};
+use crate::config::LoadOutcome;
+#[cfg(not(test))]
+use crate::config;
 use crate::pty::PtySession;
 use crate::permissions::{authorize, Action, Denied, Principal};
 
@@ -2186,6 +2188,8 @@ impl Canvas {
             card.update(cx, |card, cx| card.set_agent(kind, name, icon, cx));
         }
         card.update(cx, |card, cx| card.set_agent_view(view, cx));
+        let session = session.map(PathBuf::from);
+        card.update(cx, |card, cx| card.set_session(session, cx));
         let (zoom, offset_x, offset_y) = (self.zoom, self.offset_x, self.offset_y);
         card.update(cx, |card, cx| card.set_view(zoom, offset_x, offset_y, cx));
         self.register_agent_pty(workspace, id, card.read(cx).writer());
@@ -2253,12 +2257,23 @@ impl Canvas {
             }
             let Some(session) = pinned else { return };
             let path = session.to_string_lossy().into_owned();
+            let card_session = session.clone();
             if let Some(entity) = canvas.upgrade() {
-                entity.update(cx, |this, cx| {
+                let _ = entity.update(cx, |this, cx| {
                     if let Some(state) = this.store.workspace_mut(workspace)
                         && state.canvas.set_agent_session(id, path)
                     {
                         this.finish_store_change(cx);
+                    }
+                    if let Some(card) = this
+                        .cards
+                        .get(&workspace)
+                        .and_then(|cards| cards.iter().find(|(card_id, _)| *card_id == id))
+                        .map(|(_, card)| card.clone())
+                    {
+                        card.update(cx, |card, cx| {
+                            card.set_session(Some(card_session), cx)
+                        });
                     }
                 });
             }
@@ -8649,7 +8664,12 @@ pub(crate) mod test_support {
         };
         let bounds = pixel_bounds(agent.bounds);
         let root = workspace.root.clone();
-        let (kind, name, view) = (agent.kind, agent.name.clone(), agent.view);
+        let (kind, name, view, session) = (
+            agent.kind,
+            agent.name.clone(),
+            agent.view,
+            agent.session.clone().map(PathBuf::from),
+        );
         let (cols, rows) = terminal_grid(&bounds);
         let Ok(pty) = PtySession::spawn_shell_in(cols, rows, Some(&root)) else {
             return;
@@ -8662,6 +8682,7 @@ pub(crate) mod test_support {
             let icon = resolve_agent_details(&canvas.store, kind).2;
             card.set_agent(kind, name, icon, cx);
             card.set_agent_view(view, cx);
+            card.set_session(session, cx);
         });
         canvas.cards.entry(workspace_id).or_default().push((id, card));
     }

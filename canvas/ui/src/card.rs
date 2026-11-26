@@ -16,6 +16,7 @@ use gpui_terminal::{TerminalConfig, TerminalView};
 use canvas_types::{AgentIcon, AgentKind, AgentView, ConnectionTarget, TerminalId, WorkspaceId};
 
 use crate::canvas::{Canvas, card_bounds};
+use crate::chat_view::ChatView;
 use crate::pty::{BatchedReader, PtySession};
 use crate::theme::*;
 
@@ -154,6 +155,8 @@ pub struct TerminalCard {
     pub exited: bool,
     agent: Option<(AgentKind, String, AgentIcon)>,
     view: AgentView,
+    chat: Option<Entity<ChatView>>,
+    session: Option<PathBuf>,
     number: usize,
     pub selected: bool,
     /// Connection gesture: crosshair targeting and source highlight.
@@ -238,6 +241,8 @@ impl TerminalCard {
             exited: false,
             agent: None,
             view: AgentView::Terminal,
+            chat: None,
+            session: None,
             number: 1,
             selected: false,
             terminal,
@@ -320,6 +325,31 @@ impl TerminalCard {
             self.view = view;
             cx.notify();
         }
+    }
+
+    /// Point the chat at the OMP session discovered for this card.
+    pub fn set_session(&mut self, session: Option<PathBuf>, cx: &mut Context<Self>) {
+        self.session = session.clone();
+        if let Some(chat) = &self.chat {
+            chat.update(cx, |chat, cx| chat.set_session(session, cx));
+        }
+        cx.notify();
+    }
+
+    fn ensure_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<ChatView> {
+        if let Some(chat) = &self.chat {
+            return chat.clone();
+        }
+        let kind = self.agent.as_ref().map(|(kind, _, _)| *kind);
+        let writer = self.writer.clone();
+        let session = self.session.clone();
+        let chat = cx.new(|cx| ChatView::new(window, cx));
+        if let Some(kind) = kind {
+            chat.update(cx, |chat, cx| chat.set_sender(kind, writer, cx));
+        }
+        chat.update(cx, |chat, cx| chat.set_session(session, cx));
+        self.chat = Some(chat.clone());
+        chat
     }
 
     /// Display number is the card's current position among its type in the workspace.
@@ -566,7 +596,7 @@ fn scrollbar_hit_width() -> f32 {
 
 
 impl Render for TerminalCard {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let id = self.id;
         let workspace_id = self.workspace_id;
         let exited = self.exited;
@@ -588,6 +618,11 @@ impl Render for TerminalCard {
             AgentView::Terminal
         } else {
             AgentView::Chat
+        };
+        let chat = if chat_mode {
+            Some(self.ensure_chat(window, cx))
+        } else {
+            None
         };
         let left = f32::from(self.bounds.origin.x) * zoom + self.view_offset_x;
         let top = f32::from(self.bounds.origin.y) * zoom + self.view_offset_y;
@@ -823,23 +858,17 @@ impl Render for TerminalCard {
                     .text_color(rgb(COLOR_MUTED))
                     .child(self.root.to_string_lossy().into_owned()),
             )
-            .when(chat_mode, |card| {
+            .when_some(chat, |card, chat| {
                 card.child(
                     div()
-                        .id("chat-view")
-                        .debug_selector(|| "chat-view".to_string())
+                        .id("chat-view-host")
+                        .debug_selector(|| "chat-view-host".to_string())
                         .absolute()
                         .left(px(0.0))
                         .right(px(0.0))
                         .top(px(TITLE_HEIGHT))
                         .bottom(px(PATH_HEIGHT))
-                        .bg(rgb(COLOR_BASE))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_size(px(FONT_CARD_PATH))
-                        .text_color(rgb(COLOR_MUTED))
-                        .child("Chat"),
+                        .child(chat),
                 )
             })
             .child(

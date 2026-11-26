@@ -2,6 +2,10 @@
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::path::PathBuf;
+use std::time::Duration;
+
+use canvas_types::AgentKind;
 
 use auro::gpui::{
     AnyElement, App, ClipboardItem, Context, Entity, IntoElement, ParentElement, Render,
@@ -14,7 +18,11 @@ use gpui_component::{
     text::TextView,
 };
 
-use crate::chat::{ChatFormat, ChatMessage, ChatRole, ChatStatus};
+use crate::card::{SharedPtyWriter, write_shared};
+use crate::chat::{
+    ChatFormat, ChatMessage, ChatQueue, ChatRole, ChatStatus, TranscriptEvent, normalize_message,
+};
+use crate::chat_reader::TranscriptTail;
 use crate::theme::*;
 
 pub struct ChatView {
@@ -22,6 +30,11 @@ pub struct ChatView {
     messages: Vec<ChatMessage>,
     status: Option<ChatStatus>,
     scroll: ScrollHandle,
+    session: Option<PathBuf>,
+    session_generation: u64,
+    queue: ChatQueue,
+    pending: Vec<String>,
+    sender: Option<(AgentKind, SharedPtyWriter)>,
 }
 
 impl ChatView {
@@ -36,6 +49,11 @@ impl ChatView {
             messages: Vec::new(),
             status: None,
             scroll: ScrollHandle::new(),
+            session: None,
+            session_generation: 0,
+            queue: ChatQueue::default(),
+            pending: Vec::new(),
+            sender: None,
         }
     }
 
@@ -64,6 +82,173 @@ impl ChatView {
 
     pub fn set_status(&mut self, status: Option<ChatStatus>, cx: &mut Context<Self>) {
         self.status = status;
+        cx.notify();
+    }
+
+    pub fn set_sender(&mut self, kind: AgentKind, writer: SharedPtyWriter, cx: &mut Context<Self>) {
+        self.sender = Some((kind, writer));
+        self.try_send(cx);
+        cx.notify();
+    }
+
+    /// Point the chat at an OMP session and poll new JSONL lines.
+    pub fn set_session(&mut self, path: Option<PathBuf>, cx: &mut Context<Self>) {
+        if self.session == path {
+            return;
+        }
+        self.session = path.clone();
+        self.session_generation += 1;
+        let generation = self.session_generation;
+        self.messages.clear();
+        self.status = None;
+        self.queue = ChatQueue::default();
+        self.pending.clear();
+
+        let Some(path) = path else {
+            cx.notify();
+            return;
+        };
+        let chat = cx.entity().downgrade();
+        cx.spawn(async move |_, cx| {
+            let (mut tail, initial) = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut tail = TranscriptTail::new(path, 200);
+                    let events = tail.read_initial();
+                    (tail, events)
+                })
+                .await;
+            if let Some(entity) = chat.upgrade() {
+                let _ = entity.update(cx, |chat, cx| {
+                    if chat.session_generation == generation
+                        && let Ok(events) = initial
+                    {
+                        chat.apply_events(events, cx);
+                    }
+                });
+            }
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(150))
+                    .await;
+                let (next, result) = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let events = tail.read_appended();
+                        (tail, events)
+                    })
+                    .await;
+                tail = next;
+                let Some(entity) = chat.upgrade() else { break };
+                let alive = entity
+                    .update(cx, |chat, cx| {
+                        if chat.session_generation != generation {
+                            return false;
+                        }
+                        if let Ok(events) = result {
+                            chat.apply_events(events, cx);
+                        }
+                        true
+                    })
+                    .unwrap_or(false);
+                if !alive {
+                    break;
+                }
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    pub fn enqueue(&mut self, text: String, is_skill: bool, cx: &mut Context<Self>) {
+        let text = text.trim().to_owned();
+        if text.is_empty() {
+            return;
+        }
+        self.queue.enqueue(text.clone(), is_skill);
+        self.pending.push(text);
+        self.try_send(cx);
+        cx.notify();
+    }
+
+    pub fn agent_finished(&mut self, cx: &mut Context<Self>) {
+        self.status = None;
+        self.try_send(cx);
+        cx.notify();
+    }
+
+    fn try_send(&mut self, cx: &mut Context<Self>) {
+        if self.status.is_some() {
+            return;
+        }
+        let Some(pending) = self.queue.front().cloned() else {
+            return;
+        };
+        let Some((kind, writer)) = self.sender.clone() else {
+            return;
+        };
+        let bytes = send_bytes(kind, &pending.text);
+        if write_shared(&writer, &bytes).is_err() {
+            return;
+        }
+        self.queue.remove_front();
+        if !self.pending.is_empty() {
+            self.pending.remove(0);
+        }
+        self.messages.push(ChatMessage {
+            role: ChatRole::User,
+            text: pending.text,
+            format: ChatFormat::Markdown,
+        });
+        self.status = Some(ChatStatus::Thinking);
+        self.scroll.scroll_to_bottom();
+        cx.notify();
+    }
+
+    fn apply_events(&mut self, events: Vec<TranscriptEvent>, cx: &mut Context<Self>) {
+        if events.is_empty() {
+            return;
+        }
+        for event in events {
+            match event {
+                TranscriptEvent::User(text) => {
+                    let normalized = normalize_message(&text);
+                    let duplicate = self
+                        .messages
+                        .iter()
+                        .rev()
+                        .take(12)
+                        .any(|message| {
+                            message.role == ChatRole::User
+                                && normalize_message(&message.text) == normalized
+                        });
+                    if !duplicate {
+                        self.messages.push(ChatMessage {
+                            role: ChatRole::User,
+                            text,
+                            format: ChatFormat::Markdown,
+                        });
+                    }
+                }
+                TranscriptEvent::AgentFinal(text) => {
+                    self.messages.push(ChatMessage {
+                        role: ChatRole::Agent,
+                        text,
+                        format: ChatFormat::Markdown,
+                    });
+                    self.status = None;
+                    self.try_send(cx);
+                }
+                TranscriptEvent::Status(status) => {
+                    if matches!(status, ChatStatus::Exited) {
+                        self.queue = ChatQueue::default();
+                        self.pending.clear();
+                    }
+                    self.status = Some(status);
+                }
+            }
+        }
+        self.scroll.scroll_to_bottom();
         cx.notify();
     }
 
@@ -170,10 +355,28 @@ fn code_button_id(code: &str) -> SharedString {
     SharedString::from(format!("chat-copy-{:x}", hasher.finish()))
 }
 
+pub fn send_bytes(kind: AgentKind, text: &str) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    if kind == AgentKind::Omp && text.contains('\n') {
+        bytes.extend_from_slice(b"\x1b[200~");
+        bytes.extend_from_slice(text.as_bytes());
+        bytes.extend_from_slice(b"\x1b[201~\r");
+    } else {
+        bytes.extend_from_slice(text.as_bytes());
+        bytes.push(b'\r');
+    }
+    bytes
+}
+
 impl Render for ChatView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let messages: Vec<AnyElement> = self
-            .messages
+        let mut all_messages = self.messages.clone();
+        all_messages.extend(self.pending.iter().map(|text| ChatMessage {
+            role: ChatRole::User,
+            text: format!("{text}\n\n_na fila_"),
+            format: ChatFormat::Markdown,
+        }));
+        let messages: Vec<AnyElement> = all_messages
             .iter()
             .enumerate()
             .map(|(index, message)| self.render_message(index, message, window, cx))
@@ -232,6 +435,82 @@ mod tests {
         let cx = auro::gpui::TestAppContext::single();
         cx.update(|cx| gpui_component::init(cx));
         cx
+    }
+
+    #[test]
+    fn omp_multiline_send_uses_bracketed_paste_and_cr() {
+        assert_eq!(
+            send_bytes(AgentKind::Omp, "linha 1\nlinha 2"),
+            b"\x1b[200~linha 1\nlinha 2\x1b[201~\r"
+        );
+        assert_eq!(send_bytes(AgentKind::Omp, "oi"), b"oi\r");
+        assert_eq!(send_bytes(AgentKind::Claude, "oi"), b"oi\r");
+    }
+
+    #[test]
+    fn chat_loads_omp_history_from_a_session_file() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let mut file = std::fs::File::create(&path).unwrap();
+        writeln!(file, r#"{{"type":"message","message":{{"role":"user","content":[{{"type":"text","text":"oi"}}]}}}}"#).unwrap();
+        writeln!(file, r#"{{"type":"message","message":{{"role":"assistant","content":[{{"type":"text","text":"olá"}}]}}}}"#).unwrap();
+        drop(file);
+
+        let mut cx = test_cx();
+        let (view, vcx) = cx.add_window_view(|window, cx| ChatView::new(window, cx));
+        vcx.update(|_, cx| {
+            view.update(cx, |chat, cx| {
+                chat.set_session(Some(path), cx);
+            });
+        });
+        vcx.run_until_parked();
+        assert!(vcx.debug_bounds("chat-message-0").is_some());
+        assert!(vcx.debug_bounds("chat-message-1").is_some());
+        assert!(vcx.debug_bounds("chat-status").is_none());
+    }
+
+    #[test]
+    fn queued_message_is_sent_only_after_the_turn_ends() {
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct Writer(Arc<Mutex<Vec<u8>>>);
+        impl Write for Writer {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let writer: crate::card::SharedPtyWriter =
+            Arc::new(Mutex::new(Box::new(Writer(written.clone()))));
+
+        let mut cx = test_cx();
+        let (view, vcx) = cx.add_window_view(|window, cx| ChatView::new(window, cx));
+        vcx.update(|_, cx| {
+            view.update(cx, |chat, cx| {
+                chat.set_sender(AgentKind::Omp, writer, cx);
+                chat.enqueue("primeira".into(), false, cx);
+                chat.enqueue("segunda".into(), false, cx);
+            });
+        });
+        vcx.run_until_parked();
+        let sent = String::from_utf8(written.lock().unwrap().clone()).unwrap();
+        assert!(sent.contains("primeira"));
+        assert!(!sent.contains("segunda"));
+
+        vcx.update(|_, cx| {
+            view.update(cx, |chat, cx| chat.agent_finished(cx));
+        });
+        vcx.run_until_parked();
+        let sent = String::from_utf8(written.lock().unwrap().clone()).unwrap();
+        assert!(sent.contains("segunda"));
     }
 
     #[test]

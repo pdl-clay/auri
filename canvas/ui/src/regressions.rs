@@ -220,6 +220,60 @@ fn agent_view_reopens_saved_mode() {
 }
 
 #[test]
+fn chat_loads_omp_history_from_a_session_file() {
+    use crate::canvas::Canvas;
+    use crate::config::LoadOutcome;
+    use std::io::Write;
+
+    let dir = tempfile::tempdir().unwrap();
+    let session_path = dir.path().join("session.jsonl");
+    let mut file = std::fs::File::create(&session_path).unwrap();
+    writeln!(file, r#"{{"type":"message","message":{{"role":"user","content":[{{"type":"text","text":"oi"}}]}}}}"#).unwrap();
+    writeln!(file, r#"{{"type":"message","message":{{"role":"assistant","content":[{{"type":"text","text":"olá"}}]}}}}"#).unwrap();
+    drop(file);
+
+    let mut cx = cross_test_cx();
+    let mut store = WorkspaceStore::new();
+    let workspace = store.add("A".into(), WorkspaceIcon::Star, std::env::temp_dir());
+    let agent = store
+        .workspace_mut(workspace.id)
+        .unwrap()
+        .canvas
+        .add_agent(AgentKind::Omp, bounds());
+    store
+        .workspace_mut(workspace.id)
+        .unwrap()
+        .canvas
+        .set_agent_session(agent.id, session_path.to_string_lossy().into_owned());
+    store
+        .workspace_mut(workspace.id)
+        .unwrap()
+        .canvas
+        .set_agent_view(agent.id, AgentView::Chat);
+    store.workspace_mut(workspace.id).unwrap().mark_loaded();
+
+    let (view, vcx) = cx.add_window_view(|window, cx| {
+        Canvas::new(
+            store.clone(),
+            LoadOutcome::Loaded,
+            window.window_handle(),
+            None,
+            cx,
+        )
+    });
+    vcx.update(|_, cx| {
+        view.update(cx, |canvas, cx| {
+            test_support::mount_agent_for_test(canvas, workspace.id, agent.id, cx);
+            canvas.select(workspace.id, agent.id, cx);
+            cx.notify();
+        });
+    });
+    vcx.run_until_parked();
+    assert!(vcx.debug_bounds("chat-message-0").is_some());
+    assert!(vcx.debug_bounds("chat-message-1").is_some());
+}
+
+#[test]
 fn fps_badge_is_not_rendered() {
     let mut store = WorkspaceStore::new();
     let mut workspace = store.add("A".into(), WorkspaceIcon::Star, std::env::temp_dir());
