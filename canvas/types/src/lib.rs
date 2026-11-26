@@ -249,7 +249,7 @@ impl AgentKind {
             Self::Claude => "claude".into(),
             Self::Codex => "codex".into(),
             Self::Pi => "pi".into(),
-            Self::Omp => "omp --continue".into(),
+            Self::Omp => "omp".into(),
             Self::OpenCode => "opencode".into(),
             Self::Custom(_) => String::new(),
         }
@@ -1216,7 +1216,7 @@ mod tests {
     #[test]
     fn agent_command_mapping_covers_all_five_agents() {
         let expected = [
-            (AgentKind::Omp, "OMP", "omp --continue"),
+            (AgentKind::Omp, "OMP", "omp"),
             (AgentKind::OpenCode, "Open Code", "opencode"),
             (AgentKind::Claude, "Claude", "claude"),
             (AgentKind::Codex, "Codex", "codex"),

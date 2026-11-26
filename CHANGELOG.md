@@ -9,6 +9,13 @@
   URLs `releases/latest/download`, e `--no-desktop` não deixa o script terminar
   com código de erro após instalar.
 
+### Alterado
+
+- Criar um novo cartão OMP inicia uma sessão nova com `omp`. A sessão só é
+  retomada ao reabrir um cartão que já tem o caminho salvo (`omp --session`).
+  Sem caminho salvo, o reload também começa do zero em vez de usar
+  `omp --continue`.
+
 ## [v0.1.4] — 2026-11-26
 
 ### Adicionado

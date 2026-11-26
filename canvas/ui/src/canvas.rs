@@ -1485,13 +1485,13 @@ fn resolve_agent_details(store: &WorkspaceStore, kind: AgentKind) -> (String, St
 }
 
 /// Command typed for an OMP card. A pinned session is resumed explicitly;
-/// without one, omp picks the newest session in the workspace directory.
+/// without one, start a fresh session instead of picking the newest.
 fn omp_command(session: Option<&str>) -> String {
     match session {
         Some(path) if !path.is_empty() && Path::new(path).is_file() => {
             format!("omp --session '{}'", path.replace('\'', "'\\''"))
         }
-        _ => "omp --continue".to_owned(),
+        _ => "omp".to_owned(),
     }
 }
 
@@ -6295,8 +6295,8 @@ mod tests {
         std::fs::write(&session, "").unwrap();
         let path = session.to_str().unwrap();
 
-        assert_eq!(omp_command(None), "omp --continue");
-        assert_eq!(omp_command(Some("inexistente.jsonl")), "omp --continue");
+        assert_eq!(omp_command(None), "omp");
+        assert_eq!(omp_command(Some("inexistente.jsonl")), "omp");
         assert_eq!(
             omp_command(Some(path)),
             format!("omp --session '{}'", path.replace('\'', "'\\''"))
