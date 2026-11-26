@@ -9,15 +9,14 @@ use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use auro::update::{ApplyJournal, ChannelConfig, GithubChannel, Recovery, UpdateError};
+use auro::update::{ApplyJournal, ChannelConfig, GithubChannel, Recovery, UpdateDecision, UpdateError};
 use auro::Config;
 
 /// The AppImage has no `Auro.toml` beside its binary, so the release settings
 /// are compiled in and materialised in the private update state directory.
 const EMBEDDED_CONFIG: &str = include_str!("../../Auro.toml");
 
-/// Reconcile a journal left by the restart helper, then check for a new
-/// release. Returns `true` when the app must exit so the helper can apply.
+/// Check on every boot, so a release published minutes before launch is still seen.
 pub fn prepare(_dir: &Path) -> Result<bool, Box<dyn Error>> {
     let state_dir = update_state_dir()?;
     let config = load_config(&state_dir)?;
@@ -37,7 +36,37 @@ pub fn prepare(_dir: &Path) -> Result<bool, Box<dyn Error>> {
     let target = std::env::var_os("APPIMAGE")
         .map(PathBuf::from)
         .unwrap_or(std::env::current_exe()?);
-    Ok(channel.apply_if_due(target, None)?)
+    let result = channel.apply(target, None);
+    channel.record_check()?;
+    Ok(result?)
+}
+
+/// Verify the signed manifest of the latest release without staging its artifact.
+/// Used by the in-app hourly check; applying stays a boot-time decision.
+pub fn probe(_dir: &Path) -> Result<Option<String>, String> {
+    let state_dir = update_state_dir().map_err(|error| error.to_string())?;
+    let config = load_config(&state_dir).map_err(|error| error.to_string())?;
+    let Some(settings) = config.updater.as_ref() else {
+        return Ok(None);
+    };
+    let channel = GithubChannel::new(
+        ChannelConfig::new(&settings.repository, &settings.public_key)
+            .with_manifest_asset(&settings.manifest_asset)
+            .with_interval_secs(settings.interval_secs)
+            .with_check_on_start(settings.check_on_start)
+            .with_prereleases(settings.include_prereleases),
+        state_dir,
+        &config.app.version,
+    )
+    .map_err(|error| error.to_string())?;
+    let decision = channel.check().map_err(|error| error.to_string())?;
+    channel.record_check().map_err(|error| error.to_string())?;
+    if !matches!(decision, UpdateDecision::Available) {
+        return Ok(None);
+    }
+    Ok(Some(
+        channel.manifest().map_err(|error| error.to_string())?.version,
+    ))
 }
 
 

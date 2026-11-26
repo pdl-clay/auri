@@ -75,6 +75,32 @@ fn unloaded_workspace_hides_its_cards_and_ropes() {
 }
 
 #[test]
+fn update_banner_appears_only_when_a_release_is_available() {
+    use crate::canvas::Canvas;
+    use crate::config::LoadOutcome;
+
+    let mut cx = cross_test_cx();
+    let store = WorkspaceStore::new();
+    let (view, vcx) = cx.add_window_view(|window, cx| {
+        Canvas::new(
+            store.clone(),
+            LoadOutcome::Fresh,
+            window.window_handle(),
+            None,
+            cx,
+        )
+    });
+    vcx.run_until_parked();
+    assert!(vcx.debug_bounds("update-banner").is_none());
+
+    vcx.update(|_, cx| {
+        view.update(cx, |canvas, cx| canvas.set_update_available("0.1.2".into(), cx))
+    });
+    vcx.run_until_parked();
+    assert!(vcx.debug_bounds("update-banner").is_some());
+}
+
+#[test]
 fn fps_badge_is_not_rendered() {
     let mut store = WorkspaceStore::new();
     let mut workspace = store.add("A".into(), WorkspaceIcon::Star, std::env::temp_dir());

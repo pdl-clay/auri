@@ -1723,6 +1723,8 @@ pub struct Canvas {
     cards: CardGroups,
     notes: NoteGroups,
     error: Option<String>,
+    /// Version offered by the signed manifest of a newer stable release.
+    update_available: Option<String>,
     placing: bool,
     /// Survives menu dismissal so an agent choice is never downgraded to a terminal.
     pending_agent: Option<AgentKind>,
@@ -1785,6 +1787,7 @@ impl Canvas {
             cards: HashMap::new(),
             notes: HashMap::new(),
             error: None,
+            update_available: None,
             placing: false,
             pending_agent: None,
             placing_text: false,
@@ -3811,6 +3814,12 @@ impl Canvas {
         cx.notify();
     }
 
+    /// Surface a verified update offer without applying it mid-session.
+    pub fn set_update_available(&mut self, version: String, cx: &mut Context<Self>) {
+        self.update_available = Some(version);
+        cx.notify();
+    }
+
     /// Recreate a workspace's saved cards with fresh shells after a row click.
     /// Shell processes cannot survive a reload, so each terminal gets a new
     /// shell in the saved root and keeps its saved bounds; notes keep their text.
@@ -5265,6 +5274,27 @@ impl Render for Canvas {
                                                         .child("Selecione um espaço de trabalho na barra lateral para carregar seus terminais e blocos."),
                                                 ),
                                         ),
+                                )
+                            })
+                            .when_some(self.update_available.clone(), |area, version| {
+                                area.child(
+                                    div()
+                                        .id("update-banner")
+                                        .debug_selector(|| "update-banner".to_string())
+                                        .absolute()
+                                        .left(px(SPACE_PANEL))
+                                        .top(px(SPACE_PANEL))
+                                        .w(px(WORKSPACE_NOTICE_WIDTH))
+                                        .rounded(px(RADIUS_DIALOG))
+                                        .border_1()
+                                        .border_color(rgb(COLOR_ACCENT))
+                                        .bg(rgb(COLOR_PANEL))
+                                        .p(px(SPACE_PANEL))
+                                        .text_size(px(FONT_CARD_PATH))
+                                        .text_color(rgb(COLOR_FOREGROUND))
+                                        .child(format!(
+                                            "Atualização disponível: v{version}. Reinicie o Auri para aplicar."
+                                        )),
                                 )
                             })
                             // Proxies paint behind real cards: a representation

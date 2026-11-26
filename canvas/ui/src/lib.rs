@@ -186,6 +186,31 @@ pub fn run() {
             let view = cx.new(|cx| canvas::Canvas::new(store.clone(), load.clone(), handle, skill.clone(), cx));
             view.update(cx, |canvas, cx| canvas.bind_actions(cx));
             view.update(cx, |canvas, cx| canvas.prepare_workspaces(cx));
+            // A release published after the last boot check must still notify
+            // the running app; applying it stays a boot-time decision.
+            view.update(cx, |_, cx| {
+                let canvas = view.downgrade();
+                cx.spawn(async move |_, cx| {
+                    loop {
+                        cx.background_executor().timer(Duration::from_secs(3600)).await;
+                        let found = cx
+                            .background_executor()
+                            .spawn(async { crate::updater::probe(Path::new(".")) })
+                            .await;
+                        if let Ok(Some(version)) = found {
+                            let canvas = canvas.clone();
+                            let _ = cx.update_window(handle, move |_, _, app| {
+                                if let Some(entity) = canvas.upgrade() {
+                                    entity.update(app, |canvas, cx| {
+                                        canvas.set_update_available(version, cx)
+                                    });
+                                }
+                            });
+                        }
+                    }
+                })
+                .detach();
+            });
             // Requests arrive on the socket thread but must mutate the canvas
             // on the main thread; each connection waits for its own answer.
             let (sender, receiver) = mpsc::channel::<(RequestLine, mpsc::Sender<Response>)>();
