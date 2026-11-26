@@ -301,6 +301,15 @@ impl CustomAgent {
     }
 }
 
+/// Which presentation the agent card opens in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentView {
+    #[default]
+    Terminal,
+    Chat,
+}
+
 /// Persisted AI agent card: the CLI it runs, its title and its canvas geometry.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AgentState {
@@ -314,6 +323,9 @@ pub struct AgentState {
     /// Exact omp session JSONL resumed by this card, when one is known.
     #[serde(default)]
     pub session: Option<String>,
+    /// Remembered presentation; old configs open in the terminal.
+    #[serde(default)]
+    pub view: AgentView,
 }
 
 /// Logical state of a single terminal card.
@@ -509,6 +521,7 @@ impl CanvasState {
             bounds,
             admin: false,
             session: None,
+            view: AgentView::Terminal,
         };
         self.agents.push(agent.clone());
         self.reindex_titles();
@@ -581,6 +594,17 @@ impl CanvasState {
             return false;
         }
         agent.session = Some(session);
+        true
+    }
+
+    pub fn set_agent_view(&mut self, id: TerminalId, view: AgentView) -> bool {
+        let Some(agent) = self.agents.iter_mut().find(|agent| agent.id == id) else {
+            return false;
+        };
+        if agent.view == view {
+            return false;
+        }
+        agent.view = view;
         true
     }
 
@@ -1966,5 +1990,34 @@ mod workspace_tests {
 
         assert_eq!(store.workspace_mut(a.id).unwrap().canvas.connections(), &[local]);
         assert!(store.workspace_mut(c.id).unwrap().canvas.connections().is_empty());
+    }
+
+    #[test]
+    fn old_agent_config_defaults_to_terminal_view() {
+        let json = r#"{"workspaces":[{"id":1,"name":"Auri","icon":"Star","root":"/tmp","canvas":{"agents":[{"id":1,"kind":"Omp","name":"OMP","bounds":{"x":0.0,"y":0.0,"width":300.0,"height":200.0}}]}}]}"#;
+        let store: WorkspaceStore = serde_json::from_str(json).unwrap();
+        assert_eq!(store.workspaces()[0].canvas.agents()[0].view, AgentView::Terminal);
+    }
+
+    #[test]
+    fn agent_view_roundtrips_chat() {
+        let mut store = WorkspaceStore::new();
+        let workspace = store.add("A".into(), WorkspaceIcon::Star, std::env::temp_dir());
+        let agent = store
+            .workspace_mut(workspace.id)
+            .unwrap()
+            .canvas
+            .add_agent(
+                AgentKind::Omp,
+                CardBounds { x: 0.0, y: 0.0, width: 300.0, height: 200.0 },
+            );
+        assert!(store
+            .workspace_mut(workspace.id)
+            .unwrap()
+            .canvas
+            .set_agent_view(agent.id, AgentView::Chat));
+        let json = serde_json::to_string(&store).unwrap();
+        let decoded: WorkspaceStore = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.workspaces()[0].canvas.agents()[0].view, AgentView::Chat);
     }
 }
