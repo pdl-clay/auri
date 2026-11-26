@@ -1,6 +1,7 @@
 //! Pure chat-transcript types and OMP JSONL parsing.
 
 use serde_json::Value;
+use std::collections::VecDeque;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChatRole {
@@ -20,6 +21,59 @@ pub struct ChatMessage {
     pub role: ChatRole,
     pub text: String,
     pub format: ChatFormat,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingMessage {
+    pub text: String,
+    pub is_skill: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ChatQueue {
+    pending: VecDeque<PendingMessage>,
+}
+
+impl ChatQueue {
+    pub fn enqueue(&mut self, text: String, is_skill: bool) {
+        self.pending.push_back(PendingMessage {
+            text: text.trim().to_owned(),
+            is_skill,
+        });
+    }
+
+    pub fn front(&self) -> Option<&PendingMessage> {
+        self.pending.front()
+    }
+
+    pub fn confirm(&mut self, text: &str) -> bool {
+        let wanted = normalize_message(text);
+        let Some(index) = self
+            .pending
+            .iter()
+            .position(|pending| normalize_message(&pending.text) == wanted)
+        else {
+            return false;
+        };
+        self.pending.remove(index);
+        true
+    }
+
+    pub fn remove_front(&mut self) {
+        self.pending.pop_front();
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.pending.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.pending.len()
+    }
+}
+
+pub fn normalize_message(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -201,5 +255,32 @@ mod tests {
             parse_transcript_line(exit),
             Some(TranscriptEvent::Status(ChatStatus::Exited))
         );
+    }
+
+    #[test]
+    fn queue_keeps_fifo_order() {
+        let mut q = ChatQueue::default();
+        q.enqueue("primeira".into(), false);
+        q.enqueue("segunda".into(), false);
+        assert_eq!(q.front().unwrap().text, "primeira");
+        q.remove_front();
+        assert_eq!(q.front().unwrap().text, "segunda");
+    }
+
+    #[test]
+    fn confirm_removes_the_matching_normalized_message() {
+        let mut q = ChatQueue::default();
+        q.enqueue("  Olá   mundo  ".into(), false);
+        q.enqueue("segunda".into(), false);
+        assert!(q.confirm("Olá mundo"));
+        assert_eq!(q.front().unwrap().text, "segunda");
+        assert!(!q.confirm("não existe"));
+    }
+
+    #[test]
+    fn skill_messages_are_marked_and_confirm_immediately_on_send() {
+        let mut q = ChatQueue::default();
+        q.enqueue("/skill:tdd".into(), true);
+        assert!(q.front().unwrap().is_skill);
     }
 }
