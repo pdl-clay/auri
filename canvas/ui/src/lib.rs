@@ -3,6 +3,7 @@
 pub mod canvas;
 pub mod card;
 pub mod chat;
+pub mod chat_reader;
 pub mod config;
 pub mod pty;
 pub mod permissions;
