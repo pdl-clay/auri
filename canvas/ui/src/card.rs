@@ -951,10 +951,11 @@ impl Render for TerminalCard {
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(cx.listener(move |this, _, window, cx| {
                         let canvas = this.canvas.clone();
-                        let _ = canvas
-                            .update(cx, |canvas, cx| {
+                        cx.defer(move |cx| {
+                            let _ = canvas.update(cx, |canvas, cx| {
                                 canvas.set_agent_view(workspace_id, id, next_view, cx)
                             });
+                        });
                         if next_view == AgentView::Chat {
                             let chat = this.ensure_chat(window, cx);
                             chat.update(cx, |chat, cx| chat.focus_input(window, cx));
