@@ -169,6 +169,51 @@ fn agent_view_toggle_persists() {
 }
 
 #[test]
+fn clicking_the_view_toggle_does_not_reenter_the_card() {
+    use crate::canvas::Canvas;
+    use crate::config::LoadOutcome;
+    use auro::gpui::Modifiers;
+
+    let mut cx = cross_test_cx();
+    let mut store = WorkspaceStore::new();
+    let workspace = store.add("A".into(), WorkspaceIcon::Star, std::env::temp_dir());
+    let agent = store
+        .workspace_mut(workspace.id)
+        .unwrap()
+        .canvas
+        .add_agent(AgentKind::Claude, bounds());
+    store
+        .workspace_mut(workspace.id)
+        .unwrap()
+        .canvas
+        .set_agent_view(agent.id, AgentView::Chat);
+
+    let (view, vcx) = cx.add_window_view(|window, cx| {
+        Canvas::new(
+            store.clone(),
+            LoadOutcome::Loaded,
+            window.window_handle(),
+            None,
+            cx,
+        )
+    });
+    vcx.update(|window, cx| {
+        view.update(cx, |canvas, cx| canvas.load_workspace(workspace.id, window, cx));
+    });
+    vcx.run_until_parked();
+
+    let toggle = vcx.debug_bounds("terminal-toggle").expect("chat toggle");
+    vcx.simulate_click(toggle.center(), Modifiers::none());
+    vcx.run_until_parked();
+
+    let stored = vcx.update(|_, cx| {
+        test_support::agent_view(view.read(cx), workspace.id, agent.id)
+    });
+    assert_eq!(stored, Some(AgentView::Terminal));
+    assert!(vcx.debug_bounds("chat-toggle").is_some());
+}
+
+#[test]
 fn agent_view_reopens_saved_mode() {
     use crate::canvas::Canvas;
     use crate::config::LoadOutcome;

@@ -3961,7 +3961,9 @@ impl Canvas {
             .and_then(|cards| cards.iter().find(|(card_id, _)| *card_id == id))
             .map(|(_, card)| card.clone());
         if let Some(card) = card {
-            card.update(cx, |card, cx| card.set_agent_view(view, cx));
+            cx.defer(move |cx| {
+                card.update(cx, |card, cx| card.set_agent_view(view, cx));
+            });
         }
     }
 
