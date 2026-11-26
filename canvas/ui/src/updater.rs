@@ -6,16 +6,21 @@
 //! apply when an update was prepared.
 
 use std::error::Error;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use auro::update::{ApplyJournal, ChannelConfig, GithubChannel, Recovery, UpdateError};
 use auro::Config;
 
+/// The AppImage has no `Auro.toml` beside its binary, so the release settings
+/// are compiled in and materialised in the private update state directory.
+const EMBEDDED_CONFIG: &str = include_str!("../../Auro.toml");
+
 /// Reconcile a journal left by the restart helper, then check for a new
 /// release. Returns `true` when the app must exit so the helper can apply.
-pub fn prepare(dir: &Path) -> Result<bool, Box<dyn Error>> {
-    let config = Config::load(dir)?;
+pub fn prepare(_dir: &Path) -> Result<bool, Box<dyn Error>> {
     let state_dir = update_state_dir()?;
+    let config = load_config(&state_dir)?;
     reconcile(&state_dir, &config.app.version)?;
     let Some(settings) = config.updater.as_ref() else {
         return Ok(false);
@@ -62,6 +67,23 @@ fn update_state_dir() -> Result<PathBuf, Box<dyn Error>> {
     }
     Ok(path)
 }
+
+fn load_config(state_dir: &Path) -> Result<Config, Box<dyn Error>> {
+    let path = state_dir.join("Auri.toml");
+    let current = fs::read_to_string(&path).unwrap_or_default();
+    if current != EMBEDDED_CONFIG {
+        let staged = state_dir.join("Auri.toml.tmp");
+        fs::write(&staged, EMBEDDED_CONFIG)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&staged, fs::Permissions::from_mode(0o600))?;
+        }
+        fs::rename(&staged, &path)?;
+    }
+    Ok(Config::load_from(&path)?)
+}
+
 fn reconcile(state_dir: &Path, version: &str) -> Result<(), Box<dyn Error>> {
     let path = state_dir.join("update.json");
     let journal = match ApplyJournal::load(&path) {
@@ -81,4 +103,24 @@ fn reconcile(state_dir: &Path, version: &str) -> Result<(), Box<dyn Error>> {
         Recovery::Prepared => eprintln!("auro: prepared journal has no apply kind"),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedded_config_replaces_a_missing_or_stale_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = load_config(dir.path()).unwrap();
+        assert_eq!(config.app.version, "0.1.1");
+
+        let path = dir.path().join("Auri.toml");
+        assert_eq!(fs::read_to_string(&path).unwrap(), EMBEDDED_CONFIG);
+
+        fs::write(&path, "stale = true\n").unwrap();
+        let config = load_config(dir.path()).unwrap();
+        assert_eq!(config.app.version, "0.1.1");
+        assert_eq!(fs::read_to_string(&path).unwrap(), EMBEDDED_CONFIG);
+    }
 }

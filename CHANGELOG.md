@@ -46,6 +46,9 @@
 
 ### Corrigido
 
+- AppImage abre fora do diretório do projeto: as configurações de release passam
+  a ser embutidas no binário e gravadas no estado privado do updater, sem
+  depender de um `Auro.toml` ao lado do executável.
 - O instalador registra o app com `Exec` absoluto, `TryExec` e ícone no tema
   `hicolor`, para que Auri apareça na busca do GNOME e do KDE Plasma sem
   depender de `~/.local/bin` estar no PATH.
