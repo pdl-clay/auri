@@ -255,6 +255,30 @@ impl PtySession {
         self.pid
     }
 
+    /// Best-effort check whether an agent, rather than the login shell, owns
+    /// the PTY foreground. `Unknown` must disable chat sends.
+    pub fn foreground_liveness(&self) -> crate::chat::AgentLiveness {
+        #[cfg(unix)]
+        {
+            let master = self.master.lock();
+            let Some(fd) = master.as_raw_fd() else {
+                return crate::chat::AgentLiveness::Unknown;
+            };
+            let pgrp = unsafe { libc::tcgetpgrp(fd) };
+            if pgrp <= 0 {
+                crate::chat::AgentLiveness::Unknown
+            } else if Some(pgrp as u32) == self.pid {
+                crate::chat::AgentLiveness::Idle
+            } else {
+                crate::chat::AgentLiveness::Agent
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            crate::chat::AgentLiveness::Unknown
+        }
+    }
+
     /// Terminate the child's whole process group and reap the child.
     ///
     /// On Unix the group is signalled before the leader is reaped. Descendants

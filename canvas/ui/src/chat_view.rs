@@ -3,13 +3,14 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use canvas_types::AgentKind;
+use gpui_terminal::TerminalView;
 
 use auro::gpui::{
     AnyElement, App, ClipboardItem, Context, Entity, IntoElement, ParentElement, Render,
-    ScrollHandle, SharedString, Styled, Window, div, px, relative, rgb,
+    ScrollHandle, SharedString, Styled, WeakEntity, Window, div, px, relative, rgb,
 };
 use auro::prelude::*;
 use gpui_component::{
@@ -20,7 +21,8 @@ use gpui_component::{
 
 use crate::card::{SharedPtyWriter, write_shared};
 use crate::chat::{
-    ChatFormat, ChatMessage, ChatQueue, ChatRole, ChatStatus, TranscriptEvent, normalize_message,
+    AgentLiveness, ChatFormat, ChatMessage, ChatQueue, ChatRole, ChatStatus, TranscriptEvent,
+    can_send, normalize_message, snapshot_response,
 };
 use crate::chat_reader::TranscriptTail;
 use crate::theme::*;
@@ -35,6 +37,14 @@ pub struct ChatView {
     queue: ChatQueue,
     pending: Vec<String>,
     sender: Option<(AgentKind, SharedPtyWriter)>,
+    liveness: AgentLiveness,
+    exited: bool,
+    terminal: Option<WeakEntity<TerminalView>>,
+    last_snapshot: Vec<String>,
+    snapshot_base: Vec<String>,
+    last_change: Instant,
+    awaiting_response: bool,
+    snapshot_message: Option<usize>,
 }
 
 impl ChatView {
@@ -54,6 +64,14 @@ impl ChatView {
             queue: ChatQueue::default(),
             pending: Vec::new(),
             sender: None,
+            liveness: AgentLiveness::Agent,
+            exited: false,
+            terminal: None,
+            last_snapshot: Vec::new(),
+            snapshot_base: Vec::new(),
+            last_change: Instant::now(),
+            awaiting_response: false,
+            snapshot_message: None,
         }
     }
 
@@ -88,6 +106,91 @@ impl ChatView {
     pub fn set_sender(&mut self, kind: AgentKind, writer: SharedPtyWriter, cx: &mut Context<Self>) {
         self.sender = Some((kind, writer));
         self.try_send(cx);
+        cx.notify();
+    }
+
+    pub fn set_terminal(&mut self, terminal: WeakEntity<TerminalView>, cx: &mut Context<Self>) {
+        if self.terminal.is_some() {
+            return;
+        }
+        self.terminal = Some(terminal.clone());
+        let chat = cx.entity().downgrade();
+        cx.spawn(async move |_, cx| loop {
+            cx.background_executor()
+                .timer(Duration::from_millis(150))
+                .await;
+            let Some(entity) = chat.upgrade() else { break };
+            let Some(terminal) = terminal.upgrade() else { break };
+            let Ok(lines) = cx.update(|cx| terminal.read(cx).visible_lines()) else {
+                continue;
+            };
+            let alive = entity
+                .update(cx, |chat, cx| {
+                    chat.observe_terminal(lines, cx);
+                    true
+                })
+                .unwrap_or(false);
+            if !alive {
+                break;
+            }
+        })
+        .detach();
+    }
+
+    pub fn set_liveness(&mut self, liveness: AgentLiveness, cx: &mut Context<Self>) {
+        if self.liveness != liveness {
+            self.liveness = liveness;
+            cx.notify();
+        }
+    }
+
+    pub fn set_exited(&mut self, exited: bool, cx: &mut Context<Self>) {
+        if self.exited != exited {
+            self.exited = exited;
+            cx.notify();
+        }
+    }
+
+    fn can_send_now(&self) -> bool {
+        can_send(self.liveness, self.exited, "x")
+    }
+
+    fn observe_terminal(&mut self, lines: Vec<String>, cx: &mut Context<Self>) {
+        let non_omp = self
+            .sender
+            .as_ref()
+            .is_some_and(|(kind, _)| *kind != AgentKind::Omp);
+        if !non_omp || self.session.is_some() {
+            return;
+        }
+        if lines != self.last_snapshot {
+            self.last_snapshot = lines;
+            self.last_change = Instant::now();
+            return;
+        }
+        if !self.awaiting_response
+            || self.last_change.elapsed() < Duration::from_millis(900)
+        {
+            return;
+        }
+        let Some(text) = snapshot_response(&self.snapshot_base, &self.last_snapshot) else {
+            self.awaiting_response = false;
+            return;
+        };
+        if let Some(index) = self.snapshot_message {
+            self.messages[index].text = text;
+        } else {
+            self.messages.push(ChatMessage {
+                role: ChatRole::Agent,
+                text,
+                format: ChatFormat::Plain,
+            });
+            self.snapshot_message = Some(self.messages.len() - 1);
+        }
+        self.awaiting_response = false;
+        self.status = None;
+        self.try_send(cx);
+        self.scroll.scroll_to_bottom();
         cx.notify();
     }
 
@@ -162,7 +265,7 @@ impl ChatView {
 
     pub fn enqueue(&mut self, text: String, is_skill: bool, cx: &mut Context<Self>) {
         let text = text.trim().to_owned();
-        if text.is_empty() {
+        if !can_send(self.liveness, self.exited, &text) {
             return;
         }
         self.queue.enqueue(text.clone(), is_skill);
@@ -194,6 +297,12 @@ impl ChatView {
         self.queue.remove_front();
         if !self.pending.is_empty() {
             self.pending.remove(0);
+        }
+        if kind != AgentKind::Omp {
+            self.snapshot_base = self.last_snapshot.clone();
+            self.awaiting_response = true;
+            self.snapshot_message = None;
+            self.last_change = Instant::now();
         }
         self.messages.push(ChatMessage {
             role: ChatRole::User,
@@ -381,6 +490,7 @@ impl Render for ChatView {
             .enumerate()
             .map(|(index, message)| self.render_message(index, message, window, cx))
             .collect();
+        let input_enabled = self.can_send_now();
 
         div()
             .id("chat-view")
@@ -404,6 +514,18 @@ impl Render for ChatView {
                     .p(px(SPACE_WIDE))
                     .children(messages),
             )
+            .when(!input_enabled, |this| {
+                this.child(
+                    div()
+                        .id("chat-liveness")
+                        .debug_selector(|| "chat-liveness".to_string())
+                        .px(px(SPACE_WIDE))
+                        .pb(px(SPACE_TIGHT))
+                        .text_size(px(CHAT_STATUS_FONT))
+                        .text_color(rgb(COLOR_DANGER))
+                        .child("use o terminal"),
+                )
+            })
             .when_some(self.status.clone(), |this, status| {
                 this.child(
                     div()
@@ -422,7 +544,7 @@ impl Render for ChatView {
                     .debug_selector(|| "chat-input".to_string())
                     .px(px(SPACE_WIDE))
                     .pb(px(SPACE_WIDE))
-                    .child(Input::new(&self.input).w_full()),
+                    .child(Input::new(&self.input).w_full().disabled(!input_enabled)),
             )
     }
 }
@@ -511,6 +633,19 @@ mod tests {
         vcx.run_until_parked();
         let sent = String::from_utf8(written.lock().unwrap().clone()).unwrap();
         assert!(sent.contains("segunda"));
+    }
+
+    #[test]
+    fn unknown_liveness_blocks_the_composer() {
+        let mut cx = test_cx();
+        let (view, vcx) = cx.add_window_view(|window, cx| ChatView::new(window, cx));
+        vcx.update(|_, cx| {
+            view.update(cx, |chat, cx| {
+                chat.set_liveness(AgentLiveness::Unknown, cx);
+            });
+        });
+        vcx.run_until_parked();
+        assert!(vcx.debug_bounds("chat-liveness").is_some());
     }
 
     #[test]

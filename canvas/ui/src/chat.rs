@@ -76,6 +76,32 @@ pub fn normalize_message(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentLiveness {
+    Agent,
+    Idle,
+    Unknown,
+}
+
+/// Gate for chat sends: a live foreground agent, not exited, non-empty text.
+pub fn can_send(liveness: AgentLiveness, exited: bool, text: &str) -> bool {
+    !exited && !text.trim().is_empty() && liveness == AgentLiveness::Agent
+}
+
+/// Text added to the terminal viewport since the previous snapshot.
+pub fn snapshot_response(previous: &[String], current: &[String]) -> Option<String> {
+    let common = previous
+        .iter()
+        .zip(current)
+        .take_while(|(before, after)| before == after)
+        .count();
+    if common == current.len() {
+        return None;
+    }
+    let text = current[common..].join("\n").trim().to_owned();
+    (!text.is_empty()).then_some(text)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChatStatus {
     Thinking,
@@ -282,5 +308,29 @@ mod tests {
         let mut q = ChatQueue::default();
         q.enqueue("/skill:tdd".into(), true);
         assert!(q.front().unwrap().is_skill);
+    }
+
+    #[test]
+    fn snapshot_response_returns_only_new_terminal_lines() {
+        let previous = vec!["$ omp".into(), "pronto".into()];
+        let current = vec!["$ omp".into(), "pronto".into(), "resposta".into()];
+        assert_eq!(
+            snapshot_response(&previous, &current),
+            Some("resposta".into())
+        );
+    }
+
+    #[test]
+    fn snapshot_response_is_none_when_output_did_not_change() {
+        let lines = vec!["a".into(), "b".into()];
+        assert_eq!(snapshot_response(&lines, &lines), None);
+    }
+
+    #[test]
+    fn unknown_liveness_disables_chat_sending() {
+        assert!(!can_send(AgentLiveness::Unknown, false, "oi"));
+        assert!(!can_send(AgentLiveness::Agent, true, "oi"));
+        assert!(!can_send(AgentLiveness::Agent, false, "   "));
+        assert!(can_send(AgentLiveness::Agent, false, "oi"));
     }
 }

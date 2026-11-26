@@ -278,6 +278,10 @@ impl TerminalCard {
     pub fn set_exited(&mut self, cx: &mut Context<Self>) {
         if !self.exited {
             self.exited = true;
+            let exited = self.exited;
+            if let Some(chat) = &self.chat {
+                chat.update(cx, |chat, cx| chat.set_exited(exited, cx));
+            }
             cx.notify();
         }
     }
@@ -343,11 +347,31 @@ impl TerminalCard {
         let kind = self.agent.as_ref().map(|(kind, _, _)| *kind);
         let writer = self.writer.clone();
         let session = self.session.clone();
+        let had_session = session.is_some();
+        let terminal = self.terminal.downgrade();
+        let liveness = self._pty.foreground_liveness();
+        let exited = self.exited;
         let chat = cx.new(|cx| ChatView::new(window, cx));
         if let Some(kind) = kind {
             chat.update(cx, |chat, cx| chat.set_sender(kind, writer, cx));
         }
-        chat.update(cx, |chat, cx| chat.set_session(session, cx));
+        chat.update(cx, |chat, cx| chat.set_terminal(terminal, cx));
+        chat.update(cx, |chat, cx| {
+            chat.set_liveness(liveness, cx);
+            chat.set_exited(exited, cx);
+            chat.set_session(session, cx);
+        });
+        if kind == Some(AgentKind::Omp) {
+            if !had_session {
+                chat.update(cx, |chat, cx| {
+                    chat.set_info("Não encontrei a sessão deste cartão; envie uma mensagem para começar.".into(), cx)
+                });
+            }
+        } else if kind.is_some() {
+            chat.update(cx, |chat, cx| {
+                chat.set_info("Histórico não estruturado. Envie uma mensagem para começar.".into(), cx)
+            });
+        }
         self.chat = Some(chat.clone());
         chat
     }
