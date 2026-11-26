@@ -167,6 +167,7 @@ pub fn run() {
             ("x.svg", include_bytes!("../../icons/x.svg")),
             ("terminal.svg", include_bytes!("../../icons/terminal.svg")),
             ("chat.svg", include_bytes!("../../icons/chat.svg")),
+            ("copy.svg", include_bytes!("../../icons/copy.svg")),
             ("trash.svg", include_bytes!("../../icons/trash.svg")),
             ("note.svg", include_bytes!("../../icons/note.svg")),
             ("unload.svg", include_bytes!("../../icons/unload.svg")),

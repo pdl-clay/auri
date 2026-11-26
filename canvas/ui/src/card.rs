@@ -375,12 +375,32 @@ impl TerminalCard {
                     chat.set_info("Não encontrei a sessão deste cartão; envie uma mensagem para começar.".into(), cx)
                 });
             }
-        } else if kind.is_some() {
+        } else if kind.is_some() && !had_session {
             chat.update(cx, |chat, cx| {
                 chat.set_info("Histórico não estruturado. Envie uma mensagem para começar.".into(), cx)
             });
         }
         self.chat = Some(chat.clone());
+        let card = cx.entity().downgrade();
+        cx.spawn(async move |_, cx| loop {
+            cx.background_executor()
+                .timer(Duration::from_millis(250))
+                .await;
+            let Some(entity) = card.upgrade() else { break };
+            let alive = entity
+                .update(cx, |card, cx| {
+                    let liveness = card._pty.foreground_liveness();
+                    if let Some(chat) = &card.chat {
+                        chat.update(cx, |chat, cx| chat.set_liveness(liveness, cx));
+                    }
+                    true
+                })
+                .unwrap_or(false);
+            if !alive {
+                break;
+            }
+        })
+        .detach();
         chat
     }
 

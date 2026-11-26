@@ -4117,7 +4117,14 @@ impl Canvas {
 
         for agent in agents {
             let bounds = pixel_bounds(agent.bounds);
-            let (_, command, icon) = self.agent_details(agent.kind);
+            let (_, stored_command, icon) = self.agent_details(agent.kind);
+            let command = if agent.kind == AgentKind::Omp {
+                omp_command(agent.session.as_deref())
+            } else {
+                stored_command
+            };
+            let view = agent.view;
+            let session = agent.session.clone().map(PathBuf::from);
             let (cols, rows) = terminal_grid(&bounds);
             // Reloaded agents need a fresh token, writer and skill path.
             let env = agent_env(self.registry.issue(id, agent.id), self.skill.as_deref());
@@ -4153,6 +4160,8 @@ impl Canvas {
             });
             card.update(cx, |card, cx| {
                 card.set_agent(agent.kind, agent.name.clone(), icon, cx);
+                card.set_agent_view(view, cx);
+                card.set_session(session, cx);
                 card.set_view(zoom, offset_x, offset_y, cx);
             });
             self.register_agent_pty(id, agent.id, card.read(cx).writer());

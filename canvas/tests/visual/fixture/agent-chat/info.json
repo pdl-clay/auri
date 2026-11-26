@@ -1,0 +1,2 @@
+{"active":1,"next_id":3,"custom_agents":[{"id":1,"name":"Codex","command":"sleep 300","icon":"Codex"}],"next_custom_id":2}
+{"id":1,"name":"AURI","icon":"Star","root":"/tmp","color":"Brass","invalid_root":false,"unloaded":false,"canvas":{"terminals":[],"notes":[],"agents":[{"id":1,"kind":{"Custom":1},"name":"Codex","bounds":{"x":80.0,"y":80.0,"width":900.0,"height":620.0},"admin":false,"view":"chat"}],"connections":[],"selected":1,"next_id":2}}

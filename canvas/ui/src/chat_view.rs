@@ -10,13 +10,14 @@ use gpui_terminal::TerminalView;
 
 use auro::gpui::{
     AnyElement, App, ClipboardItem, Context, Entity, IntoElement, ParentElement, Render,
-    ScrollHandle, SharedString, Styled, Subscription, WeakEntity, Window, div, px, relative, rgb,
+    ScrollHandle, SharedString, StyleRefinement, Styled, Subscription, WeakEntity, Window, div,
+    px, relative, rgb, svg,
 };
 use auro::prelude::*;
 use gpui_component::{
     button::{Button, ButtonVariant, ButtonVariants as _},
     input::{Input, InputEvent, InputState},
-    text::TextView,
+    text::{TextView, TextViewStyle},
 };
 
 use crate::card::{SharedPtyWriter, write_shared};
@@ -411,15 +412,28 @@ impl ChatView {
                 window,
                 cx,
             )
+            .style(
+                TextViewStyle::default()
+                    .code_block(StyleRefinement::default().pr(px(CHAT_COPY_RESERVE))),
+            )
             .selectable(true)
             .text_size(px(CHAT_TEXT_SIZE))
             .text_color(rgb(COLOR_FOREGROUND))
             .code_block_actions(|code, _, _cx| {
                 let text = code.code();
                 Button::new(code_button_id(&text))
-                    .label("Copiar")
+                    .tooltip("Copiar")
+                    .child(
+                        svg()
+                            .path("copy.svg")
+                            .w(px(ICON_SIZE))
+                            .h(px(ICON_SIZE))
+                            .text_color(rgb(COLOR_MUTED)),
+                    )
                     .with_variant(ButtonVariant::Ghost)
+                    .w(px(CHAT_COPY_HEIGHT))
                     .h(px(CHAT_COPY_HEIGHT))
+                    .p_0()
                     .rounded(px(RADIUS_CHIP))
                     .on_click(move |_, _, cx| {
                         cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));

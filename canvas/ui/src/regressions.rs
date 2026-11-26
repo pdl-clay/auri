@@ -180,7 +180,7 @@ fn agent_view_reopens_saved_mode() {
         .workspace_mut(workspace.id)
         .unwrap()
         .canvas
-        .add_agent(AgentKind::Omp, bounds());
+        .add_agent(AgentKind::Claude, bounds());
     store
         .workspace_mut(workspace.id)
         .unwrap()
@@ -190,7 +190,6 @@ fn agent_view_reopens_saved_mode() {
         store.workspaces()[0].canvas.agents()[0].view,
         AgentView::Chat
     );
-    store.workspace_mut(workspace.id).unwrap().mark_loaded();
 
     let (view, vcx) = cx.add_window_view(|window, cx| {
         Canvas::new(
@@ -201,11 +200,9 @@ fn agent_view_reopens_saved_mode() {
             cx,
         )
     });
-    vcx.update(|_, cx| {
+    vcx.update(|window, cx| {
         view.update(cx, |canvas, cx| {
-            test_support::mount_agent_for_test(canvas, workspace.id, agent.id, cx);
-            canvas.select(workspace.id, agent.id, cx);
-            cx.notify();
+            canvas.load_workspace(workspace.id, window, cx);
         });
     });
     vcx.run_until_parked();

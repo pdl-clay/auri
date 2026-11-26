@@ -159,6 +159,7 @@ pub const CHAT_COPY_HEIGHT: f32 = 22.;
 pub const CHAT_INPUT_MIN_ROWS: usize = 1;
 pub const CHAT_INPUT_MAX_ROWS: usize = 4;
 pub const CHAT_SKILLS_MAX_HEIGHT: f32 = 180.;
+pub const CHAT_COPY_RESERVE: f32 = 36.;
 
 // Context menu.
 pub const CONTEXT_MENU_WIDTH: f32 = 180.;
