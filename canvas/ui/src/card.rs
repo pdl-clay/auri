@@ -775,9 +775,35 @@ impl Render for TerminalCard {
                     .text_color(rgb(COLOR_FOREGROUND))
                     .child(
                         div()
+                            .id(("card-title-drag", id))
                             .flex()
+                            .flex_1()
                             .items_center()
                             .gap_2()
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                                    if this.connect_mode {
+                                        let canvas = this.canvas.clone();
+                                        let _ = canvas.update(cx, |canvas, cx| {
+                                            canvas.complete_connect(ConnectionTarget::Card(id), cx)
+                                        });
+                                        cx.stop_propagation();
+                                        return;
+                                    }
+                                    this.terminal.read(cx).focus_handle().focus(window);
+                                    this.begin_drag(DragMode::Move, event.position);
+                                    cx.stop_propagation();
+                                }),
+                            )
+                            .on_drag(DragToken::new(DragMode::Move, entity_id), |token, _, _, cx| {
+                                cx.new(|_| *token)
+                            })
+                            .on_drag_move(
+                                cx.listener(move |this, event: &DragMoveEvent<DragToken>, _, cx| {
+                                    this.apply_drag(event, entity_id, cx);
+                                }),
+                            )
                             .when_some(agent.clone(), |title, (_kind, name, icon)| {
                                 title
                                     .child(
@@ -813,61 +839,102 @@ impl Render for TerminalCard {
                     )
                     .child(
                         div()
-                            .id(("close-terminal", id))
-                            .w(px(CLOSE_BUTTON_SIZE))
-                            .h(px(CLOSE_BUTTON_SIZE))
                             .flex()
                             .items_center()
-                            .justify_center()
-                            .rounded(px(RADIUS_CHIP))
-                            .text_size(px(CLOSE_ICON_SIZE))
-                            .text_color(rgb(COLOR_MUTED))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, _, _, cx| {
-                                    cx.stop_propagation();
-                                    if this.connect_mode {
-                                        let canvas = this.canvas.clone();
+                            .gap(px(SPACE_TIGHT))
+                            .when(is_agent, |controls| {
+                                controls.child(
+                                    div()
+                                        .id(if chat_mode {
+                                            "terminal-toggle"
+                                        } else {
+                                            "chat-toggle"
+                                        })
+                                        .debug_selector(move || {
+                                            if chat_mode {
+                                                "terminal-toggle".to_string()
+                                            } else {
+                                                "chat-toggle".to_string()
+                                            }
+                                        })
+                                        .w(px(CLOSE_BUTTON_SIZE))
+                                        .h(px(CLOSE_BUTTON_SIZE))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded(px(RADIUS_CHIP))
+                                        .text_color(rgb(COLOR_MUTED))
+                                        .hover(|style| style.bg(rgb(COLOR_BORDER)))
+                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                            cx.stop_propagation()
+                                        })
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            let canvas = this.canvas.clone();
+                                            let _ = canvas.update(cx, |canvas, cx| {
+                                                canvas.set_agent_view(workspace_id, id, next_view, cx)
+                                            });
+                                            if next_view == AgentView::Chat {
+                                                let chat = this.ensure_chat(window, cx);
+                                                chat.update(cx, |chat, cx| {
+                                                    chat.focus_input(window, cx)
+                                                });
+                                            } else {
+                                                this.terminal
+                                                    .read(cx)
+                                                    .focus_handle()
+                                                    .focus(window);
+                                            }
+                                        }))
+                                        .child(
+                                            svg()
+                                                .path(if chat_mode {
+                                                    "terminal.svg"
+                                                } else {
+                                                    "chat.svg"
+                                                })
+                                                .w(px(ICON_SIZE))
+                                                .h(px(ICON_SIZE))
+                                                .text_color(rgb(COLOR_MUTED)),
+                                        ),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .id(("close-terminal", id))
+                                    .w(px(CLOSE_BUTTON_SIZE))
+                                    .h(px(CLOSE_BUTTON_SIZE))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(px(RADIUS_CHIP))
+                                    .text_size(px(CLOSE_ICON_SIZE))
+                                    .text_color(rgb(COLOR_MUTED))
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(move |this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            if this.connect_mode {
+                                                let canvas = this.canvas.clone();
+                                                let _ = canvas.update(cx, |canvas, cx| {
+                                                    canvas.complete_connect(
+                                                        ConnectionTarget::Card(id),
+                                                        cx,
+                                                    )
+                                                });
+                                            }
+                                        }),
+                                    )
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        if this.connect_mode {
+                                            return;
+                                        }
                                         let _ = canvas.update(cx, |canvas, cx| {
-                                            canvas.complete_connect(ConnectionTarget::Card(id), cx)
+                                            canvas.remove(workspace_id, id, cx);
+                                            cx.notify();
                                         });
-                                    }
-                                }),
-                            )
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if this.connect_mode {
-                                    return;
-                                }
-                                let _ = canvas.update(cx, |canvas, cx| {
-                                    canvas.remove(workspace_id, id, cx);
-                                    cx.notify();
-                                });
-                            }))
-                            .child("×"),
-                    )
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                            if this.connect_mode {
-                                let canvas = this.canvas.clone();
-                                let _ = canvas.update(cx, |canvas, cx| {
-                                    canvas.complete_connect(ConnectionTarget::Card(id), cx)
-                                });
-                                cx.stop_propagation();
-                                return;
-                            }
-                            this.terminal.read(cx).focus_handle().focus(window);
-                            this.begin_drag(DragMode::Move, event.position);
-                            cx.stop_propagation();
-                        }),
-                    )
-                    .on_drag(DragToken::new(DragMode::Move, entity_id), |token, _, _, cx| {
-                        cx.new(|_| *token)
-                    })
-                    .on_drag_move(
-                        cx.listener(move |this, event: &DragMoveEvent<DragToken>, _, cx| {
-                            this.apply_drag(event, entity_id, cx);
-                        }),
+                                    }))
+                                    .child("×"),
+                            ),
                     )
                     .on_mouse_down(
                         MouseButton::Right,
@@ -922,54 +989,6 @@ impl Render for TerminalCard {
                         .top(px(TITLE_HEIGHT))
                         .bottom(px(PATH_HEIGHT))
                         .child(chat),
-                )
-            })
-            .when(is_agent, |card| {
-                card.child(
-                    div()
-                        .id(if chat_mode { "terminal-toggle" } else { "chat-toggle" })
-                    .debug_selector(move || {
-                        if chat_mode {
-                            "terminal-toggle".to_string()
-                        } else {
-                            "chat-toggle".to_string()
-                        }
-                    })
-                    .absolute()
-                    .top(px(TITLE_HEIGHT + SPACE_TIGHT))
-                    .right(px(SPACE_TIGHT))
-                    .w(px(CLOSE_BUTTON_SIZE))
-                    .h(px(CLOSE_BUTTON_SIZE))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(RADIUS_CHIP))
-                    .bg(rgb(COLOR_ELEVATED))
-                    .border_1()
-                    .border_color(rgb(COLOR_BORDER))
-                    .hover(|style| style.bg(rgb(COLOR_BORDER)))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        let canvas = this.canvas.clone();
-                        cx.defer(move |cx| {
-                            let _ = canvas.update(cx, |canvas, cx| {
-                                canvas.set_agent_view(workspace_id, id, next_view, cx)
-                            });
-                        });
-                        if next_view == AgentView::Chat {
-                            let chat = this.ensure_chat(window, cx);
-                            chat.update(cx, |chat, cx| chat.focus_input(window, cx));
-                        } else {
-                            this.terminal.read(cx).focus_handle().focus(window);
-                        }
-                    }))
-                    .child(
-                        svg()
-                            .path(if chat_mode { "terminal.svg" } else { "chat.svg" })
-                            .w(px(ICON_SIZE))
-                            .h(px(ICON_SIZE))
-                            .text_color(rgb(COLOR_MUTED)),
-                    ),
                 )
             })
             .child(Self::resize_handle(id, DragMode::ResizeLeft, entity_id, cx, connect_mode))

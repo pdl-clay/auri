@@ -3954,17 +3954,23 @@ impl Canvas {
         if !state.canvas.set_agent_view(id, view) {
             return;
         }
-        self.finish_store_change(cx);
-        let card = self
-            .cards
-            .get(&workspace)
-            .and_then(|cards| cards.iter().find(|(card_id, _)| *card_id == id))
-            .map(|(_, card)| card.clone());
-        if let Some(card) = card {
-            cx.defer(move |cx| {
-                card.update(cx, |card, cx| card.set_agent_view(view, cx));
+        let canvas = cx.entity().downgrade();
+        cx.defer(move |cx| {
+            let Some(entity) = canvas.upgrade() else {
+                return;
+            };
+            let _ = entity.update(cx, |canvas, cx| {
+                canvas.finish_store_change(cx);
+                let card = canvas
+                    .cards
+                    .get(&workspace)
+                    .and_then(|cards| cards.iter().find(|(card_id, _)| *card_id == id))
+                    .map(|(_, card)| card.clone());
+                if let Some(card) = card {
+                    card.update(cx, |card, cx| card.set_agent_view(view, cx));
+                }
             });
-        }
+        });
     }
 
     /// Surface a verified update offer without applying it mid-session.

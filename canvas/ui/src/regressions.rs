@@ -181,7 +181,10 @@ fn clicking_the_view_toggle_does_not_reenter_the_card() {
         .workspace_mut(workspace.id)
         .unwrap()
         .canvas
-        .add_agent(AgentKind::Claude, bounds());
+        .add_agent(
+            AgentKind::Claude,
+            CardBounds { x: 0.0, y: 0.0, width: 480.0, height: 320.0 },
+        );
     store
         .workspace_mut(workspace.id)
         .unwrap()

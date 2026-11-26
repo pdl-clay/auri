@@ -148,7 +148,6 @@ pub const UPDATE_CARD_WIDTH: f32 = 320.;
 pub const COLOR_CHAT_USER_BG: u32 = 0x2A3A4A;
 pub const COLOR_CHAT_USER_BORDER: u32 = 0x3D5368;
 pub const COLOR_CHAT_AGENT_BG: u32 = 0x1F2023;
-pub const COLOR_CHAT_INFO_BG: u32 = 0x1A1B1D;
 pub const CHAT_BUBBLE_RADIUS: f32 = 12.;
 pub const CHAT_BUBBLE_PADDING: f32 = 12.;
 pub const CHAT_BUBBLE_GAP: f32 = 10.;
@@ -160,6 +159,7 @@ pub const CHAT_INPUT_MIN_ROWS: usize = 1;
 pub const CHAT_INPUT_MAX_ROWS: usize = 4;
 pub const CHAT_SKILLS_MAX_HEIGHT: f32 = 180.;
 pub const CHAT_COPY_RESERVE: f32 = 36.;
+pub const CHAT_CODE_FONT: f32 = 11.;
 pub const CHAT_SKILL_GAP: f32 = 2.;
 
 // Context menu.

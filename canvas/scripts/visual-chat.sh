@@ -19,7 +19,7 @@ APP="$ROOT/target/debug/canvas"
 POINTER_MANIFEST="$VISUAL/pointer/Cargo.toml"
 POINTER_TARGET="$ROOT/target/visual-pointer"
 POINTER="$POINTER_TARGET/debug/wlr-virtual-pointer"
-STATES=(agent-chat agent-chat-info)
+STATES=(agent-chat agent-chat-info agent-chat-narrow)
 
 die() { printf 'visual-chat: %s\n' "$*" >&2; exit 1; }
 
@@ -33,6 +33,7 @@ cargo build --offline --manifest-path "$POINTER_MANIFEST" --target-dir "$POINTER
 [[ -x "$POINTER" ]] || die "missing pointer helper $POINTER"
 [[ -f "$FIXTURE/workspaces.json" ]] || die "missing chat fixture"
 [[ -f "$FIXTURE/info.json" ]] || die "missing info fixture"
+[[ -f "$FIXTURE/narrow.json" ]] || die "missing narrow fixture"
 [[ -f "$FIXTURE/session.jsonl" ]] || die "missing session fixture"
 
 ORIGINAL_FOCUS="$(niri msg --json windows 2>/dev/null | jq -r '.[] | select(.is_focused == true) | .id' | head -1 || true)"
@@ -77,9 +78,9 @@ run_state() {
         cp "$FIXTURE/session.jsonl" "$TMP/session.jsonl"
         jq -c --arg session "$TMP/session.jsonl" \
             'if .canvas? then .canvas.agents[0].session = $session else . end' \
-            "$FIXTURE/workspaces.json" > "$TMP/config/auro-canvas/workspaces.json"
+            "$fixture" > "$TMP/config/auro-canvas/workspaces.json"
     else
-        cp "$FIXTURE/info.json" "$TMP/config/auro-canvas/workspaces.json"
+        cp "$fixture" "$TMP/config/auro-canvas/workspaces.json"
     fi
 
     local baseline
@@ -104,7 +105,7 @@ run_state() {
     niri msg action fullscreen-window >/dev/null
     sleep 2
     "$POINTER" click 112 121 left --extent "$EXTENT" --output "$OUTPUT"
-    sleep 2
+    sleep 3
     capture "$state"
 
     niri msg action close-window >/dev/null 2>&1 || true
@@ -116,11 +117,11 @@ run_state() {
 }
 
 for state in "${STATES[@]}"; do
-    if [[ "$state" == agent-chat ]]; then
-        run_state "$state" "$FIXTURE/workspaces.json" true
-    else
-        run_state "$state" "$FIXTURE/info.json" false
-    fi
+    case "$state" in
+        agent-chat) run_state "$state" "$FIXTURE/workspaces.json" true ;;
+        agent-chat-info) run_state "$state" "$FIXTURE/info.json" false ;;
+        agent-chat-narrow) run_state "$state" "$FIXTURE/narrow.json" true ;;
+    esac
 done
 
 if [[ "$MODE" == --record ]]; then

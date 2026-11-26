@@ -450,8 +450,12 @@ impl ChatView {
                 cx,
             )
             .style(
-                TextViewStyle::default()
-                    .code_block(StyleRefinement::default().pr(px(CHAT_COPY_RESERVE))),
+                TextViewStyle::default().code_block(
+                    StyleRefinement::default()
+                        .pr(px(CHAT_COPY_RESERVE))
+                        .text_size(px(CHAT_CODE_FONT))
+                        .whitespace_nowrap(),
+                ),
             )
             .selectable(true)
             .text_size(px(CHAT_TEXT_SIZE))
@@ -495,11 +499,6 @@ impl ChatView {
                 .child(
                     div()
                         .w_full()
-                        .rounded(px(CHAT_BUBBLE_RADIUS))
-                        .border_1()
-                        .border_color(rgb(COLOR_BORDER))
-                        .bg(rgb(COLOR_CHAT_INFO_BG))
-                        .px(px(CHAT_BUBBLE_PADDING))
                         .py(px(SPACE_TIGHT))
                         .text_size(px(CHAT_STATUS_FONT))
                         .text_color(rgb(COLOR_MUTED))
