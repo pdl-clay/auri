@@ -69,6 +69,11 @@ fn update_state_dir() -> Result<PathBuf, Box<dyn Error>> {
 }
 
 fn load_config(state_dir: &Path) -> Result<Config, Box<dyn Error>> {
+    let path = materialise_config(state_dir)?;
+    Ok(Config::load_from(&path)?)
+}
+
+fn materialise_config(state_dir: &Path) -> Result<PathBuf, Box<dyn Error>> {
     let path = state_dir.join("Auri.toml");
     let current = fs::read_to_string(&path).unwrap_or_default();
     if current != EMBEDDED_CONFIG {
@@ -81,7 +86,10 @@ fn load_config(state_dir: &Path) -> Result<Config, Box<dyn Error>> {
         }
         fs::rename(&staged, &path)?;
     }
-    Ok(Config::load_from(&path)?)
+    // App::run loads Config before looking at the current directory, and the
+    // AppImage wrapper changes that directory to its own usr/ folder.
+    unsafe { std::env::set_var("AURO_CONFIG", &path) };
+    Ok(path)
 }
 
 fn reconcile(state_dir: &Path, version: &str) -> Result<(), Box<dyn Error>> {
@@ -111,16 +119,26 @@ mod tests {
 
     #[test]
     fn embedded_config_replaces_a_missing_or_stale_file() {
+        let previous = std::env::var_os("AURO_CONFIG");
         let dir = tempfile::tempdir().unwrap();
         let config = load_config(dir.path()).unwrap();
         assert_eq!(config.app.version, "0.1.1");
 
         let path = dir.path().join("Auri.toml");
         assert_eq!(fs::read_to_string(&path).unwrap(), EMBEDDED_CONFIG);
+        assert_eq!(std::env::var_os("AURO_CONFIG"), Some(path.clone().into_os_string()));
 
         fs::write(&path, "stale = true\n").unwrap();
         let config = load_config(dir.path()).unwrap();
         assert_eq!(config.app.version, "0.1.1");
         assert_eq!(fs::read_to_string(&path).unwrap(), EMBEDDED_CONFIG);
+
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("AURO_CONFIG", value),
+                None => std::env::remove_var("AURO_CONFIG"),
+            }
+        }
     }
 }
+
