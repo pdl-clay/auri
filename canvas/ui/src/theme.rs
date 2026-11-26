@@ -158,6 +158,7 @@ pub const CHAT_STATUS_FONT: f32 = FONT_CARD_PATH;
 pub const CHAT_COPY_HEIGHT: f32 = 22.;
 pub const CHAT_INPUT_MIN_ROWS: usize = 1;
 pub const CHAT_INPUT_MAX_ROWS: usize = 4;
+pub const CHAT_SKILLS_MAX_HEIGHT: f32 = 180.;
 
 // Context menu.
 pub const CONTEXT_MENU_WIDTH: f32 = 180.;

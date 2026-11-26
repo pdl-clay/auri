@@ -10,19 +10,20 @@ use gpui_terminal::TerminalView;
 
 use auro::gpui::{
     AnyElement, App, ClipboardItem, Context, Entity, IntoElement, ParentElement, Render,
-    ScrollHandle, SharedString, Styled, WeakEntity, Window, div, px, relative, rgb,
+    ScrollHandle, SharedString, Styled, Subscription, WeakEntity, Window, div, px, relative, rgb,
 };
 use auro::prelude::*;
 use gpui_component::{
     button::{Button, ButtonVariant, ButtonVariants as _},
-    input::{Input, InputState},
+    input::{Input, InputEvent, InputState},
     text::TextView,
 };
 
 use crate::card::{SharedPtyWriter, write_shared};
 use crate::chat::{
-    AgentLiveness, ChatFormat, ChatMessage, ChatQueue, ChatRole, ChatStatus, TranscriptEvent,
-    can_send, normalize_message, snapshot_response,
+    AgentLiveness, ChatFormat, ChatMessage, ChatQueue, ChatRole, ChatStatus, SkillInfo,
+    TranscriptEvent, can_send, discover_skills, filter_skills, normalize_message, skill_command,
+    snapshot_response,
 };
 use crate::chat_reader::TranscriptTail;
 use crate::theme::*;
@@ -45,6 +46,8 @@ pub struct ChatView {
     last_change: Instant,
     awaiting_response: bool,
     snapshot_message: Option<usize>,
+    skills: Vec<SkillInfo>,
+    _input_subscription: Subscription,
 }
 
 impl ChatView {
@@ -54,8 +57,26 @@ impl ChatView {
                 .placeholder("Mensagem para o agente")
                 .auto_grow(CHAT_INPUT_MIN_ROWS, CHAT_INPUT_MAX_ROWS)
         });
+        let input_subscription = cx.subscribe_in(
+            &input,
+            window,
+            |this, state, event: &InputEvent, window, cx| match event {
+                InputEvent::Change => cx.notify(),
+                InputEvent::PressEnter { secondary: false } => {
+                    let text = state.read(cx).value().to_string();
+                    if text.trim().is_empty() {
+                        return;
+                    }
+                    state.update(cx, |input, cx| input.set_value("", window, cx));
+                    let is_skill = text.trim_start().starts_with("/skill:");
+                    this.enqueue(text, is_skill, cx);
+                }
+                _ => {}
+            },
+        );
         Self {
             input,
+            _input_subscription: input_subscription,
             messages: Vec::new(),
             status: None,
             scroll: ScrollHandle::new(),
@@ -72,6 +93,7 @@ impl ChatView {
             last_change: Instant::now(),
             awaiting_response: false,
             snapshot_message: None,
+            skills: Vec::new(),
         }
     }
 
@@ -142,6 +164,11 @@ impl ChatView {
             self.liveness = liveness;
             cx.notify();
         }
+    }
+
+    pub fn set_skill_roots(&mut self, roots: Vec<PathBuf>, cx: &mut Context<Self>) {
+        self.skills = discover_skills(&roots);
+        cx.notify();
     }
 
     pub fn set_exited(&mut self, exited: bool, cx: &mut Context<Self>) {
@@ -491,6 +518,84 @@ impl Render for ChatView {
             .map(|(index, message)| self.render_message(index, message, window, cx))
             .collect();
         let input_enabled = self.can_send_now();
+        let input_value = self.input.read(cx).value().to_string();
+        let query = input_value.strip_prefix('/').unwrap_or("");
+        let show_skills =
+            input_value.starts_with('/') && !input_value.contains(' ') && !input_value.contains('\n');
+        let skill_panel: Option<AnyElement> = if show_skills {
+            let mut items: Vec<AnyElement> = filter_skills(&self.skills, query)
+                .into_iter()
+                .take(8)
+                .enumerate()
+                .map(|(index, skill)| {
+                    let name = skill.name.clone();
+                    let command_name = name.clone();
+                    let description = skill.description.clone();
+                    div()
+                        .id(("chat-skill", index))
+                        .debug_selector(move || format!("chat-skill-{index}"))
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .px(px(SPACE_NORMAL))
+                        .py(px(SPACE_TIGHT))
+                        .rounded(px(RADIUS_CHIP))
+                        .hover(|style| style.bg(rgb(COLOR_ELEVATED)))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            let command = skill_command(&command_name);
+                            this.input.update(cx, |input, cx| {
+                                input.set_value(command, window, cx);
+                            });
+                        }))
+                        .child(
+                            div()
+                                .text_size(px(FONT_CARD_TITLE))
+                                .text_color(rgb(COLOR_FOREGROUND))
+                                .child(name),
+                        )
+                        .when(!description.is_empty(), |this| {
+                            this.child(
+                                div()
+                                    .text_size(px(CHAT_STATUS_FONT))
+                                    .text_color(rgb(COLOR_MUTED))
+                                    .child(description),
+                            )
+                        })
+                        .into_any_element()
+                })
+                .collect();
+            if items.is_empty() {
+                items.push(
+                    div()
+                        .px(px(SPACE_NORMAL))
+                        .py(px(SPACE_TIGHT))
+                        .text_size(px(CHAT_STATUS_FONT))
+                        .text_color(rgb(COLOR_MUTED))
+                        .child("Nenhuma skill encontrada")
+                        .into_any_element(),
+                );
+            }
+            Some(
+                div()
+                    .id("chat-skills")
+                    .debug_selector(|| "chat-skills".to_string())
+                    .mx(px(SPACE_WIDE))
+                    .mb(px(SPACE_TIGHT))
+                    .max_h(px(CHAT_SKILLS_MAX_HEIGHT))
+                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .p(px(SPACE_TIGHT))
+                    .rounded(px(RADIUS_CONTROL))
+                    .border_1()
+                    .border_color(rgb(COLOR_BORDER))
+                    .bg(rgb(COLOR_PANEL))
+                    .children(items)
+                    .into_any_element(),
+            )
+        } else {
+            None
+        };
 
         div()
             .id("chat-view")
@@ -538,6 +643,7 @@ impl Render for ChatView {
                         .child(status.label()),
                 )
             })
+            .when_some(skill_panel, |this, panel| this.child(panel))
             .child(
                 div()
                     .id("chat-input")
@@ -633,6 +739,37 @@ mod tests {
         vcx.run_until_parked();
         let sent = String::from_utf8(written.lock().unwrap().clone()).unwrap();
         assert!(sent.contains("segunda"));
+    }
+
+    #[test]
+    fn slash_lists_skills_and_inserts_command() {
+        use auro::gpui::Modifiers;
+
+        let dir = tempfile::tempdir().unwrap();
+        let skill = dir.path().join("tdd");
+        std::fs::create_dir(&skill).unwrap();
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: tdd\ndescription: Test-first\n---\n",
+        )
+        .unwrap();
+
+        let mut cx = test_cx();
+        let (view, vcx) = cx.add_window_view(|window, cx| ChatView::new(window, cx));
+        vcx.update(|window, cx| {
+            view.update(cx, |chat, cx| {
+                chat.set_skill_roots(vec![dir.path().to_path_buf()], cx);
+                chat.input
+                    .update(cx, |input, cx| input.set_value("/", window, cx));
+            });
+        });
+        vcx.run_until_parked();
+        assert!(vcx.debug_bounds("chat-skills").is_some());
+        let item = vcx.debug_bounds("chat-skill-0").expect("the tdd skill row");
+        vcx.simulate_click(item.center(), Modifiers::none());
+        vcx.run_until_parked();
+        let value = vcx.update(|_, cx| view.read(cx).value(cx));
+        assert_eq!(value, "/skill:tdd ");
     }
 
     #[test]

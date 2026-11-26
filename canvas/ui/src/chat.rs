@@ -2,6 +2,7 @@
 
 use serde_json::Value;
 use std::collections::VecDeque;
+use std::path::PathBuf;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChatRole {
@@ -100,6 +101,77 @@ pub fn snapshot_response(previous: &[String], current: &[String]) -> Option<Stri
     }
     let text = current[common..].join("\n").trim().to_owned();
     (!text.is_empty()).then_some(text)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SkillInfo {
+    pub name: String,
+    pub description: String,
+    pub path: PathBuf,
+}
+
+pub fn discover_skills(roots: &[PathBuf]) -> Vec<SkillInfo> {
+    let mut skills = Vec::new();
+    for root in roots {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path().join("SKILL.md");
+            if let Some(skill) = parse_skill(&path) {
+                skills.push(skill);
+            }
+        }
+    }
+    skills.sort_by(|a, b| a.name.cmp(&b.name));
+    skills
+}
+
+fn parse_skill(path: &std::path::Path) -> Option<SkillInfo> {
+    let body = std::fs::read_to_string(path).ok()?;
+    let mut lines = body.lines();
+    if lines.next()?.trim() != "---" {
+        return None;
+    }
+    let mut name = None;
+    let mut description = String::new();
+    for line in lines {
+        if line.trim() == "---" {
+            break;
+        }
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let value = value.trim().trim_matches('"').trim_matches('\'');
+        match key.trim() {
+            "name" => name = Some(value.to_owned()),
+            "description" if !value.is_empty() && value != ">-" && value != "|" => {
+                description = value.to_owned();
+            }
+            _ => {}
+        }
+    }
+    Some(SkillInfo {
+        name: name?,
+        description,
+        path: path.to_path_buf(),
+    })
+}
+
+pub fn filter_skills<'a>(skills: &'a [SkillInfo], query: &str) -> Vec<&'a SkillInfo> {
+    let query = query.to_lowercase();
+    skills
+        .iter()
+        .filter(|skill| {
+            query.is_empty()
+                || skill.name.to_lowercase().contains(&query)
+                || skill.description.to_lowercase().contains(&query)
+        })
+        .collect()
+}
+
+pub fn skill_command(name: &str) -> String {
+    format!("/skill:{name} ")
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -332,5 +404,41 @@ mod tests {
         assert!(!can_send(AgentLiveness::Agent, true, "oi"));
         assert!(!can_send(AgentLiveness::Agent, false, "   "));
         assert!(can_send(AgentLiveness::Agent, false, "oi"));
+    }
+
+    #[test]
+    fn discovers_skill_name_and_description_from_frontmatter() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill = dir.path().join("tdd");
+        std::fs::create_dir(&skill).unwrap();
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: tdd\ndescription: Test-first\n---\n",
+        )
+        .unwrap();
+        let found = discover_skills(&[dir.path().to_path_buf()]);
+        assert_eq!(found[0].name, "tdd");
+        assert_eq!(found[0].description, "Test-first");
+        assert_eq!(skill_command(&found[0].name), "/skill:tdd ");
+    }
+
+    #[test]
+    fn filter_matches_name_and_description() {
+        let skills = vec![
+            SkillInfo {
+                name: "tdd".into(),
+                description: "Test-first".into(),
+                path: PathBuf::from("/skills/tdd/SKILL.md"),
+            },
+            SkillInfo {
+                name: "docs".into(),
+                description: "Write documentation".into(),
+                path: PathBuf::from("/skills/docs/SKILL.md"),
+            },
+        ];
+        assert_eq!(filter_skills(&skills, "TEST").len(), 1);
+        assert_eq!(filter_skills(&skills, "tdd")[0].name, "tdd");
+        assert_eq!(filter_skills(&skills, "").len(), 2);
+        assert!(filter_skills(&skills, "not-found").is_empty());
     }
 }

@@ -351,6 +351,13 @@ impl TerminalCard {
         let terminal = self.terminal.downgrade();
         let liveness = self._pty.foreground_liveness();
         let exited = self.exited;
+        let mut skill_roots = Vec::new();
+        if let Some(home) = std::env::var_os("HOME") {
+            let home = PathBuf::from(home);
+            skill_roots.push(home.join(".agents/skills"));
+            skill_roots.push(home.join(".omp/skills"));
+        }
+        skill_roots.push(self.root.join(".agents/skills"));
         let chat = cx.new(|cx| ChatView::new(window, cx));
         if let Some(kind) = kind {
             chat.update(cx, |chat, cx| chat.set_sender(kind, writer, cx));
@@ -360,6 +367,7 @@ impl TerminalCard {
             chat.set_liveness(liveness, cx);
             chat.set_exited(exited, cx);
             chat.set_session(session, cx);
+            chat.set_skill_roots(skill_roots, cx);
         });
         if kind == Some(AgentKind::Omp) {
             if !had_session {
