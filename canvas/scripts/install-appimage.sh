@@ -5,7 +5,7 @@ set -euo pipefail
 
 readonly REPO='pdl-clay/auri'
 readonly PUBLIC_KEY='d+Ltt6kOIF9kp5raaYtZTOEnZ1r3NjJr/D+UE8vKUi8='
-readonly API="https://api.github.com/repos/${REPO}/releases/latest"
+readonly LATEST="https://github.com/${REPO}/releases/latest/download"
 
 die() { printf 'erro: %s\n' "$*" >&2; exit 1; }
 warn() { printf 'aviso: %s\n' "$*" >&2; }
@@ -219,30 +219,13 @@ if [[ -n "$manifest" ]]; then
 fi
 
 if [[ -z "$source" ]]; then
-    fetch "$API" "$tmp/release.json"
-    tag="$(manifest_field "$tmp/release.json" '.tag_name')"
-    [[ -n "$tag" ]] || die "a API não devolveu uma release estável"
-    manifest_url="$(
-        jq -r '.assets[]? | select(.name == "auro-update.json") | .browser_download_url' \
-            "$tmp/release.json" | head -n 1
-    )"
-    cli_manifest_url="$(
-        jq -r '.assets[]? | select(.name == "auri-cli.json") | .browser_download_url' \
-            "$tmp/release.json" | head -n 1
-    )"
-    icon_url="$(
-        jq -r '.assets[]? | select(.name == "icon.png") | .browser_download_url' \
-            "$tmp/release.json" | head -n 1
-    )"
-    [[ -n "$manifest_url" ]] || die "release $tag sem auro-update.json assinado"
-    [[ -n "$cli_manifest_url" ]] || die "release $tag sem auri-cli.json assinado"
+    manifest_url="$LATEST/auro-update.json"
+    cli_manifest_url="$LATEST/auri-cli.json"
+    icon_url="$LATEST/icon.png"
 
     fetch "$manifest_url" "$tmp/manifest.json"
     verify_manifest "$tmp/manifest.json"
     version="$(manifest_field "$tmp/manifest.json" '.version')"
-    [[ "${tag#v}" == "$version" ]] \
-        || die "release $tag e manifesto $version divergem"
-
     source="$(manifest_field "$tmp/manifest.json" '.url')"
     [[ -n "$source" ]] || die "manifesto sem URL do AppImage"
 
@@ -259,7 +242,7 @@ if [[ -z "$source" ]]; then
         cli_file="$tmp/cli"
     fi
 
-    if [[ -z "$icon" && -n "$icon_url" ]] && curl -fL -o "$tmp/icon" "$icon_url" 2>/dev/null; then
+    if [[ -z "$icon" ]] && curl -fL -o "$tmp/icon" "$icon_url" 2>/dev/null; then
         icon="$tmp/icon"
     else
         warn "ícone não disponível na release; entrada .desktop usará o nome do app"
@@ -297,5 +280,9 @@ if [[ "$desktop" == true ]]; then
 fi
 
 printf 'instalado: %s/%s\n' "$install_dir" "$exec_name"
-[[ -n "$cli_file" ]] && printf 'instalado: %s/auri\n' "$install_dir"
-[[ "$desktop" == true ]] && printf 'desktop: %s/applications/%s.desktop\n' "$data_dir" "$exec_name"
+if [[ -n "$cli_file" ]]; then
+    printf 'instalado: %s/auri\n' "$install_dir"
+fi
+if [[ "$desktop" == true ]]; then
+    printf 'desktop: %s/applications/%s.desktop\n' "$data_dir" "$exec_name"
+fi

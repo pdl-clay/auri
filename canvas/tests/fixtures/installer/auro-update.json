@@ -1,0 +1,11 @@
+{
+  "format": 2,
+  "version": "9.9.9",
+  "platform": "linux-x86_64",
+  "url": "https://example.invalid/release/fake.AppImage",
+  "size": 64,
+  "sha256": "d953f97a268e28135bbd8d8d9bb59fd3acc433081c59fcbb95343c05baef610d",
+  "notes": "fixture",
+  "published_at": "2026-01-01T00:00:00Z",
+  "signature": "tk3xeqzuTBjZOurRme4JZLKC+0X6rThKX8VfCWcyFgoH2fGzh7g+CSykRuEwpRNJnz2bfGBRerm5RVg6qyTfAw=="
+}

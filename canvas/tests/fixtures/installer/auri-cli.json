@@ -1,0 +1,11 @@
+{
+  "format": 2,
+  "version": "9.9.9",
+  "platform": "linux-x86_64",
+  "url": "https://example.invalid/release/fake-cli",
+  "size": 12,
+  "sha256": "b50bf1fc24ea8bfd5e68781f7ff9806e040237362af9c5781764662ae65c8cb7",
+  "notes": "fixture cli",
+  "published_at": "2026-01-01T00:00:00Z",
+  "signature": "uLKuSPsrGle3LsE5MTwFWvMiFFqFNCmO2OLkZ+Bys7oyUHkVu9QPAw6bHHtce0myr19qyv5jQtVul9qbVua2Ag=="
+}

@@ -1,5 +1,14 @@
 # Changelog
 
+## [Não publicado]
+
+### Corrigido
+
+- Instalador não depende mais da API não autenticada do GitHub, que limita a
+  60 requisições por hora por IP. A resolução da última release usa agora os
+  URLs `releases/latest/download`, e `--no-desktop` não deixa o script terminar
+  com código de erro após instalar.
+
 ## [v0.1.4] — 2026-11-26
 
 ### Adicionado
