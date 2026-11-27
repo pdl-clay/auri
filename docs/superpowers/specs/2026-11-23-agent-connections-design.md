@@ -25,7 +25,9 @@ inside the terminals; the canvas does not show a message history.
   afterwards, without recreating the terminal.
 - To connect: select a card, click the connection icon in the right-hand
   island, then click another terminal, note or agent. The canvas draws a
-  **dashed line** between the two cards.
+  **dashed line** between the two cards. The island icon is `connect.svg`: two
+  agent cards joined by a rope with a pulse. The bolt stays only as a
+  workspace icon; it never represents a connection.
 - Communication is asynchronous. The sender includes, in the message itself,
   the command the receiver should run to reply when it finishes, and carries
   on working. The receiver replies later with `auri ask "Sender" "result"`.

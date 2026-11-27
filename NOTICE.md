@@ -16,6 +16,18 @@ para outros casos de uso.
 
 ---
 
+## Marcas de terceiros
+
+Os ícones de agente identificam os produtos correspondentes e continuam sendo
+marcas de seus donos. Os arquivos usados aqui vêm de:
+
+- Claude e OpenCode: Simple Icons (CC0-1.0).
+- Codex: LobeHub Icons (MIT).
+- OMP: repositório `can1357/oh-my-pi` (MIT).
+- Pi: press kit oficial em `pi.dev` (marca da Earendil).
+
+---
+
 ## Part 2 — Scope and support (English)
 
 The MIT License above governs the code. This second part does not change it;

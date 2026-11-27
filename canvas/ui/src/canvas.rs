@@ -24,6 +24,7 @@ use gpui_component::input::{Input, InputEvent, InputState};
 use canvas_types::{AgentIcon, AgentKind, AgentState, AgentView, CardBounds, Connection, ConnectionTarget, NoteState, ProxyPlacement, TerminalId, TerminalState, WorkspaceColor, WorkspaceIcon, WorkspaceId, WorkspaceState, WorkspaceStore};
 
 use crate::card::{TerminalCard, scroll_delta, terminal_grid, write_shared, SharedPtyWriter};
+use crate::chat::{CanvasMention, MentionKind, omp_breadcrumb_dir, read_omp_breadcrumb, terminal_session_key};
 use crate::text_card::TextCard;
 use crate::workspaces::{DrawerAction, WorkspaceDrawer};
 use crate::theme::*;
@@ -685,6 +686,152 @@ fn card_target(store: &WorkspaceStore, workspace: &WorkspaceState, target: &str)
         .unwrap_or(ConnectionTarget::Card(u64::MAX))
 }
 
+/// Every endpoint connected directly to this card, across workspaces. Only
+/// stored edges qualify: disconnected cards and notes never reach the picker.
+fn connected_mentions(
+    store: &WorkspaceStore,
+    workspace_id: WorkspaceId,
+    card_id: TerminalId,
+) -> Vec<CanvasMention> {
+    let current = ConnectionTarget::Card(card_id);
+    let mut targets: Vec<(WorkspaceId, ConnectionTarget)> = Vec::new();
+    for source in store.workspaces() {
+        for edge in source.canvas.connections() {
+            let from_ws = edge.from_workspace.unwrap_or(source.id);
+            let to_ws = edge.to_workspace.unwrap_or(source.id);
+            let other = if from_ws == workspace_id && edge.from == current {
+                Some((to_ws, edge.to))
+            } else if to_ws == workspace_id && edge.to == current {
+                Some((from_ws, edge.from))
+            } else {
+                None
+            };
+            if let Some(other) = other
+                && other != (workspace_id, current)
+                && !targets.contains(&other)
+            {
+                targets.push(other);
+            }
+        }
+    }
+    let mut mentions: Vec<CanvasMention> = targets
+        .into_iter()
+        .filter_map(|(ws, target)| mention_for(store, workspace_id, ws, target))
+        .collect();
+    mentions.sort_by(|a, b| {
+        mention_rank(a.kind)
+            .cmp(&mention_rank(b.kind))
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    mentions
+}
+
+fn mention_rank(kind: MentionKind) -> u8 {
+    match kind {
+        MentionKind::Terminal => 0,
+        MentionKind::Note => 1,
+        MentionKind::Agent => 2,
+    }
+}
+
+fn mention_for(
+    store: &WorkspaceStore,
+    current_ws: WorkspaceId,
+    target_ws: WorkspaceId,
+    target: ConnectionTarget,
+) -> Option<CanvasMention> {
+    let workspace = store
+        .workspaces()
+        .iter()
+        .find(|workspace| workspace.id == target_ws)?;
+    let remote = target_ws != current_ws;
+    let suffix = if remote {
+        format!(" @ {}", workspace_address(store, target_ws))
+    } else {
+        String::new()
+    };
+    let detail = |label: &str| {
+        if remote {
+            format!("{label} · {}", workspace.name)
+        } else {
+            label.to_owned()
+        }
+    };
+    match target {
+        ConnectionTarget::Card(id) => {
+            if let Some(agent) = workspace.canvas.agent(id) {
+                let name = if agent.name.trim().is_empty() {
+                    format!("Agente {id}")
+                } else {
+                    agent.name.clone()
+                };
+                let address = if remote {
+                    format!("#{id} @ {}", workspace_address(store, target_ws))
+                } else {
+                    format!("#{id}")
+                };
+                let insert = format!("@{name} ({address})");
+                Some(CanvasMention {
+                    kind: MentionKind::Agent,
+                    insert,
+                    name,
+                    detail: detail(&format!("Agente #{id}")),
+                })
+            } else {
+                let terminal = workspace
+                    .canvas
+                    .terminals()
+                    .iter()
+                    .find(|terminal| terminal.id == id)?;
+                let name = if terminal.title.trim().is_empty() {
+                    format!("Terminal {id}")
+                } else {
+                    terminal.title.clone()
+                };
+                Some(CanvasMention {
+                    kind: MentionKind::Terminal,
+                    insert: format!("@{name}{suffix}"),
+                    name,
+                    detail: detail(&format!("Terminal #{id}")),
+                })
+            }
+        }
+        ConnectionTarget::Note(id) => {
+            let note = workspace
+                .canvas
+                .notes()
+                .iter()
+                .find(|note| note.id == id)?;
+            let first = note
+                .text
+                .lines()
+                .find(|line| !line.trim().is_empty())
+                .unwrap_or("")
+                .trim();
+            let name = if first.is_empty() {
+                format!("Bloco {id}")
+            } else {
+                preview(first)
+            };
+            Some(CanvasMention {
+                kind: MentionKind::Note,
+                insert: format!("@note #{id}{suffix}"),
+                name,
+                detail: detail(&format!("Bloco de notas #{id}")),
+            })
+        }
+    }
+}
+
+fn preview(text: &str) -> String {
+    let mut chars = text.chars();
+    let mut preview: String = chars.by_ref().take(48).collect();
+    if chars.next().is_some() {
+        preview.push('…');
+    }
+    preview
+}
+
 /// Note ids are already canonical; there is no display name to resolve.
 fn note_target(target: &str) -> u64 {
     target.parse::<u64>().unwrap_or(u64::MAX)
@@ -874,6 +1021,7 @@ enum Effect {
     RemoveCard { workspace: WorkspaceId, id: TerminalId },
     SpawnNote { workspace: WorkspaceId, id: u64, text: String },
     NoteText { workspace: WorkspaceId, id: u64, text: String },
+    AgentAdmin { workspace: WorkspaceId, id: TerminalId, admin: bool },
     RemoveNote { workspace: WorkspaceId, id: u64 },
 }
 
@@ -1255,7 +1403,15 @@ fn dispatch(
                 return refused("agent_not_found");
             }
             ws.canvas.set_agent_admin(id, admin);
-            outcome(Response::Ok(String::new()), Vec::new(), true)
+            outcome(
+                Response::Ok(String::new()),
+                vec![Effect::AgentAdmin {
+                    workspace: workspace_id,
+                    id,
+                    admin,
+                }],
+                true,
+            )
         }
         // The CLI answers `skill` locally from AURI_SKILL; no host work to do.
         Request::Skill => replied(""),
@@ -1496,33 +1652,6 @@ fn omp_command(session: Option<&str>) -> String {
 }
 
 /// omp keys terminal breadcrumbs by TTY path: `/dev/pts/3` becomes `pts-3`.
-fn terminal_session_key(tty: &Path) -> Option<String> {
-    Some(tty.to_str()?.strip_prefix("/dev/")?.replace('/', "-"))
-}
-
-/// Breadcrumb lines: session cwd, JSONL path, then optional metadata.
-fn read_omp_breadcrumb(path: &Path) -> Option<(PathBuf, PathBuf)> {
-    let body = std::fs::read_to_string(path).ok()?;
-    let mut lines = body.lines();
-    let cwd = lines.next()?.trim();
-    let saved = lines.next()?.trim();
-    if cwd.is_empty() || saved.is_empty() {
-        return None;
-    }
-    let session = PathBuf::from(saved);
-    let session = if session.is_absolute() { session } else { Path::new(cwd).join(session) };
-    Some((PathBuf::from(cwd), session))
-}
-
-fn omp_breadcrumb_dir() -> PathBuf {
-    std::env::var_os("PI_CODING_AGENT_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
-            home.join(".omp").join("agent")
-        })
-        .join("terminal-sessions")
-}
 
 fn new_custom_dialog() -> CustomAgentDialog {
     CustomAgentDialog {
@@ -1886,6 +2015,15 @@ impl Canvas {
         id.map(ConnectionTarget::Card)
     }
 
+    /// Directly connected endpoints for the chat's `@` picker.
+    pub(crate) fn connected_mentions(
+        &self,
+        workspace_id: WorkspaceId,
+        card_id: TerminalId,
+    ) -> Vec<CanvasMention> {
+        connected_mentions(&self.store, workspace_id, card_id)
+    }
+
     /// Resolve an address from `auri list` to the workspace that owns it.
     /// `id@workspace-id` and `id@name` (or `Name @ Workspace`) name the
     /// workspace explicitly; an unqualified address stays in the active one.
@@ -2003,7 +2141,7 @@ impl Canvas {
             cx.notify();
         }
         for effect in std::mem::take(&mut result.effects) {
-            if let Err(error) = self.apply_effect(effect, cx) {
+            if let Err(error) = self.apply_effect(effect, window, cx) {
                 result.response = Response::Err(error);
             }
         }
@@ -2068,7 +2206,12 @@ impl Canvas {
     }
 
     /// Apply a state mutation that also needs a live GPUI entity.
-    fn apply_effect(&mut self, effect: Effect, cx: &mut Context<Self>) -> Result<(), String> {
+    fn apply_effect(
+        &mut self,
+        effect: Effect,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
         match effect {
             Effect::SpawnCard { workspace, id, kind, command } => {
                 self.spawn_cli_card(workspace, id, kind, command, cx)
@@ -2080,7 +2223,9 @@ impl Canvas {
                 self.sync_card_selection(workspace, cx);
                 Ok(())
             }
-            Effect::SpawnNote { workspace, id, text } => self.spawn_cli_note(workspace, id, text, cx),
+            Effect::SpawnNote { workspace, id, text } => {
+                self.spawn_cli_note(workspace, id, text, window, cx)
+            }
             Effect::NoteText { workspace, id, text } => {
                 let Some(note) = self
                     .notes
@@ -2090,10 +2235,22 @@ impl Canvas {
                 else {
                     return Ok(());
                 };
-                cx.update_window(self.window, move |_, window, app| {
-                    note.update(app, |note, app| note.set_text(&text, window, app));
-                })
-                .map_err(|_| "window_unavailable".to_owned())
+                // `handle_request` already runs inside `update_window`; nesting
+                // another call on the same window would return
+                // `window_unavailable`. Use the live window it handed us.
+                note.update(cx, |note, cx| note.set_text(&text, window, cx));
+                Ok(())
+            }
+            Effect::AgentAdmin { workspace, id, admin } => {
+                if let Some(card) = self
+                    .cards
+                    .get(&workspace)
+                    .and_then(|cards| cards.iter().find(|(card_id, _)| *card_id == id))
+                    .map(|(_, card)| card)
+                {
+                    card.update(cx, |card, cx| card.set_admin(admin, cx));
+                }
+                Ok(())
             }
             Effect::RemoveNote { workspace, id } => {
                 if let Some(notes) = self.notes.get_mut(&workspace) {
@@ -2116,7 +2273,7 @@ impl Canvas {
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
         let root = workspace_root(&self.store, workspace)?;
-        let (bounds, name, agent_kind, icon, session, view) = {
+        let (bounds, name, agent_kind, icon, view, session, admin) = {
             let state = self.store.workspaces().iter().find(|item| item.id == workspace).expect("root checked");
             match kind {
                 CardKind::Terminal => {
@@ -2127,7 +2284,15 @@ impl Canvas {
                         .find(|terminal| terminal.id == id)
                         .ok_or_else(|| "card_not_found".to_owned())?;
                     let saved = terminal.bounds.unwrap_or_else(|| next_card_bounds(state));
-                    (pixel_bounds(saved), terminal.title.clone(), None, None, None, AgentView::Terminal)
+                    (
+                        pixel_bounds(saved),
+                        terminal.title.clone(),
+                        None,
+                        None,
+                        AgentView::Terminal,
+                        None,
+                        false,
+                    )
                 }
                 CardKind::Agent(agent_kind) => {
                     let agent = state
@@ -2145,8 +2310,9 @@ impl Canvas {
                         agent.name.clone(),
                         Some(agent_kind),
                         Some((command, icon)),
-                        agent.session.clone(),
                         agent.view,
+                        agent.session.clone().map(PathBuf::from),
+                        agent.admin,
                     )
                 }
             }
@@ -2186,9 +2352,9 @@ impl Canvas {
         if let Some(kind) = agent_kind {
             let (_, icon) = icon.expect("agent icon");
             card.update(cx, |card, cx| card.set_agent(kind, name, icon, cx));
+            card.update(cx, |card, cx| card.set_admin(admin, cx));
         }
         card.update(cx, |card, cx| card.set_agent_view(view, cx));
-        let session = session.map(PathBuf::from);
         card.update(cx, |card, cx| card.set_session(session, cx));
         let (zoom, offset_x, offset_y) = (self.zoom, self.offset_x, self.offset_y);
         card.update(cx, |card, cx| card.set_view(zoom, offset_x, offset_y, cx));
@@ -2241,9 +2407,11 @@ impl Canvas {
                         let key = std::fs::read_link(tty)
                             .ok()
                             .and_then(|path| terminal_session_key(&path))?;
-                        let (cwd, session) = read_omp_breadcrumb(&breadcrumbs.join(key))?;
-                        let cwd = std::fs::canonicalize(&cwd).unwrap_or(cwd);
-                        let session = std::fs::canonicalize(&session).unwrap_or(session);
+                        let breadcrumb = read_omp_breadcrumb(&breadcrumbs.join(key))?;
+                        let cwd = std::fs::canonicalize(&breadcrumb.cwd)
+                            .unwrap_or(breadcrumb.cwd);
+                        let session = std::fs::canonicalize(&breadcrumb.session)
+                            .unwrap_or(breadcrumb.session);
                         (cwd == root && session.is_file()).then_some(session)
                     })
                     .await;
@@ -2260,11 +2428,7 @@ impl Canvas {
             let card_session = session.clone();
             if let Some(entity) = canvas.upgrade() {
                 let _ = entity.update(cx, |this, cx| {
-                    if let Some(state) = this.store.workspace_mut(workspace)
-                        && state.canvas.set_agent_session(id, path)
-                    {
-                        this.finish_store_change(cx);
-                    }
+                    this.persist_agent_session(workspace, id, path, cx);
                     if let Some(card) = this
                         .cards
                         .get(&workspace)
@@ -2287,6 +2451,7 @@ impl Canvas {
         workspace: WorkspaceId,
         id: u64,
         text: String,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
         let (bounds, zoom, offset_x, offset_y) = {
@@ -2301,11 +2466,7 @@ impl Canvas {
             (pixel_bounds(saved), self.zoom, self.offset_x, self.offset_y)
         };
         let canvas = cx.entity().downgrade();
-        let note = cx
-            .update_window(self.window, move |_, window, app| {
-                app.new(|cx| TextCard::new(id, workspace, bounds, text, canvas, window, cx))
-            })
-            .map_err(|_| "window_unavailable".to_owned())?;
+        let note = cx.new(|cx| TextCard::new(id, workspace, bounds, text, canvas, window, cx));
         note.update(cx, |note, cx| note.set_view(zoom, offset_x, offset_y, cx));
         self.notes.entry(workspace).or_default().push((id, note));
         Ok(())
@@ -3416,6 +3577,7 @@ impl Canvas {
         card_id: TerminalId,
         kind: AgentKind,
         name: String,
+        admin: bool,
         cx: &mut Context<Self>,
     ) {
         let icon = self.agent_details(kind).2;
@@ -3425,7 +3587,10 @@ impl Canvas {
             .and_then(|group| group.iter().find(|(id, _)| *id == card_id))
             .map(|(_, card)| card)
         {
-            card.update(cx, |card, cx| card.set_agent(kind, name, icon, cx));
+            card.update(cx, |card, cx| {
+                card.set_agent(kind, name, icon, cx);
+                card.set_admin(admin, cx);
+            });
         }
     }
 
@@ -3438,6 +3603,7 @@ impl Canvas {
                 menu.card_id,
                 menu.kind,
                 menu.name,
+                menu.original_admin,
                 cx,
             );
         }
@@ -3462,7 +3628,7 @@ impl Canvas {
             cx.notify();
             return;
         };
-        self.apply_agent_to_card(menu.workspace_id, menu.card_id, menu.kind, name, cx);
+        self.apply_agent_to_card(menu.workspace_id, menu.card_id, menu.kind, name, menu.admin, cx);
         self.agent_menu = None;
         self.error = None;
         self.finish_store_change(cx);
@@ -3973,6 +4139,23 @@ impl Canvas {
         });
     }
 
+    /// Persist a session path discovered by a live card (including after
+    /// `/clear`), so reopening the card resumes the same transcript.
+    pub(crate) fn persist_agent_session(
+        &mut self,
+        workspace: WorkspaceId,
+        id: TerminalId,
+        path: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(state) = self.store.workspace_mut(workspace) else {
+            return;
+        };
+        if state.canvas.set_agent_session(id, path) {
+            self.finish_store_change(cx);
+        }
+    }
+
     /// Surface a verified update offer without applying it mid-session.
     pub fn set_update_available(&mut self, version: String, cx: &mut Context<Self>) {
         self.update_available = Some(version.clone());
@@ -4132,7 +4315,6 @@ impl Canvas {
                 stored_command
             };
             let view = agent.view;
-            let session = agent.session.clone().map(PathBuf::from);
             let (cols, rows) = terminal_grid(&bounds);
             // Reloaded agents need a fresh token, writer and skill path.
             let env = agent_env(self.registry.issue(id, agent.id), self.skill.as_deref());
@@ -4168,8 +4350,9 @@ impl Canvas {
             });
             card.update(cx, |card, cx| {
                 card.set_agent(agent.kind, agent.name.clone(), icon, cx);
+                card.set_admin(agent.admin, cx);
                 card.set_agent_view(view, cx);
-                card.set_session(session, cx);
+                card.set_session(agent.session.clone().map(PathBuf::from), cx);
                 card.set_view(zoom, offset_x, offset_y, cx);
             });
             self.register_agent_pty(id, agent.id, card.read(cx).writer());
@@ -4892,7 +5075,7 @@ impl Render for Canvas {
         };
         let connect = ComponentButton::new("connect-card")
             .tooltip("Conectar a outro cartão")
-            .child(canvas_icon("bolt.svg"))
+            .child(canvas_icon("connect.svg"))
             .w(px(28.0))
             .h(px(28.0))
             .p_0()
@@ -5837,7 +6020,7 @@ impl Render for Canvas {
                                                 }))
                                                 .child(
                                                     svg()
-                                                        .path("bolt.svg")
+                                                        .path("connect.svg")
                                                         .w(px(ICON_SIZE))
                                                         .h(px(ICON_SIZE))
                                                         .text_color(rgb(COLOR_ACCENT)),
@@ -5937,7 +6120,7 @@ impl Render for Canvas {
                                                 }))
                                                 .child(
                                                     svg()
-                                                        .path("bolt.svg")
+                                                        .path("connect.svg")
                                                         .w(px(ICON_SIZE))
                                                         .h(px(ICON_SIZE))
                                                         .text_color(rgb(COLOR_ACCENT)),
@@ -6315,9 +6498,9 @@ mod tests {
         let crumb = dir.path().join("pts-3");
         std::fs::write(&crumb, format!("{}\nsess/session.jsonl\ncwdstat 1 2\n", dir.path().display())).unwrap();
 
-        let (cwd, session) = read_omp_breadcrumb(&crumb).unwrap();
-        assert_eq!(cwd, dir.path());
-        assert_eq!(session, dir.path().join("sess/session.jsonl"));
+        let breadcrumb = read_omp_breadcrumb(&crumb).unwrap();
+        assert_eq!(breadcrumb.cwd, dir.path());
+        assert_eq!(breadcrumb.session, dir.path().join("sess/session.jsonl"));
         assert_eq!(terminal_session_key(Path::new("/dev/pts/3")).as_deref(), Some("pts-3"));
         assert!(terminal_session_key(Path::new("/tmp/pts/3")).is_none());
     }
@@ -7691,6 +7874,195 @@ mod connect_tests {
     }
 
     #[test]
+    fn note_write_from_a_host_request_updates_the_visible_note() {
+        use auro::gpui::TestAppContext;
+
+        let mut store = WorkspaceStore::new();
+        let workspace = store.add("Auri".into(), WorkspaceIcon::Star, std::env::temp_dir());
+        let agent = store
+            .workspace_mut(workspace.id)
+            .unwrap()
+            .canvas
+            .add_agent(AgentKind::Omp, bounds());
+        let note = store
+            .workspace_mut(workspace.id)
+            .unwrap()
+            .canvas
+            .add_note("before".into(), bounds());
+        store
+            .workspace_mut(workspace.id)
+            .unwrap()
+            .canvas
+            .connect(agent.id, ConnectionTarget::Note(note.id));
+        store.workspace_mut(workspace.id).unwrap().mark_loaded();
+
+        let mut cx = TestAppContext::single();
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            gpui_component::theme::Theme::change(
+                gpui_component::theme::ThemeMode::Dark,
+                None,
+                cx,
+            );
+        });
+        let (view, vcx) = cx.add_window_view(|window, cx| {
+            Canvas::new(
+                store,
+                LoadOutcome::Fresh,
+                window.window_handle(),
+                None,
+                cx,
+            )
+        });
+        vcx.run_until_parked();
+        let token = vcx.update(|window, cx| {
+            view.update(cx, |canvas, cx| {
+                canvas
+                    .spawn_cli_note(workspace.id, note.id, "before".into(), window, cx)
+                    .expect("visible note");
+                canvas.registry.issue(workspace.id, agent.id)
+            })
+        });
+
+        let response = vcx.update(|window, cx| {
+            view.update(cx, |canvas, cx| {
+                canvas.handle_request(
+                    &token,
+                    Request::NoteWrite {
+                        note: note.id.to_string(),
+                        text: "after".into(),
+                    },
+                    window,
+                    cx,
+                )
+            })
+        });
+
+        assert_eq!(
+            response,
+            Response::Ok(String::new()),
+            "the note write must not fail with window_unavailable"
+        );
+        let stored = vcx.update(|_, cx| {
+            view.read(cx)
+                .store
+                .workspaces()
+                .iter()
+                .find(|item| item.id == workspace.id)
+                .unwrap()
+                .canvas
+                .notes()
+                .iter()
+                .find(|item| item.id == note.id)
+                .unwrap()
+                .text
+                .clone()
+        });
+        assert_eq!(stored, "after");
+        let visible = vcx.update(|_, cx| {
+            view.read(cx)
+                .notes
+                .get(&workspace.id)
+                .and_then(|notes| notes.iter().find(|(id, _)| *id == note.id))
+                .map(|(_, note)| note.read(cx).text(cx))
+                .expect("live note")
+        });
+        assert_eq!(visible, "after", "the visible note must receive the text");
+
+        let edited = vcx.update(|window, cx| {
+            view.update(cx, |canvas, cx| {
+                canvas.handle_request(
+                    &token,
+                    Request::NoteEdit {
+                        note: note.id.to_string(),
+                        old: "after".into(),
+                        new: "edited".into(),
+                    },
+                    window,
+                    cx,
+                )
+            })
+        });
+        assert_eq!(edited, Response::Ok(String::new()));
+        let visible = vcx.update(|_, cx| {
+            view.read(cx)
+                .notes
+                .get(&workspace.id)
+                .and_then(|notes| notes.iter().find(|(id, _)| *id == note.id))
+                .map(|(_, note)| note.read(cx).text(cx))
+                .expect("live note")
+        });
+        assert_eq!(visible, "edited", "note edit uses the same live window");
+    }
+
+    #[test]
+    fn note_content_stays_proportional_when_zooming() {
+        use auro::gpui::TestAppContext;
+
+        let mut store = WorkspaceStore::new();
+        let workspace = store.add("Auri".into(), WorkspaceIcon::Star, std::env::temp_dir());
+        let note = store
+            .workspace_mut(workspace.id)
+            .unwrap()
+            .canvas
+            .add_note(
+                "texto".into(),
+                CardBounds { x: 20.0, y: 30.0, width: 400.0, height: 300.0 },
+            );
+        store.workspace_mut(workspace.id).unwrap().mark_loaded();
+        let mut cx = TestAppContext::single();
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            gpui_component::theme::Theme::change(
+                gpui_component::theme::ThemeMode::Dark,
+                None,
+                cx,
+            );
+        });
+        let (view, vcx) = cx.add_window_view(|window, cx| {
+            Canvas::new(
+                store,
+                LoadOutcome::Fresh,
+                window.window_handle(),
+                None,
+                cx,
+            )
+        });
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            view.update(cx, |canvas, cx| {
+                canvas
+                    .spawn_cli_note(workspace.id, note.id, "texto".into(), window, cx)
+                    .expect("visible note");
+                cx.notify();
+            });
+        });
+        vcx.run_until_parked();
+        let before_card = vcx.debug_bounds("note-card").expect("note card");
+        let before_body = vcx.debug_bounds("note-body").expect("note body");
+        let before_x = f32::from(before_body.origin.x) - f32::from(before_card.origin.x);
+        let before_y = f32::from(before_body.origin.y) - f32::from(before_card.origin.y);
+
+        vcx.update(|_, cx| {
+            view.update(cx, |canvas, cx| canvas.set_viewport(0.5, 0.0, 0.0, cx));
+        });
+        vcx.run_until_parked();
+        let after_card = vcx.debug_bounds("note-card").expect("note card after zoom");
+        let after_body = vcx.debug_bounds("note-body").expect("note body after zoom");
+        let after_x = f32::from(after_body.origin.x) - f32::from(after_card.origin.x);
+        let after_y = f32::from(after_body.origin.y) - f32::from(after_card.origin.y);
+
+        assert!(
+            (after_x - before_x * 0.5).abs() < 2.0,
+            "note horizontal inset must scale: {before_x} -> {after_x}"
+        );
+        assert!(
+            (after_y - before_y * 0.5).abs() < 2.0,
+            "note vertical inset must scale: {before_y} -> {after_y}"
+        );
+    }
+
+    #[test]
     fn ask_to_unloaded_peer_loads_cards_writes_to_pty_and_keeps_active_workspace() {
         let probe = test_support::probe_unloaded_peer_ask(false);
 
@@ -8033,6 +8405,74 @@ mod admin_toggle_tests {
         write_agent_edits(&demote, &mut workspace).expect("valid name");
         assert_eq!(authorize(&workspace, Some(&principal), &Action::AgentNew), Err(Denied::NotAdmin));
     }
+
+    #[test]
+    fn chat_mentions_only_list_endpoints_connected_to_the_card() {
+        use canvas_types::Connection;
+
+        let mut store = WorkspaceStore::new();
+        let a = store.add("A".into(), WorkspaceIcon::Star, std::env::temp_dir());
+        let b = store.add("B".into(), WorkspaceIcon::Star, std::env::temp_dir());
+        let (current, agent, terminal, note, off_agent, off_note) = {
+            let canvas = &mut store.workspace_mut(a.id).unwrap().canvas;
+            let current = canvas.add_agent(AgentKind::Omp, bounds());
+            let agent = canvas.add_agent(AgentKind::Claude, bounds());
+            let terminal = canvas.add();
+            let note = canvas.add_note("primeira linha\nresto".into(), bounds());
+            let off_agent = canvas.add_agent(AgentKind::Codex, bounds());
+            let off_note = canvas.add_note("não conectado".into(), bounds());
+            canvas.connect(current.id, ConnectionTarget::Card(agent.id));
+            canvas.connect(current.id, ConnectionTarget::Card(terminal.id));
+            canvas.connect(current.id, ConnectionTarget::Note(note.id));
+            (current, agent, terminal, note, off_agent, off_note)
+        };
+        let remote = store
+            .workspace_mut(b.id)
+            .unwrap()
+            .canvas
+            .add_note("remota".into(), bounds());
+        store
+            .workspace_mut(a.id)
+            .unwrap()
+            .canvas
+            .connect_qualified(Connection {
+                from: ConnectionTarget::Card(current.id),
+                to: ConnectionTarget::Note(remote.id),
+                from_workspace: Some(a.id),
+                to_workspace: Some(b.id),
+            });
+
+        let mentions = connected_mentions(&store, a.id, current.id);
+        assert_eq!(mentions.len(), 4, "terminal, two notes and the agent");
+        assert!(mentions.iter().any(|mention| {
+            mention.kind == MentionKind::Terminal && mention.name == terminal.title
+        }));
+        assert!(mentions.iter().any(|mention| {
+            mention.kind == MentionKind::Note
+                && mention.insert == format!("@note #{}", note.id)
+        }));
+        assert!(mentions.iter().any(|mention| {
+            mention.kind == MentionKind::Note
+                && mention.insert == format!("@note #{} @ b", remote.id)
+        }));
+        assert!(mentions.iter().any(|mention| {
+            mention.kind == MentionKind::Agent
+                && mention.name == agent.name
+                && mention.insert.contains(&format!("#{}", agent.id))
+        }));
+        assert!(
+            mentions
+                .iter()
+                .all(|mention| mention.name != off_agent.name && mention.name != "não conectado"),
+            "disconnected endpoints must stay out of the picker"
+        );
+        assert!(
+            mentions
+                .iter()
+                .all(|mention| mention.insert != format!("@note #{}", off_note.id)),
+            "a disconnected note has no mention"
+        );
+    }
 }
 
 /// Test-only bridge from `regressions.rs` into the private view state. It
@@ -8085,6 +8525,11 @@ pub(crate) mod test_support {
         (active, card, canvas.selected_note.get())
     }
 
+    /// Drop the preselected card so a click test measures the click itself.
+    pub(crate) fn clear_selection(canvas: &mut Canvas, cx: &mut Context<Canvas>) {
+        canvas.clear_all_selection(cx);
+    }
+
     /// Persisted presentation for one agent card.
     pub(crate) fn agent_view(
         canvas: &Canvas,
@@ -8098,6 +8543,71 @@ pub(crate) mod test_support {
             .find(|workspace| workspace.id == workspace_id)
             .and_then(|workspace| workspace.canvas.agent(id))
             .map(|agent| agent.view)
+    }
+
+    /// Focus handle of a mounted card's chat composer, for click regressions.
+    pub(crate) fn card_chat_focus(
+        canvas: &Canvas,
+        workspace_id: WorkspaceId,
+        id: TerminalId,
+        cx: &App,
+    ) -> Option<auro::gpui::FocusHandle> {
+        canvas
+            .cards
+            .get(&workspace_id)
+            .and_then(|cards| cards.iter().find(|(card_id, _)| *card_id == id))
+            .and_then(|(_, card)| card.read(cx).chat_input_focus(cx))
+    }
+
+    /// Chat entity of a mounted card, for model-refresh regressions.
+    pub(crate) fn card_chat(
+        canvas: &Canvas,
+        workspace_id: WorkspaceId,
+        id: TerminalId,
+        cx: &App,
+    ) -> Option<Entity<crate::chat_view::ChatView>> {
+        canvas
+            .cards
+            .get(&workspace_id)
+            .and_then(|cards| cards.iter().find(|(card_id, _)| *card_id == id))
+            .and_then(|(_, card)| card.read(cx).chat_entity())
+    }
+
+    pub(crate) fn card_chat_model(
+        canvas: &Canvas,
+        workspace_id: WorkspaceId,
+        id: TerminalId,
+        cx: &App,
+    ) -> Option<String> {
+        card_chat(canvas, workspace_id, id, cx)
+            .and_then(|chat| chat.read(cx).model_for_test())
+    }
+
+    pub(crate) fn card_chat_refresh(
+        canvas: &Canvas,
+        workspace_id: WorkspaceId,
+        id: TerminalId,
+        cx: &mut App,
+    ) -> bool {
+        let Some(chat) = card_chat(canvas, workspace_id, id, cx) else {
+            return false;
+        };
+        chat.update(cx, |chat, cx| chat.refresh_for_open(cx));
+        true
+    }
+
+    pub(crate) fn card_chat_use_config(
+        canvas: &Canvas,
+        workspace_id: WorkspaceId,
+        id: TerminalId,
+        path: PathBuf,
+        cx: &mut App,
+    ) -> bool {
+        let Some(chat) = card_chat(canvas, workspace_id, id, cx) else {
+            return false;
+        };
+        chat.update(cx, |chat, _| chat.use_config_path(path));
+        true
     }
 
     /// Live presentation of one mounted card.
@@ -8681,12 +9191,8 @@ pub(crate) mod test_support {
         };
         let bounds = pixel_bounds(agent.bounds);
         let root = workspace.root.clone();
-        let (kind, name, view, session) = (
-            agent.kind,
-            agent.name.clone(),
-            agent.view,
-            agent.session.clone().map(PathBuf::from),
-        );
+        let (kind, name, view, admin) = (agent.kind, agent.name.clone(), agent.view, agent.admin);
+        let session = agent.session.clone().map(PathBuf::from);
         let (cols, rows) = terminal_grid(&bounds);
         let Ok(pty) = PtySession::spawn_shell_in(cols, rows, Some(&root)) else {
             return;
@@ -8698,6 +9204,7 @@ pub(crate) mod test_support {
         card.update(cx, |card, cx| {
             let icon = resolve_agent_details(&canvas.store, kind).2;
             card.set_agent(kind, name, icon, cx);
+            card.set_admin(admin, cx);
             card.set_agent_view(view, cx);
             card.set_session(session, cx);
         });

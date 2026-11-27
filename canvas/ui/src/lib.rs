@@ -159,6 +159,7 @@ pub fn run() {
             ("star.svg", include_bytes!("../../icons/star.svg")),
             ("folder.svg", include_bytes!("../../icons/folder.svg")),
             ("bolt.svg", include_bytes!("../../icons/bolt.svg")),
+            ("connect.svg", include_bytes!("../../icons/connect.svg")),
             ("globe.svg", include_bytes!("../../icons/globe.svg")),
             ("plus.svg", include_bytes!("../../icons/plus.svg")),
             ("minus.svg", include_bytes!("../../icons/minus.svg")),
@@ -172,11 +173,26 @@ pub fn run() {
             ("note.svg", include_bytes!("../../icons/note.svg")),
             ("unload.svg", include_bytes!("../../icons/unload.svg")),
             ("edit.svg", include_bytes!("../../icons/edit.svg")),
+            ("file.svg", include_bytes!("../../icons/file.svg")),
+            ("code.svg", include_bytes!("../../icons/code.svg")),
             ("agent-claude.svg", include_bytes!("../../icons/agent-claude.svg")),
             ("agent-codex.svg", include_bytes!("../../icons/agent-codex.svg")),
             ("agent-pi.svg", include_bytes!("../../icons/agent-pi.svg")),
             ("agent-omp.svg", include_bytes!("../../icons/agent-omp.svg")),
             ("agent-open-code.svg", include_bytes!("../../icons/agent-open-code.svg")),
+            ("admin.svg", include_bytes!("../../icons/admin.svg")),
+            ("member.svg", include_bytes!("../../icons/member.svg")),
+            ("paperclip.svg", include_bytes!("../../icons/paperclip.svg")),
+            ("pause.svg", include_bytes!("../../icons/pause.svg")),
+            ("send.svg", include_bytes!("../../icons/send.svg")),
+            (
+                "bubble-tail-left.svg",
+                include_bytes!("../../icons/bubble-tail-left.svg"),
+            ),
+            (
+                "bubble-tail-right.svg",
+                include_bytes!("../../icons/bubble-tail-right.svg"),
+            ),
         ]))
         .setup(|cx, _| {
             gpui_component::init(cx);

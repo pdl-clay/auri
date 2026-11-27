@@ -1,6 +1,7 @@
 //! A draggable, resizable frame around one PTY-backed terminal.
 use std::io::{self, Write};
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use auro::gpui::{
@@ -16,6 +17,7 @@ use gpui_terminal::{TerminalConfig, TerminalView};
 use canvas_types::{AgentIcon, AgentKind, AgentView, ConnectionTarget, TerminalId, WorkspaceId};
 
 use crate::canvas::{Canvas, card_bounds};
+use crate::chat::omp_breadcrumb_for_pid;
 use crate::chat_view::ChatView;
 use crate::pty::{BatchedReader, PtySession};
 use crate::theme::*;
@@ -154,6 +156,7 @@ pub struct TerminalCard {
     pub bounds: Bounds<Pixels>,
     pub exited: bool,
     agent: Option<(AgentKind, String, AgentIcon)>,
+    admin: bool,
     view: AgentView,
     chat: Option<Entity<ChatView>>,
     session: Option<PathBuf>,
@@ -167,7 +170,7 @@ pub struct TerminalCard {
     canvas: WeakEntity<Canvas>,
     root: PathBuf,
     /// Owns the child process group; dropping it terminates the session.
-    _pty: PtySession,
+    pty: PtySession,
     drag: Option<DragStart>,
     /// True while the terminal's scrollbar thumb is being dragged.
     scroll_drag: bool,
@@ -240,6 +243,7 @@ impl TerminalCard {
             bounds,
             exited: false,
             agent: None,
+            admin: false,
             view: AgentView::Terminal,
             chat: None,
             session: None,
@@ -250,7 +254,7 @@ impl TerminalCard {
             connect_source: false,
             writer,
             canvas,
-            _pty: pty,
+            pty,
             last_drag_notify: None,
             drag: None,
             scroll_drag: false,
@@ -318,6 +322,42 @@ impl TerminalCard {
         cx.notify();
     }
 
+    pub fn set_admin(&mut self, admin: bool, cx: &mut Context<Self>) {
+        if self.admin != admin {
+            self.admin = admin;
+            cx.notify();
+        }
+    }
+
+    /// Point the chat at the OMP session JSONL discovered for this card.
+    pub fn set_session(&mut self, session: Option<PathBuf>, cx: &mut Context<Self>) {
+        self.session = session.clone();
+        if let Some(chat) = &self.chat {
+            let breadcrumb = self.omp_breadcrumb();
+            chat.update(cx, |chat, cx| chat.set_session(session, breadcrumb, cx));
+        }
+        cx.notify();
+    }
+
+    fn omp_breadcrumb(&self) -> Option<PathBuf> {
+        (self.agent.as_ref().map(|(kind, _, _)| *kind) == Some(AgentKind::Omp))
+            .then(|| self.pty.pid().and_then(omp_breadcrumb_for_pid))
+            .flatten()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn chat_input_focus(&self, cx: &auro::gpui::App) -> Option<auro::gpui::FocusHandle> {
+        use auro::gpui::Focusable;
+        self.chat
+            .as_ref()
+            .map(|chat| chat.read(cx).input.read(cx).focus_handle(cx))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn chat_entity(&self) -> Option<Entity<ChatView>> {
+        self.chat.clone()
+    }
+
     #[cfg(test)]
     pub(crate) fn view_mode(&self) -> AgentView {
         self.view
@@ -331,14 +371,6 @@ impl TerminalCard {
         }
     }
 
-    /// Point the chat at the OMP session discovered for this card.
-    pub fn set_session(&mut self, session: Option<PathBuf>, cx: &mut Context<Self>) {
-        self.session = session.clone();
-        if let Some(chat) = &self.chat {
-            chat.update(cx, |chat, cx| chat.set_session(session, cx));
-        }
-        cx.notify();
-    }
 
     fn ensure_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<ChatView> {
         if let Some(chat) = &self.chat {
@@ -347,9 +379,8 @@ impl TerminalCard {
         let kind = self.agent.as_ref().map(|(kind, _, _)| *kind);
         let writer = self.writer.clone();
         let session = self.session.clone();
-        let had_session = session.is_some();
+        let breadcrumb = self.omp_breadcrumb();
         let terminal = self.terminal.downgrade();
-        let liveness = self._pty.foreground_liveness();
         let exited = self.exited;
         let mut skill_roots = Vec::new();
         if let Some(home) = std::env::var_os("HOME") {
@@ -363,44 +394,60 @@ impl TerminalCard {
             chat.update(cx, |chat, cx| chat.set_sender(kind, writer, cx));
         }
         chat.update(cx, |chat, cx| chat.set_terminal(terminal, cx));
+        let session_canvas = self.canvas.clone();
+        let session_workspace = self.workspace_id;
+        let session_id = self.id;
+        let view_zoom = self.view_zoom;
         chat.update(cx, |chat, cx| {
-            chat.set_liveness(liveness, cx);
+            chat.set_zoom(view_zoom, cx);
             chat.set_exited(exited, cx);
-            chat.set_session(session, cx);
             chat.set_skill_roots(skill_roots, cx);
+            chat.on_session_change(
+                Rc::new(move |path, cx| {
+                    let path = path.to_string_lossy().into_owned();
+                    let _ = session_canvas.update(cx, |canvas, cx| {
+                        canvas.persist_agent_session(session_workspace, session_id, path, cx)
+                    });
+                }),
+                cx,
+            );
+            chat.set_session(session.clone(), breadcrumb, cx);
+            chat.prefetch_models(cx);
+            let mention_canvas = self.canvas.clone();
+            let mention_workspace = self.workspace_id;
+            let mention_card = self.id;
+            chat.set_mention_provider(
+                Rc::new(move |cx| {
+                    mention_canvas
+                        .upgrade()
+                        .map(|canvas| {
+                            canvas
+                                .read(cx)
+                                .connected_mentions(mention_workspace, mention_card)
+                        })
+                        .unwrap_or_default()
+                }),
+                cx,
+            );
         });
-        if kind == Some(AgentKind::Omp) {
-            if !had_session {
-                chat.update(cx, |chat, cx| {
-                    chat.set_info("Não encontrei a sessão deste cartão; envie uma mensagem para começar.".into(), cx)
-                });
-            }
-        } else if kind.is_some() && !had_session {
-            chat.update(cx, |chat, cx| {
-                chat.set_info("Histórico não estruturado. Envie uma mensagem para começar.".into(), cx)
-            });
+        match kind {
+            Some(AgentKind::Omp) if session.is_none() => chat.update(cx, |chat, cx| {
+                chat.set_info(
+                    "Não encontrei a sessão deste cartão; envie uma mensagem para começar."
+                        .into(),
+                    cx,
+                )
+            }),
+            Some(AgentKind::Omp) => {}
+            Some(_) if session.is_none() => chat.update(cx, |chat, cx| {
+                chat.set_info(
+                    "Histórico não estruturado. Envie uma mensagem para começar.".into(),
+                    cx,
+                )
+            }),
+            _ => {}
         }
         self.chat = Some(chat.clone());
-        let card = cx.entity().downgrade();
-        cx.spawn(async move |_, cx| loop {
-            cx.background_executor()
-                .timer(Duration::from_millis(250))
-                .await;
-            let Some(entity) = card.upgrade() else { break };
-            let alive = entity
-                .update(cx, |card, cx| {
-                    let liveness = card._pty.foreground_liveness();
-                    if let Some(chat) = &card.chat {
-                        chat.update(cx, |chat, cx| chat.set_liveness(liveness, cx));
-                    }
-                    true
-                })
-                .unwrap_or(false);
-            if !alive {
-                break;
-            }
-        })
-        .detach();
         chat
     }
 
@@ -454,6 +501,9 @@ impl TerminalCard {
         self.view_zoom = zoom;
         self.view_offset_x = offset_x;
         self.view_offset_y = offset_y;
+        if let Some(chat) = &self.chat {
+            chat.update(cx, |chat, cx| chat.set_zoom(zoom, cx));
+        }
         if zoom_changed {
             self.terminal.update(cx, |terminal, cx| {
                 let mut config = terminal.config().clone();
@@ -658,13 +708,20 @@ impl Render for TerminalCard {
         let select_canvas = self.canvas.clone();
         let canvas = self.canvas.clone();
         let bounds_canvas = self.canvas.clone();
+        let chat_canvas = self.canvas.clone();
         let saved_bounds = card_bounds(&self.bounds);
         let entity_id = cx.entity_id();
-        let title_scroll_canvas = self.canvas.clone();
-        let path_scroll_canvas = self.canvas.clone();
         let scrollbar_terminal = self.terminal.clone();
         let zoom = self.view_zoom;
         let agent = self.agent();
+        let admin = self.admin;
+        let role_selector = if admin {
+            "agent-role-admin"
+        } else {
+            "agent-role-member"
+        };
+        let role_icon = if admin { "admin.svg" } else { "member.svg" };
+        let role_color = if admin { COLOR_ACCENT } else { COLOR_MUTED };
         let chat_mode = self.view == AgentView::Chat;
         let next_view = if chat_mode {
             AgentView::Terminal
@@ -677,6 +734,7 @@ impl Render for TerminalCard {
             None
         };
         let is_agent = agent.is_some();
+        let card_chat = chat.clone();
         let left = f32::from(self.bounds.origin.x) * zoom + self.view_offset_x;
         let top = f32::from(self.bounds.origin.y) * zoom + self.view_offset_y;
         let width = f32::from(self.bounds.size.width) * zoom;
@@ -694,7 +752,7 @@ impl Render for TerminalCard {
             .id(("card-select", id))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, _, _, cx| {
+                cx.listener(move |this, _, window, cx| {
                     if this.connect_mode {
                         let canvas = this.canvas.clone();
                         let _ = canvas.update(cx, |canvas, cx| {
@@ -705,6 +763,9 @@ impl Render for TerminalCard {
                     }
                     let _ =
                         select_canvas.update(cx, |canvas, cx| canvas.select(workspace_id, id, cx));
+                    if let Some(chat) = &card_chat {
+                        chat.update(cx, |chat, cx| chat.focus_input(window, cx));
+                    }
                     cx.stop_propagation();
                 }),
             )
@@ -728,6 +789,11 @@ impl Render for TerminalCard {
                 MouseButton::Left,
                 cx.listener(move |this, _, _, cx| this.end_drag(cx)),
             )
+            // A wheel anywhere over the card belongs to the card. Inner
+            // scroll areas (chat log, model lists, terminal history) run
+            // first because they are painted later; this only stops the
+            // event before the canvas viewport pans.
+            .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.stop_propagation()))
             .absolute()
             .left(px(left))
             .top(px(top))
@@ -758,20 +824,6 @@ impl Render for TerminalCard {
                     .h(px(TITLE_HEIGHT))
                     .px_2()
                     .bg(rgb(COLOR_ELEVATED))
-                    .on_scroll_wheel(cx.listener(move |_, event: &ScrollWheelEvent, _, cx| {
-                        let (dx, dy) = scroll_delta(event);
-                        let _ = title_scroll_canvas.update(cx, |canvas, cx| {
-                            canvas.apply_scroll(
-                                event.position,
-                                dx,
-                                dy,
-                                event.modifiers.control,
-                                event.modifiers.shift,
-                cx,
-                            )
-                        });
-                        cx.stop_propagation();
-                    }))
                     .text_color(rgb(COLOR_FOREGROUND))
                     .child(
                         div()
@@ -814,6 +866,23 @@ impl Render for TerminalCard {
                                             .text_color(rgb(agent_color(icon))),
                                     )
                                     .child(div().child(name))
+                                    .child(
+                                        div()
+                                            .id(("agent-role", id))
+                                            .debug_selector(move || role_selector.to_string())
+                                            .w(px(AGENT_ROLE_ICON))
+                                            .h(px(AGENT_ROLE_ICON))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .child(
+                                                svg()
+                                                    .path(role_icon)
+                                                    .w(px(AGENT_ROLE_ICON))
+                                                    .h(px(AGENT_ROLE_ICON))
+                                                    .text_color(rgb(role_color)),
+                                            ),
+                                    )
                             })
                             .when(agent.is_none(), |title| {
                                 title
@@ -876,6 +945,7 @@ impl Render for TerminalCard {
                                             if next_view == AgentView::Chat {
                                                 let chat = this.ensure_chat(window, cx);
                                                 chat.update(cx, |chat, cx| {
+                                                    chat.refresh_for_open(cx);
                                                     chat.focus_input(window, cx)
                                                 });
                                             } else {
@@ -960,25 +1030,12 @@ impl Render for TerminalCard {
                     .px_2()
                     .overflow_hidden()
                     .bg(rgb(COLOR_PANEL))
-                    .on_scroll_wheel(cx.listener(move |_, event: &ScrollWheelEvent, _, cx| {
-                        let (dx, dy) = scroll_delta(event);
-                        let _ = path_scroll_canvas.update(cx, |canvas, cx| {
-                            canvas.apply_scroll(
-                                event.position,
-                                dx,
-                                dy,
-                                event.modifiers.control,
-                                event.modifiers.shift,
-                cx,
-                            )
-                        });
-                        cx.stop_propagation();
-                    }))
                     .text_size(px(FONT_CARD_PATH * zoom))
                     .text_color(rgb(COLOR_MUTED))
                     .child(self.root.to_string_lossy().into_owned()),
             )
             .when_some(chat, |card, chat| {
+                let chat_focus = chat.clone();
                 card.child(
                     div()
                         .id("chat-view-host")
@@ -988,6 +1045,25 @@ impl Render for TerminalCard {
                         .right(px(0.0))
                         .top(px(TITLE_HEIGHT))
                         .bottom(px(PATH_HEIGHT))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, window, cx| {
+                                if this.connect_mode {
+                                    let canvas = this.canvas.clone();
+                                    let _ = canvas.update(cx, |canvas, cx| {
+                                        canvas.complete_connect(ConnectionTarget::Card(id), cx)
+                                    });
+                                } else {
+                                    let _ = chat_canvas.update(cx, |canvas, cx| {
+                                        canvas.select(workspace_id, id, cx)
+                                    });
+                                }
+                                chat_focus.update(cx, |chat, cx| {
+                                    chat.focus_input(window, cx)
+                                });
+                                cx.stop_propagation();
+                            }),
+                        )
                         .child(chat),
                 )
             })

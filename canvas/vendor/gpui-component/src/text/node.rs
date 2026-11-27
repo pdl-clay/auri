@@ -377,6 +377,7 @@ impl CodeBlock {
             .child(
                 div()
                     .id("codeblock")
+                    .debug_selector(|| "chat-codeblock".to_string())
                     .p_3()
                     .rounded(cx.theme().radius)
                     .bg(cx.theme().muted)

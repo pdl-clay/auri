@@ -1,7 +1,100 @@
 # Auri — visualização de chat por cartão de agente
 
 Data: 2026-11-26
-Status: desenho para aprovação
+Status: aprovado; revisado em 2026-11-26 para sessão estruturada no OMP
+
+## Atualização — sessão estruturada no OMP
+
+O chat do OMP volta a ler o JSONL da sessão. Essa é a única fonte que separa a
+resposta final (`message/assistant` sem `toolCall`, com `stopReason` de fim)
+da narração intermediária (`text` + `toolCall` em `stopReason: toolUse`),
+pensamentos e resultados de ferramenta. A bolha do agente recebe apenas a
+resposta final; os demais eventos viram a linha de status.
+
+O cartão acompanha o breadcrumb do TTY (`~/.omp/agent/terminal-sessions/pts-N`)
+enquanto o chat está aberto. Quando `/clear` ou uma sessão nova troca o arquivo,
+o chat descarrega o histórico antigo, começa a ler o novo JSONL e persiste o
+novo caminho no workspace para o próximo reload.
+
+Agentes sem sessão estruturada (Claude, Codex, Pi, Open Code e agentes custom)
+continuam usando o texto visível do terminal. A extração nesse caso pega o
+último bloco sem recuo depois do eco do usuário, ignora caixas de ferramenta e
+linhas de pensamento e nunca trata a narração antes de uma ferramenta como
+resposta. Esse filtro também funciona quando a tela rolou.
+
+O composer é totalmente arredondado: anexo à esquerda (40×40, ícone 19), input
+no centro e um botão de pausa à direita (40×40, ícone 20, fundo vermelho e
+ícone branco). Enquanto o agente trabalha, um balão à esquerda do chat mostra
+três pontos animados em onda com o status (`pensando…`, `usando
+<ferramenta>…`, `escrevendo…`); a linha de status acima do input foi removida.
+A pausa envia Escape ao OMP (`app.interrupt`) e Ctrl+C aos demais; a fila local
+é descartada.
+
+As mensagens usam o estilo do WhatsApp: bolha verde do usuário e azul do
+agente, com rabicho no canto superior e sem borda.
+
+## Modelos
+
+O chat do OMP tem um seletor de modelos no topo direito. A lista é obtida de
+`omp models --json` a cada abertura, com drawer de provedores à esquerda,
+modelos do provedor à direita, scroll nas duas colunas, busca pill e botão de
+atualização; nada é hardcoded. A troca abre o model picker nativo do OMP
+(`Alt+P`) e envia o selector; escrever `/model` no PTY vira um prompt normal,
+então não é usado. O modelo atual é lido do evento `model_change`; o chip mostra
+`trocando…` até o evento chegar. O input de busca usa `RADIUS_INPUT`, o mesmo
+pill do composer, que é o padrão dos campos de texto da interface.
+
+Dentro do provedor selecionado, o modelo atual aparece **primeiro** na lista,
+mesmo que o catálogo o ordene depois dos outros; o resto mantém a ordem do
+catálogo. O provedor dono do modelo atual usa um ponto accent antes do nome,
+independentemente do provedor que está aberto no drawer.
+
+O chip abre já com o modelo selecionado no CLI. Em cartões sem sessão (ou sem
+evento de modelo nela), o ponto de partida é `modelRoles.default` do
+`~/.omp/agent/config.yml`, respeitando `PI_CODING_AGENT_DIR`. Quando a janela de
+eventos inicial não inclui o começo de uma sessão grande, o chat varre o JSONL
+de trás para frente e usa o último `model_change` (ou o `provider`/`model` da
+última mensagem do assistente), sem bloquear a UI; esse modelo substitui o
+padrão, que permanece como fallback.
+
+O catálogo é cacheado em `$XDG_CACHE_HOME/auro-canvas/models.json`. Ao abrir o
+seletor, o cache aparece na hora e um `omp models --json` roda em background;
+só um catálogo que trouxe um modelo novo substitui o cache. Assim a tela de
+“Carregando modelos…” só existe na primeiríssima execução, sem cache.
+
+A roda do mouse sobre qualquer parte do cartão pertence ao cartão: a lista de
+modelos, o histórico do chat e o terminal rolam até o fim sem deslocar o
+canvas. O cartão inteiro interrompe a propagação do evento de roda; as áreas
+roláveis internas rodam primeiro e o viewport do canvas nunca recebe o mesmo
+gesto.
+
+## Tool ask
+
+O tool `ask` chega no JSONL como um `toolCall` com `arguments.html`. O chat
+converte o HTML (fieldset/legend/p/label/input radio|checkbox|text) em um balão
+de pergunta com opções. Cada pergunta de escolha ganha a linha implícita
+**Outra resposta…**, que é o `Other (type your own)` que o TUI anexa depois das
+opções; campos `<input type=text>` e `<textarea>` ganham um campo editável no
+próprio balão. A resposta é enviada ao TUI como a sequência de navegação
+(`↑`/`↓`), `Space` para marcar, `Tab` para avançar e `Enter` no Submit; uma
+pergunta por vez, com uma pausa curta entre elas. Uma resposta customizada é
+digitada no editor de Other do TUI **depois** de navegar até ele, sem `Space`
+(no TUI, Space insere um espaço no texto, não seleciona a linha). O `toolResult`
+fecha o formulário e a resposta vira bolha do usuário. Formulários fora desse
+subconjunto continuam pedindo o terminal.
+
+Os botões **Cancelar** e **Enviar** são pills, no mesmo raio dos campos de
+texto. Cancelar usa um fundo elevado e texto muted; Enviar usa o accent e só
+habilita quando todas as perguntas obrigatórias têm resposta.
+
+O overlay do chat consome o mouse down para que o card não roube o foco do
+campo. O terminal continua montado por baixo; a troca não recria o PTY.
+
+Consequências aceitas: o status é “pensando…” / “escrevendo…” (sem nome de
+ferramenta); respostas maiores que o viewport de um agente não-OMP podem ser
+truncadas; anexos são caminhos, não bytes. As seções abaixo que descrevem o
+parser JSONL continuam válidas; a atualização de 2026-11-26 que dizia “fonte
+única no terminal” foi substituída por esta.
 
 ## Intenção
 
@@ -33,8 +126,15 @@ markdown e blocos de código fáceis de copiar.
   Pensamento, chamadas de ferramenta e resultados viram uma **linha de status**:
   “pensando…”, “chamando ferramenta X”, “escrevendo…”.
 - O input aceita várias mensagens enquanto o agente trabalha e **envia em fila**.
-- Digitar `/` abre um seletor de skills. O OMP registra skill como
-  `/skill:nome`; o seletor insere esse comando no input.
+- ↑/↓ relembram os prompts já enviados; depois do mais recente vem sempre o
+  input vazio. O histórico é em memória do cartão e limitado a 200 entradas.
+- Clicar em qualquer ponto do cartão — corpo ou cabeçalho — coloca o caret no
+  input do chat.
+- Esc interrompe o turno ativo, exatamente como o botão de pausa.
+- Digitar `/` abre um seletor de comandos do chat e skills. O OMP registra
+  skill como `/skill:nome`; o seletor insere esse comando no input. `/new`
+  começa uma nova sessão no cartão. Enter preenche e envia a linha destacada;
+  sem linhas, envia o texto digitado (ex.: `/clear`).
 - Texto é renderizado como markdown. Blocos de código têm ação de **copiar**.
 
 ## Objetivos
@@ -50,7 +150,8 @@ markdown e blocos de código fáceis de copiar.
 
 - Não mudar o protocolo do OMP nem os CLIs dos outros agentes.
 - Não editar, apagar ou reagir a mensagens.
-- Não anexar arquivos, imagens ou áudio.
+- Não anexar áudio; imagem e documento entram como caminho com preview, não
+  como bytes enviados ao agente.
 - Não mostrar cartões ricos de ferramenta; ferramenta é status.
 - Não persistir o histórico de chat de agentes não-OMP.
 - Não criar chat para terminais comuns, só para cartões de agente.
@@ -91,6 +192,35 @@ markdown e blocos de código fáceis de copiar.
 - Botão de enviar desabilitado apenas quando o campo está vazio ou o agente
   encerrou.
 - O input não envia texto para agentes encerrados.
+- Anexos do seletor nativo viram quadrados arredondados de 64 px acima do
+  input. Imagem mostra a própria miniatura; documento mostra a logo de arquivo
+  (ou de código) com a extensão. O × do quadrado remove o caminho do input.
+- Ctrl+V com uma imagem na área de transferência grava os bytes em
+  `$XDG_CACHE_HOME/auro-canvas/paste/` e anexa o caminho com preview. Texto
+  colado continua indo para o input normalmente.
+- O medidor de contexto fica à direita do input, antes do pause: um anel de
+  40 px com 28 barras finas de 6,5 px, preenchido até o uso atual, com a cor
+  interpolada verde → dourado → vermelho. Sem ponto central e sem barra
+  separada.
+- O uso vem de `usage.contextTokens` quando o provedor o informa; senão, dos
+  tokens de prompt (`input + cacheRead + cacheWrite`) da última resposta do
+  assistente, inclusive turnos de ferramenta. O `totalTokens` fica como
+  fallback de transcrições antigas porque inclui a resposta, que não faz parte
+  do contexto do próximo turno. Usage zero de turno abortado não apaga o anel.
+- Cada resposta anexada ao JSONL atualiza o medidor; ele não conserva o valor
+  da abertura. Depois de uma compactação, o novo usage (menor) assume o anel,
+  que fica esmaecido por 2 s.
+- O teto vem do `contextWindow` do modelo no catálogo. Com o modelo conhecido e
+  usage zero, o anel aparece vazio em 0%; ele fica oculto só quando falta o
+  `contextWindow`. Enquanto o agente trabalha, um brilho percorre o arco; uma
+  queda de mais de 40% no contexto apaga o anel por 2 s enquanto o autocompact
+  roda.
+- O chat inteiro escala com o zoom do canvas, em proporção ao cartão: zoom
+  out/in não muda mais as proporções do composer, das bolhas ou do medidor.
+- O bloco de código escala por inteiro — padding, raio, fonte e botão Copiar —
+  para não crescer no zoom out nem encolher no zoom in.
+- O scroll do chat preserva a fração da posição ao mudar o zoom; se estava no
+  fim, continua no fim, sem saltar para cima ou para baixo.
 
 **Submit por agente (decisão):** o OMP liga `ctrl+j`/`\n` a newline; enviar
 `texto\n` não submete. O adaptador do OMP manda uma linha simples como
@@ -123,13 +253,41 @@ primeiro corte. A diferença fica isolada num adaptador por `AgentKind`.
 
 - Abre quando o input começa com `/` (ou quando `/` é digitado no início de
   uma palavra, conforme o builder decidir).
+- Lista comandos do chat antes das skills; filtra ao digitar em ambos.
+- Comandos iniciais: `/new` (“Nova sessão para este cartão”), que insere o
+  comando nativo no input. Enter envia `/new` e o OMP abre uma sessão nova; o
+  breadcrumb do TTY leva o chat ao novo JSONL.
 - Lista skills com nome e descrição curta; filtra ao digitar.
-- Selecionar insere `/skill:nome ` no input; não envia sozinho.
+- Tab e clique inserem `/skill:nome ` (ou `/new`) no input. Enter seleciona a
+  linha destacada e a envia; sem nenhuma linha, o Enter manda o texto digitado
+  (assim `/clear` e outros comandos manuais continuam funcionando).
+- Sem navegação o destaque começa na primeira; ↑/↓ movem o destaque dentro
+  das até oito linhas visíveis, e o painel rola junto para manter o item
+  destacado visível.
 - Fontes de descoberta: os mesmos diretórios que o OMP usa para skills
   (`~/.agents/skills`, `.agents/skills` no workspace, `.omp/skills` e os demais
   diretórios já carregados pelo OMP). O primeiro corte pode limitar aos
   diretórios que o Auri instala/gerencia.
-- Sem skills encontradas: estado vazio explícito.
+- Sem comandos ou skills encontrados: estado vazio explícito.
+
+### Menções com `@`
+
+- Digitar `@` abre um seletor com os terminais, blocos de notas e agentes
+  **conectados diretamente** ao cartão que hospeda o chat.
+- A lista lê o store ao vivo: itens desconectados não aparecem e passam a
+  aparecer assim que uma conexão é criada. Conexões de outro workspace entram
+  com o sufixo `@ workspace`, igual ao `auri list`.
+- Terminais inserem `@Nome`; blocos de notas inserem `@note #<id>`.
+- Agentes inserem `@Nome (#<id>)` — com `#<id> @ workspace` quando remotos.
+- Toda menção prefixa o composer com `/skill:auri ` quando ele ainda não começa
+  por uma skill. A skill compartilhada é instalada em `~/.agents/skills/auri` e
+  `~/.claude/skills/auri`, então qualquer CLI a resolve sem caminho absoluto.
+  Isso vale para agente, terminal ou nota: o agente lê o protocolo de
+  `auri list`/`auri ask` antes de se comunicar.
+- Tab ou clique inserem a menção e mantêm o texto; Enter insere a linha
+  destacada sem enviar (a menção faz parte da mensagem). ↑/↓ navegam e o texto
+  depois do `@` filtra por nome, tipo ou workspace.
+- Sem itens conectados: estado vazio explícito.
 
 ### Markdown e blocos de código
 

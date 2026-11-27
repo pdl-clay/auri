@@ -16,6 +16,57 @@ fn bounds() -> CardBounds {
     CardBounds { x: 0.0, y: 0.0, width: 100.0, height: 100.0 }
 }
 
+/// The old filter stopped at the first tool box, so intermediate "vou ler"
+/// narration became the bubble and the real answer was thrown away.
+#[test]
+fn chat_bubble_keeps_the_answer_after_the_last_tool_box() {
+    let before = vec!["❯".to_string()];
+    let after = vec![
+        "❯".to_string(),
+        "revise o parser".to_string(),
+        "Vou olhar o parser agora.".to_string(),
+        "╭─── lendo parser.rs ─────╮".to_string(),
+        "│ read parser.rs         │".to_string(),
+        "╰─── ⏱ 0.4s ─────────────╯".to_string(),
+        " ✔ Read parser.rs".to_string(),
+        "Encontrei um caso de linha truncada.".to_string(),
+        " ⠙ 18s > ◕ Hy4 flash Free".to_string(),
+        "╰─".to_string(),
+    ];
+    assert_eq!(
+        crate::chat::final_answer_text(&before, &after, Some("revise o parser")),
+        Some("Encontrei um caso de linha truncada.".to_string())
+    );
+}
+
+/// A scrolled screen has no common prefix with the send-time snapshot; the
+/// answer must still be the last block after the user's echo, not the history.
+#[test]
+fn chat_bubble_survives_a_scrolled_terminal() {
+    let before = vec![
+        "resposta antiga".to_string(),
+        "mais linhas".to_string(),
+        "e mais".to_string(),
+    ];
+    let after = vec![
+        "resposta antiga".to_string(),
+        "❯".to_string(),
+        "nova pergunta".to_string(),
+        "Vou olhar o parser agora.".to_string(),
+        "╭─── lendo parser.rs ─────╮".to_string(),
+        "│ read parser.rs         │".to_string(),
+        "╰─── ⏱ 0.4s ─────────────╯".to_string(),
+        " ✔ Read parser.rs".to_string(),
+        "Resposta nova do modelo.".to_string(),
+        " ⠙ 18s > ◕ Hy4 flash Free".to_string(),
+        "╰─".to_string(),
+    ];
+    assert_eq!(
+        crate::chat::final_answer_text(&before, &after, Some("nova pergunta")),
+        Some("Resposta nova do modelo.".to_string())
+    );
+}
+
 #[test]
 fn edit_dialog_opens_from_agent_menu() {
     let (mut menu, mut shell) = test_support::agent_menu_and_shell();
@@ -217,6 +268,223 @@ fn clicking_the_view_toggle_does_not_reenter_the_card() {
 }
 
 #[test]
+fn refresh_for_open_reads_the_latest_omp_default_model() {
+    use crate::canvas::Canvas;
+    use crate::config::LoadOutcome;
+    use auro::gpui::AppContext;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.yml");
+    std::fs::write(&config, "modelRoles:\n  default: test/default-model\n").unwrap();
+
+    let mut cx = cross_test_cx();
+    let mut store = WorkspaceStore::new();
+    let workspace = store.add("A".into(), WorkspaceIcon::Star, std::env::temp_dir());
+    let agent = store
+        .workspace_mut(workspace.id)
+        .unwrap()
+        .canvas
+        .add_agent(AgentKind::Omp, bounds());
+    store
+        .workspace_mut(workspace.id)
+        .unwrap()
+        .canvas
+        .set_agent_view(agent.id, AgentView::Chat);
+    store.workspace_mut(workspace.id).unwrap().mark_loaded();
+
+    let slot = Rc::new(RefCell::new(None));
+    let captured = slot.clone();
+    let (_, vcx) = cx.add_window_view(|window, cx| {
+        let handle = window.window_handle();
+        let canvas = cx
+            .new(|cx| Canvas::new(store.clone(), LoadOutcome::Loaded, handle, None, cx));
+        *captured.borrow_mut() = Some(canvas.clone());
+        gpui_component::Root::new(canvas, window, cx)
+    });
+    let view = slot.borrow().clone().expect("the canvas");
+    vcx.update(|_, cx| {
+        view.update(cx, |canvas, cx| {
+            test_support::mount_agent_for_test(canvas, workspace.id, agent.id, cx);
+            canvas.select(workspace.id, agent.id, cx);
+            cx.notify();
+        });
+    });
+    vcx.run_until_parked();
+    vcx.update(|_, cx| {
+        assert!(
+            view.update(cx, |canvas, cx| {
+                test_support::card_chat_use_config(
+                    canvas,
+                    workspace.id,
+                    agent.id,
+                    config.clone(),
+                    cx,
+                )
+            }),
+            "the chat entity must exist for a saved chat view"
+        );
+    });
+    vcx.update(|_, cx| {
+        assert!(
+            view.update(cx, |canvas, cx| {
+                test_support::card_chat_refresh(canvas, workspace.id, agent.id, cx)
+            }),
+            "the chat entity must refresh"
+        );
+    });
+    assert_eq!(
+        vcx.update(|_, cx| {
+            test_support::card_chat_model(view.read(cx), workspace.id, agent.id, cx)
+        })
+        .as_deref(),
+        Some("test/default-model"),
+        "the open refresh must read the OMP default"
+    );
+
+    std::fs::write(&config, "modelRoles:\n  default: test/after-toggle\n").unwrap();
+    vcx.update(|_, cx| {
+        view.update(cx, |canvas, cx| {
+            test_support::card_chat_refresh(canvas, workspace.id, agent.id, cx)
+        });
+    });
+    let model = vcx.update(|_, cx| {
+        test_support::card_chat_model(view.read(cx), workspace.id, agent.id, cx)
+    });
+    assert_eq!(
+        model.as_deref(),
+        Some("test/after-toggle"),
+        "opening the chat again must load the model OMP has as default now"
+    );
+}
+
+#[test]
+fn clicking_chat_body_selects_the_card() {
+    use crate::canvas::Canvas;
+    use crate::config::LoadOutcome;
+    use auro::gpui::{AppContext, Modifiers};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let mut cx = cross_test_cx();
+    let mut store = WorkspaceStore::new();
+    let workspace = store.add("A".into(), WorkspaceIcon::Star, std::env::temp_dir());
+    let agent = store
+        .workspace_mut(workspace.id)
+        .unwrap()
+        .canvas
+        .add_agent(AgentKind::Omp, bounds());
+    store
+        .workspace_mut(workspace.id)
+        .unwrap()
+        .canvas
+        .set_agent_view(agent.id, AgentView::Chat);
+
+    let slot = Rc::new(RefCell::new(None));
+    let captured = slot.clone();
+    let (_, vcx) = cx.add_window_view(|window, cx| {
+        let handle = window.window_handle();
+        let canvas = cx.new(|cx| {
+            Canvas::new(store.clone(), LoadOutcome::Loaded, handle, None, cx)
+        });
+        *captured.borrow_mut() = Some(canvas.clone());
+        gpui_component::Root::new(canvas, window, cx)
+    });
+    let view = slot.borrow().clone().expect("the canvas");
+    vcx.update(|window, cx| {
+        view.update(cx, |canvas, cx| canvas.load_workspace(workspace.id, window, cx));
+    });
+    vcx.run_until_parked();
+
+    vcx.update(|_, cx| {
+        view.update(cx, |canvas, cx| test_support::clear_selection(canvas, cx));
+    });
+    vcx.run_until_parked();
+    let (_, before, _) = vcx.read(|cx| test_support::selection_state(view.read(cx)));
+    assert_eq!(before, None, "a fresh load must not preselect a card");
+    let log = vcx.debug_bounds("chat-log").expect("chat log");
+    vcx.simulate_click(log.center(), Modifiers::none());
+    vcx.run_until_parked();
+
+    let (_, card, _) = vcx.read(|cx| test_support::selection_state(view.read(cx)));
+    assert_eq!(
+        card,
+        Some(ConnectionTarget::Card(agent.id)),
+        "a press inside the chat view must select the card"
+    );
+    vcx.update(|window, cx| {
+        let focus =
+            test_support::card_chat_focus(view.read(cx), workspace.id, agent.id, cx)
+                .expect("the chat composer");
+        assert!(
+            focus.is_focused(window),
+            "a press anywhere in the chat body must focus the composer"
+        );
+    });
+}
+
+#[test]
+fn admin_badge_marks_admin_and_member_agents() {
+    use crate::canvas::Canvas;
+    use crate::config::LoadOutcome;
+
+    let mut cx = cross_test_cx();
+    let mut store = WorkspaceStore::new();
+    let workspace = store.add("A".into(), WorkspaceIcon::Star, std::env::temp_dir());
+    let admin = store
+        .workspace_mut(workspace.id)
+        .unwrap()
+        .canvas
+        .add_agent(
+            AgentKind::Omp,
+            CardBounds { x: 0.0, y: 0.0, width: 400.0, height: 240.0 },
+        );
+    let member = store
+        .workspace_mut(workspace.id)
+        .unwrap()
+        .canvas
+        .add_agent(
+            AgentKind::Claude,
+            CardBounds { x: 500.0, y: 0.0, width: 400.0, height: 240.0 },
+        );
+    store
+        .workspace_mut(workspace.id)
+        .unwrap()
+        .canvas
+        .set_agent_admin(admin.id, true);
+    store.workspace_mut(workspace.id).unwrap().mark_loaded();
+
+    let (view, vcx) = cx.add_window_view(|window, cx| {
+        Canvas::new(
+            store.clone(),
+            LoadOutcome::Loaded,
+            window.window_handle(),
+            None,
+            cx,
+        )
+    });
+    vcx.update(|_window, cx| {
+        view.update(cx, |canvas, cx| {
+            test_support::mount_agent_for_test(canvas, workspace.id, admin.id, cx);
+            test_support::mount_agent_for_test(canvas, workspace.id, member.id, cx);
+            canvas.select(workspace.id, admin.id, cx);
+            cx.notify();
+        });
+    });
+    vcx.run_until_parked();
+
+    assert!(
+        vcx.debug_bounds("agent-role-admin").is_some(),
+        "the admin agent needs the shield badge"
+    );
+    assert!(
+        vcx.debug_bounds("agent-role-member").is_some(),
+        "the normal agent needs the member badge"
+    );
+}
+
+#[test]
 fn agent_view_reopens_saved_mode() {
     use crate::canvas::Canvas;
     use crate::config::LoadOutcome;
@@ -265,7 +533,114 @@ fn agent_view_reopens_saved_mode() {
 }
 
 #[test]
-fn chat_loads_omp_history_from_a_session_file() {
+fn clicking_chat_input_focuses_it() {
+    use crate::canvas::Canvas;
+    use crate::config::LoadOutcome;
+    use auro::gpui::{AppContext, Modifiers};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let mut cx = cross_test_cx();
+    let mut store = WorkspaceStore::new();
+    let workspace = store.add("A".into(), WorkspaceIcon::Star, std::env::temp_dir());
+    let agent = store
+        .workspace_mut(workspace.id)
+        .unwrap()
+        .canvas
+        .add_agent(AgentKind::Claude, bounds());
+    store
+        .workspace_mut(workspace.id)
+        .unwrap()
+        .canvas
+        .set_agent_view(agent.id, AgentView::Chat);
+
+    let slot = Rc::new(RefCell::new(None));
+    let captured = slot.clone();
+    let (_, vcx) = cx.add_window_view(|window, cx| {
+        let handle = window.window_handle();
+        let canvas = cx.new(|cx| {
+            Canvas::new(store.clone(), LoadOutcome::Loaded, handle, None, cx)
+        });
+        *captured.borrow_mut() = Some(canvas.clone());
+        gpui_component::Root::new(canvas, window, cx)
+    });
+    let view = slot.borrow().clone().expect("the canvas");
+    vcx.update(|window, cx| {
+        view.update(cx, |canvas, cx| {
+            canvas.load_workspace(workspace.id, window, cx);
+        });
+    });
+    vcx.run_until_parked();
+    let input = vcx.debug_bounds("chat-input").expect("the chat composer");
+    vcx.simulate_click(input.center(), Modifiers::none());
+    vcx.run_until_parked();
+    vcx.update(|window, cx| {
+        let focus = test_support::card_chat_focus(view.read(cx), workspace.id, agent.id, cx)
+            .expect("the mounted chat composer");
+        assert!(focus.is_focused(window), "clicking the composer must put the caret in it");
+    });
+}
+
+#[test]
+fn wheel_over_a_card_does_not_pan_the_canvas() {
+    use crate::canvas::Canvas;
+    use crate::config::LoadOutcome;
+    use auro::gpui::{Modifiers, ScrollDelta, ScrollWheelEvent, TouchPhase, point, px};
+
+    let mut cx = cross_test_cx();
+    let mut store = WorkspaceStore::new();
+    let workspace = store.add("A".into(), WorkspaceIcon::Star, std::env::temp_dir());
+    let agent = store
+        .workspace_mut(workspace.id)
+        .unwrap()
+        .canvas
+        .add_agent(
+            AgentKind::Claude,
+            CardBounds { x: 0.0, y: 0.0, width: 640.0, height: 480.0 },
+        );
+    store
+        .workspace_mut(workspace.id)
+        .unwrap()
+        .canvas
+        .set_agent_view(agent.id, AgentView::Chat);
+    store.workspace_mut(workspace.id).unwrap().mark_loaded();
+
+    let (view, vcx) = cx.add_window_view(|window, cx| {
+        Canvas::new(
+            store.clone(),
+            LoadOutcome::Loaded,
+            window.window_handle(),
+            None,
+            cx,
+        )
+    });
+    vcx.update(|_, cx| {
+        view.update(cx, |canvas, cx| {
+            test_support::mount_agent_for_test(canvas, workspace.id, agent.id, cx);
+            canvas.select(workspace.id, agent.id, cx);
+            cx.notify();
+        });
+    });
+    vcx.run_until_parked();
+
+    let before = vcx.debug_bounds("chat-view").expect("the chat view");
+    vcx.simulate_event(ScrollWheelEvent {
+        position: before.center(),
+        delta: ScrollDelta::Pixels(point(px(0.0), px(120.0))),
+        modifiers: Modifiers::none(),
+        touch_phase: TouchPhase::Moved,
+    });
+    vcx.run_until_parked();
+
+    let after = vcx.debug_bounds("chat-view").expect("the chat view");
+    assert_eq!(
+        after, before,
+        "a wheel over a card must never pan the canvas, even when nothing inside scrolls"
+    );
+}
+
+#[test]
+fn chat_reads_omp_session_history() {
     use crate::canvas::Canvas;
     use crate::config::LoadOutcome;
     use std::io::Write;
@@ -274,7 +649,7 @@ fn chat_loads_omp_history_from_a_session_file() {
     let session_path = dir.path().join("session.jsonl");
     let mut file = std::fs::File::create(&session_path).unwrap();
     writeln!(file, r#"{{"type":"message","message":{{"role":"user","content":[{{"type":"text","text":"oi"}}]}}}}"#).unwrap();
-    writeln!(file, r#"{{"type":"message","message":{{"role":"assistant","content":[{{"type":"text","text":"olá"}}]}}}}"#).unwrap();
+    writeln!(file, r#"{{"type":"message","message":{{"role":"assistant","stopReason":"stop","content":[{{"type":"text","text":"olá"}}]}}}}"#).unwrap();
     drop(file);
 
     let mut cx = cross_test_cx();
@@ -315,7 +690,14 @@ fn chat_loads_omp_history_from_a_session_file() {
     });
     vcx.run_until_parked();
     assert!(vcx.debug_bounds("chat-message-0").is_some());
-    assert!(vcx.debug_bounds("chat-message-1").is_some());
+    assert!(
+        vcx.debug_bounds("chat-message-1").is_some(),
+        "the final answer from the session must be in the chat"
+    );
+    assert!(
+        vcx.debug_bounds("chat-status").is_none(),
+        "loading history must not leave a live status"
+    );
 }
 
 #[test]

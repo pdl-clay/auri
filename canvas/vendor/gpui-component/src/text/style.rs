@@ -28,6 +28,8 @@ impl PartialEq for TextViewStyle {
         self.paragraph_gap == other.paragraph_gap
             && self.heading_base_font_size == other.heading_base_font_size
             && self.highlight_theme == other.highlight_theme
+            && self.code_block == other.code_block
+            && self.is_dark == other.is_dark
     }
 }
 

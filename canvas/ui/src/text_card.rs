@@ -354,6 +354,7 @@ impl Render for TextCard {
         let height = f32::from(self.bounds.size.height) * zoom;
         div()
             .id(("text-card", id))
+            .debug_selector(|| "note-card".to_string())
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, window, cx| {
@@ -413,7 +414,7 @@ impl Render for TextCard {
             .flex()
             .flex_col()
             .overflow_hidden()
-            .rounded(px(RADIUS_CONTROL))
+            .rounded(px(RADIUS_CONTROL * zoom))
             .bg(rgb(COLOR_NOTE_BG))
             .text_size(px(FONT_NOTE_BODY * zoom))
             .when(selected, |card| {
@@ -432,8 +433,8 @@ impl Render for TextCard {
                     .flex_none()
                     .items_center()
                     .justify_between()
-                    .h(px(TITLE_HEIGHT))
-                    .px_2()
+                    .h(px(TITLE_HEIGHT * zoom))
+                    .px(px(SPACE_NORMAL * zoom))
                     .child(
                         div()
                             .text_size(px(FONT_NOTE_TITLE * zoom))
@@ -443,13 +444,13 @@ impl Render for TextCard {
                     .child(
                         div()
                             .id(("close-text-card", id))
-                            .w(px(CLOSE_BUTTON_SIZE))
-                            .h(px(CLOSE_BUTTON_SIZE))
+                            .w(px(CLOSE_BUTTON_SIZE * zoom))
+                            .h(px(CLOSE_BUTTON_SIZE * zoom))
                             .flex()
                             .items_center()
                             .justify_center()
-                            .rounded(px(RADIUS_CHIP))
-                            .text_size(px(CLOSE_ICON_SIZE))
+                            .rounded(px(RADIUS_CHIP * zoom))
+                            .text_size(px(CLOSE_ICON_SIZE * zoom))
                             .text_color(rgb(COLOR_NOTE_PLACEHOLDER))
                             .on_mouse_down(
                                 MouseButton::Left,
@@ -493,7 +494,8 @@ impl Render for TextCard {
                 div()
                     .flex_1()
                     .min_h_0()
-                    .p(px(TEXT_CARD_PADDING))
+                    .debug_selector(|| "note-body".to_string())
+                    .p(px(TEXT_CARD_PADDING * zoom))
                     .text_size(px(FONT_NOTE_BODY * zoom))
                     .child(
                         Input::new(&self.input)
@@ -501,6 +503,7 @@ impl Render for TextCard {
                             .bordered(false)
                             .focus_bordered(false)
                             .text_color(rgb(COLOR_NOTE_FG))
+                            .text_size(px(FONT_NOTE_BODY * zoom))
                             .when(connect_mode, |input| input.cursor(CursorStyle::Crosshair))
                             .h_full(),
                     ),

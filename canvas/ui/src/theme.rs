@@ -41,7 +41,9 @@ pub const ROW_ICON_SIZE: f32 = 12.;
 pub const RADIUS_CHIP: f32 = 4.;
 pub const RADIUS_CONTROL: f32 = 8.;
 pub const RADIUS_DIALOG: f32 = 14.;
-/// Picker action only: a pill marks the one control that opens a system dialog.
+/// All interface text fields are pills, matching the chat composer.
+pub const RADIUS_INPUT: f32 = RADIUS_PILL;
+/// Fully rounded pill: the standard for text fields and the picker action.
 pub const RADIUS_PILL: f32 = 999.;
 pub const ICON_SIZE: f32 = 16.;
 pub const COLOR_SWATCH_SIZE: f32 = 20.;
@@ -145,22 +147,75 @@ pub const UPDATE_CARD_WIDTH: f32 = 320.;
 
 // Agent chat view. The terminal stays behind it; these values only style the
 // conversation layer.
-pub const COLOR_CHAT_USER_BG: u32 = 0x2A3A4A;
-pub const COLOR_CHAT_USER_BORDER: u32 = 0x3D5368;
-pub const COLOR_CHAT_AGENT_BG: u32 = 0x1F2023;
+pub const COLOR_CHAT_USER_BG: u32 = 0x0F6B4E;
+pub const COLOR_CHAT_AGENT_BG: u32 = 0x1E4F7A;
 pub const CHAT_BUBBLE_RADIUS: f32 = 12.;
 pub const CHAT_BUBBLE_PADDING: f32 = 12.;
+pub const CHAT_BUBBLE_TAIL_RADIUS: f32 = 4.;
+pub const CHAT_TAIL_WIDTH: f32 = 10.;
+pub const CHAT_TAIL_HEIGHT: f32 = 12.;
+pub const CHAT_TAIL_OVERLAP: f32 = 1.;
 pub const CHAT_BUBBLE_GAP: f32 = 10.;
 pub const CHAT_BUBBLE_WIDTH: f32 = 0.82;
+pub const CHAT_MESSAGE_IMAGE_W: f32 = 96.;
+pub const CHAT_MESSAGE_IMAGE_H: f32 = 64.;
 pub const CHAT_TEXT_SIZE: f32 = FONT_NOTE_BODY;
 pub const CHAT_STATUS_FONT: f32 = FONT_CARD_PATH;
 pub const CHAT_COPY_HEIGHT: f32 = 22.;
-pub const CHAT_INPUT_MIN_ROWS: usize = 1;
-pub const CHAT_INPUT_MAX_ROWS: usize = 4;
 pub const CHAT_SKILLS_MAX_HEIGHT: f32 = 180.;
+/// Keyboard navigation reaches exactly the rows the panel shows; the list is
+/// capped instead of becoming an unbounded overlay.
+pub const CHAT_SKILLS_VISIBLE: usize = 8;
 pub const CHAT_COPY_RESERVE: f32 = 36.;
 pub const CHAT_CODE_FONT: f32 = 11.;
+pub const CHAT_CODE_PADDING: f32 = 12.;
 pub const CHAT_SKILL_GAP: f32 = 2.;
+pub const CHAT_ACTION_SIZE: f32 = 37.;
+pub const CHAT_ATTACH_ICON: f32 = 19.;
+pub const CHAT_ATTACH_PREVIEW: f32 = 64.;
+pub const CHAT_ATTACH_PREVIEW_ICON: f32 = 24.;
+pub const CHAT_ATTACH_LABEL_FONT: f32 = 9.;
+pub const CHAT_ATTACH_REMOVE: f32 = 16.;
+pub const CHAT_ATTACH_REMOVE_ICON: f32 = 10.;
+/// Images larger than this fall back to the file tile instead of decoding.
+pub const CHAT_ATTACH_IMAGE_MAX_BYTES: u64 = 32 * 1024 * 1024;
+pub const CHAT_STOP_ICON: f32 = 20.;
+pub const COLOR_CHAT_STOP_BG: u32 = 0xD64541;
+pub const COLOR_CHAT_STOP_FG: u32 = 0xFFFFFF;
+pub const COLOR_CHAT_ASK_OPTION: u32 = 0x2A5F8F;
+pub const COLOR_CHAT_ASK_OPTION_HOVER: u32 = 0x26537D;
+pub const CHAT_WAVE_DOT: f32 = 4.;
+pub const CHAT_WAVE_GAP: f32 = 3.;
+pub const CHAT_WAVE_HEIGHT: f32 = 14.;
+pub const CHAT_WAVE_AMPLITUDE: f32 = 3.;
+pub const CHAT_WAVE_DURATION_MS: u64 = 900;
+pub const CHAT_STATUS_GAP: f32 = 6.;
+pub const CHAT_STATUS_LABEL_FONT: f32 = 12.;
+pub const CHAT_STATUS_PADDING: f32 = 8.;
+pub const CHAT_MODEL_BAR_HEIGHT: f32 = 34.;
+pub const CHAT_MODEL_CHIP_HEIGHT: f32 = 24.;
+pub const CHAT_MODEL_FONT: f32 = 11.;
+pub const CHAT_MODEL_NAME_FONT: f32 = 12.;
+pub const CHAT_MODEL_PROVIDER_FONT: f32 = 10.;
+pub const CHAT_MODEL_MENU_WIDTH: f32 = 460.;
+pub const CHAT_MODEL_MENU_HEIGHT: f32 = 380.;
+pub const CHAT_MODEL_PROVIDER_WIDTH: f32 = 120.;
+pub const CHAT_MODEL_PROVIDER_ROW_FONT: f32 = 11.;
+pub const CHAT_MODEL_PROVIDER_COUNT_FONT: f32 = 10.;
+pub const CHAT_MODEL_DIVIDER_WIDTH: f32 = 1.;
+pub const CHAT_MODEL_ROW_GAP: f32 = 2.;
+/// Small status dot on the provider that owns the CLI's current model.
+pub const CHAT_MODEL_IN_USE_DOT: f32 = 6.;
+/// Context ring is 4px larger than the other 37px composer actions.
+pub const CHAT_CONTEXT_SIZE: f32 = CHAT_ACTION_SIZE + 4.;
+/// Twenty-eight radial bars, as in the approved gauge mock.
+pub const CHAT_CONTEXT_BARS: usize = 28;
+pub const CHAT_CONTEXT_BAR_WIDTH: f32 = 2.;
+pub const CHAT_CONTEXT_BAR_LENGTH: f32 = 6.5;
+pub const CHAT_CONTEXT_FONT: f32 = 10.;
+/// Gradient stops: green until half, gold at 80%, red beyond.
+pub const CHAT_CONTEXT_CALM: f32 = 0.5;
+pub const CHAT_CONTEXT_WARNING: f32 = 0.8;
 
 // Context menu.
 pub const CONTEXT_MENU_WIDTH: f32 = 180.;
@@ -176,6 +231,8 @@ pub const AGENT_DIALOG_HEIGHT: f32 = 320.;
 /// The edit form has the extra admin switch row, so it needs a taller token.
 pub const AGENT_EDIT_DIALOG_HEIGHT: f32 = 508.;
 pub const AGENT_TILE_SIZE: f32 = 32.;
+/// Small admin/member badge after the agent name in the card header.
+pub const AGENT_ROLE_ICON: f32 = 12.;
 
 use canvas_types::{AgentIcon, WorkspaceColor};
 
@@ -187,6 +244,37 @@ pub fn workspace_color(color: WorkspaceColor) -> u32 {
         WorkspaceColor::Red => COLOR_DANGER,
         WorkspaceColor::Green => COLOR_SUCCESS,
     }
+}
+
+/// Colour for one position along the gauge: green → gold → red.
+pub fn context_color(fraction: f32) -> u32 {
+    let fraction = fraction.clamp(0.0, 1.0);
+    if fraction <= CHAT_CONTEXT_CALM {
+        mix_color(
+            COLOR_SUCCESS,
+            COLOR_ACCENT,
+            fraction / CHAT_CONTEXT_CALM,
+        )
+    } else if fraction <= CHAT_CONTEXT_WARNING {
+        mix_color(
+            COLOR_ACCENT,
+            COLOR_DANGER,
+            (fraction - CHAT_CONTEXT_CALM) / (CHAT_CONTEXT_WARNING - CHAT_CONTEXT_CALM),
+        )
+    } else {
+        COLOR_DANGER
+    }
+}
+
+/// Interpolate two theme colours while the send button turns into pause.
+pub fn mix_color(from: u32, to: u32, t: f32) -> u32 {
+    let t = t.clamp(0.0, 1.0);
+    let channel = |shift: u32| {
+        let a = ((from >> shift) & 0xff) as f32;
+        let b = ((to >> shift) & 0xff) as f32;
+        ((a + (b - a) * t).round() as u32) << shift
+    };
+    channel(16) | channel(8) | channel(0)
 }
 
 /// Accent used for an agent's icon and menu tile.

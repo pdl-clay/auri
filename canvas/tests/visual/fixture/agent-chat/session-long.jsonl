@@ -1,0 +1,41 @@
+{"type":"model_change","model":"opencode-go/deepseek-v4.1-flash"}
+{"type":"message","message":{"role":"user","content":[{"type":"text","text":"Pergunta 1 sobre o parser."}]}}
+{"type":"message","message":{"role":"assistant","stopReason":"stop","usage":{"totalTokens":550000},"content":[{"type":"text","text":"Resposta 1 com texto suficiente para ocupar uma bolha e mais algumas linhas de conversa."}]}}
+{"type":"message","message":{"role":"user","content":[{"type":"text","text":"Pergunta 2 sobre o parser."}]}}
+{"type":"message","message":{"role":"assistant","stopReason":"stop","usage":{"totalTokens":550000},"content":[{"type":"text","text":"Resposta 2 com texto suficiente para ocupar uma bolha e mais algumas linhas de conversa."}]}}
+{"type":"message","message":{"role":"user","content":[{"type":"text","text":"Pergunta 3 sobre o parser."}]}}
+{"type":"message","message":{"role":"assistant","stopReason":"stop","usage":{"totalTokens":550000},"content":[{"type":"text","text":"Resposta 3 com texto suficiente para ocupar uma bolha e mais algumas linhas de conversa."}]}}
+{"type":"message","message":{"role":"user","content":[{"type":"text","text":"Pergunta 4 sobre o parser."}]}}
+{"type":"message","message":{"role":"assistant","stopReason":"stop","usage":{"totalTokens":550000},"content":[{"type":"text","text":"Resposta 4 com texto suficiente para ocupar uma bolha e mais algumas linhas de conversa."}]}}
+{"type":"message","message":{"role":"user","content":[{"type":"text","text":"Pergunta 5 sobre o parser."}]}}
+{"type":"message","message":{"role":"assistant","stopReason":"stop","usage":{"totalTokens":550000},"content":[{"type":"text","text":"Resposta 5 com texto suficiente para ocupar uma bolha e mais algumas linhas de conversa."}]}}
+{"type":"message","message":{"role":"user","content":[{"type":"text","text":"Pergunta 6 sobre o parser."}]}}
+{"type":"message","message":{"role":"assistant","stopReason":"stop","usage":{"totalTokens":550000},"content":[{"type":"text","text":"Resposta 6 com texto suficiente para ocupar uma bolha e mais algumas linhas de conversa."}]}}
+{"type":"message","message":{"role":"user","content":[{"type":"text","text":"Pergunta 7 sobre o parser."}]}}
+{"type":"message","message":{"role":"assistant","stopReason":"stop","usage":{"totalTokens":550000},"content":[{"type":"text","text":"Resposta 7 com texto suficiente para ocupar uma bolha e mais algumas linhas de conversa."}]}}
+{"type":"message","message":{"role":"user","content":[{"type":"text","text":"Pergunta 8 sobre o parser."}]}}
+{"type":"message","message":{"role":"assistant","stopReason":"stop","usage":{"totalTokens":550000},"content":[{"type":"text","text":"Resposta 8 com texto suficiente para ocupar uma bolha e mais algumas linhas de conversa."}]}}
+{"type":"message","message":{"role":"user","content":[{"type":"text","text":"Pergunta 9 sobre o parser."}]}}
+{"type":"message","message":{"role":"assistant","stopReason":"stop","usage":{"totalTokens":550000},"content":[{"type":"text","text":"Resposta 9 com texto suficiente para ocupar uma bolha e mais algumas linhas de conversa."}]}}
+{"type":"message","message":{"role":"user","content":[{"type":"text","text":"Pergunta 10 sobre o parser."}]}}
+{"type":"message","message":{"role":"assistant","stopReason":"stop","usage":{"totalTokens":550000},"content":[{"type":"text","text":"Resposta 10 com texto suficiente para ocupar uma bolha e mais algumas linhas de conversa."}]}}
+{"type":"message","message":{"role":"user","content":[{"type":"text","text":"Pergunta 11 sobre o parser."}]}}
+{"type":"message","message":{"role":"assistant","stopReason":"stop","usage":{"totalTokens":550000},"content":[{"type":"text","text":"Resposta 11 com texto suficiente para ocupar uma bolha e mais algumas linhas de conversa."}]}}
+{"type":"message","message":{"role":"user","content":[{"type":"text","text":"Pergunta 12 sobre o parser."}]}}
+{"type":"message","message":{"role":"assistant","stopReason":"stop","usage":{"totalTokens":550000},"content":[{"type":"text","text":"Resposta 12 com texto suficiente para ocupar uma bolha e mais algumas linhas de conversa."}]}}
+{"type":"message","message":{"role":"user","content":[{"type":"text","text":"Pergunta 13 sobre o parser."}]}}
+{"type":"message","message":{"role":"assistant","stopReason":"stop","usage":{"totalTokens":550000},"content":[{"type":"text","text":"Resposta 13 com texto suficiente para ocupar uma bolha e mais algumas linhas de conversa."}]}}
+{"type":"message","message":{"role":"user","content":[{"type":"text","text":"Pergunta 14 sobre o parser."}]}}
+{"type":"message","message":{"role":"assistant","stopReason":"stop","usage":{"totalTokens":550000},"content":[{"type":"text","text":"Resposta 14 com texto suficiente para ocupar uma bolha e mais algumas linhas de conversa."}]}}
+{"type":"message","message":{"role":"user","content":[{"type":"text","text":"Pergunta 15 sobre o parser."}]}}
+{"type":"message","message":{"role":"assistant","stopReason":"stop","usage":{"totalTokens":550000},"content":[{"type":"text","text":"Resposta 15 com texto suficiente para ocupar uma bolha e mais algumas linhas de conversa."}]}}
+{"type":"message","message":{"role":"user","content":[{"type":"text","text":"Pergunta 16 sobre o parser."}]}}
+{"type":"message","message":{"role":"assistant","stopReason":"stop","usage":{"totalTokens":550000},"content":[{"type":"text","text":"Resposta 16 com texto suficiente para ocupar uma bolha e mais algumas linhas de conversa."}]}}
+{"type":"message","message":{"role":"user","content":[{"type":"text","text":"Pergunta 17 sobre o parser."}]}}
+{"type":"message","message":{"role":"assistant","stopReason":"stop","usage":{"totalTokens":550000},"content":[{"type":"text","text":"Resposta 17 com texto suficiente para ocupar uma bolha e mais algumas linhas de conversa."}]}}
+{"type":"message","message":{"role":"user","content":[{"type":"text","text":"Pergunta 18 sobre o parser."}]}}
+{"type":"message","message":{"role":"assistant","stopReason":"stop","usage":{"totalTokens":550000},"content":[{"type":"text","text":"Resposta 18 com texto suficiente para ocupar uma bolha e mais algumas linhas de conversa."}]}}
+{"type":"message","message":{"role":"user","content":[{"type":"text","text":"Pergunta 19 sobre o parser."}]}}
+{"type":"message","message":{"role":"assistant","stopReason":"stop","usage":{"totalTokens":550000},"content":[{"type":"text","text":"Resposta 19 com texto suficiente para ocupar uma bolha e mais algumas linhas de conversa."}]}}
+{"type":"message","message":{"role":"user","content":[{"type":"text","text":"Pergunta 20 sobre o parser."}]}}
+{"type":"message","message":{"role":"assistant","stopReason":"stop","usage":{"totalTokens":550000},"content":[{"type":"text","text":"Resposta 20 com texto suficiente para ocupar uma bolha e mais algumas linhas de conversa."}]}}

@@ -1,4 +1,5 @@
+{"type":"model_change","model":"opencode-go/deepseek-v4.1-flash"}
 {"type":"message","message":{"role":"user","content":[{"type":"text","text":"Revise o parser e me mostre o diff."}]}}
-{"type":"message","message":{"role":"assistant","content":[{"type":"thinking","thinking":"checking"},{"type":"text","text":"Encontrei um caso de linha truncada:\n\n```rust\nfn parse(line: &str) -> Option<Event> {\n    serde_json::from_str(line).ok()\n}\n```\n\nO buffer mantém a linha parcial."}]}}
+{"type":"message","message":{"role":"assistant","content":[{"type":"thinking","thinking":"checking"},{"type":"text","text":"Encontrei um caso de linha truncada:\n\n```rust\nfn parse(line: &str) -> Option<Event> {\n    serde_json::from_str(line).ok()\n}\n```\n\nO buffer mantém a linha parcial."}],"usage":{"totalTokens":550000}}}
 {"type":"message","message":{"role":"user","content":[{"type":"text","text":"E o status da ferramenta?"}]}}
 {"type":"custom","customType":"tool_execution_start","data":{"toolName":"read_file","toolCallId":"t1","intent":"open parser.rs"}}
